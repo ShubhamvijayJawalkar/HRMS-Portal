@@ -81,10 +81,6 @@ HRMS-Portal is a role-based HR application that helps organizations manage day-t
    python app.py
    ```
 
-5. Open the app in your browser
-   ```text
-   http://127.0.0.1:5000/login
-   ```
 
 ## Docker Setup
 
@@ -100,14 +96,6 @@ The application seeds sample HRMS data, including an admin account that can be u
 
 - Employee ID: EMP001
 - Password: pass123
-
-## API Documentation
-
-Swagger UI is available at:
-
-```text
-http://127.0.0.1:5000/docs/
-```
 
 ## Testing
 
