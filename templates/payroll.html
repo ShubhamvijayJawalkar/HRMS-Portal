@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - Payroll</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
+            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
+            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
+            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
+            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
+            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .navbar-nav .nav-link i { margin-right: 6px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-body { padding: 24px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
+        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
+        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Approved { background: #F0FDF4; color: #166534; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .alert { border-radius: 10px; border: none; }
+        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+        .status-Draft { background: #FEFCE8; color: #92400E; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Finalized { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .net-amount { font-weight: bold; color: #22C55E; }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <h2 class="page-title">Payroll Runs</h2>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">New Payroll Run</h5></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><label class="form-label">Month</label><select id="month" class="form-select"><option value="1">January</option><option value="2">February</option><option value="3">March</option><option value="4">April</option><option value="5">May</option><option value="6">June</option><option value="7">July</option><option value="8">August</option><option value="9">September</option><option value="10">October</option><option value="11">November</option><option value="12">December</option></select></div>
+                <div class="col-md-2"><label class="form-label">Year</label><input id="year" class="form-control" value="2026"></div>
+                <div class="col-md-2"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="runPayroll()">Generate</button></div>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Payroll History</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Period</th><th>Processed At</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody id="runsTable"><tr><td colspan="4" class="text-center text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Run Items</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Employee</th><th>Gross</th><th>Deductions</th><th>Net</th><th>PF</th><th>ESI</th><th>PT</th><th>Payslip</th></tr></thead>
+                    <tbody id="itemsTable"><tr><td colspan="8" class="text-center text-muted">Select a run to view items</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', loadRuns);
+async function loadRuns() {
+    const r = await fetch('/api/payroll-runs');
+    const data = await r.json();
+    const tbody = document.getElementById('runsTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No runs</td></tr>'; return; }
+    tbody.innerHTML = data.map(run => {
+        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        const actions = run.status === 'Draft' ? `<button class="btn btn-success btn-sm" onclick="finalizeRun(${run.id})">Finalize</button> <button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>` : `<button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`;
+        return `<tr><td><strong>${months[run.month-1]} ${run.year}</strong></td><td>${run.processed_at ? new Date(run.processed_at).toLocaleString() : '-'}</td><td><span class="status-${run.status}">${run.status}</span></td><td>${actions}</td></tr>`;
+    }).join('');
+}
+async function runPayroll() {
+    const body = { month: parseInt(document.getElementById('month').value), year: parseInt(document.getElementById('year').value) };
+    const r = await fetch('/api/payroll-runs', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const res = await r.json();
+    if (r.ok) { loadRuns(); alert(res.message); } else alert(res.error);
+}
+async function finalizeRun(id) {
+    if (!confirm('Finalize this payroll run?')) return;
+    const r = await fetch(`/api/payroll-runs/${id}/finalize`, { method:'POST' });
+    if (r.ok) loadRuns(); else alert('Failed');
+}
+async function loadItems(runId) {
+    const r = await fetch(`/api/payroll-runs/${runId}/items`);
+    const data = await r.json();
+    const tbody = document.getElementById('itemsTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No items</td></tr>'; return; }
+    tbody.innerHTML = data.map(i => `<tr>
+        <td><strong>${i.employee}</strong><br><small class="text-muted">${i.emp_id}</small></td>
+        <td>${i.gross.toFixed(2)}</td><td>${i.deductions.toFixed(2)}</td>
+        <td class="net-amount">${i.net.toFixed(2)}</td>
+        <td>${i.pf.toFixed(2)}</td><td>${i.esi.toFixed(2)}</td><td>${i.pt.toFixed(2)}</td>
+        <td>${i.payslip_generated ? 'Yes' : '-'}</td>
+    </tr>`).join('');
+}
+</script>
+</body>
+</html>

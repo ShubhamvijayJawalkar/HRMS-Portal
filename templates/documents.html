@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - My Documents</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
+            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
+            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
+            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
+            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
+            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .navbar-nav .nav-link i { margin-right: 6px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-body { padding: 24px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
+        .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
+        .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; }
+        .page-header-badge { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
+        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
+        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Approved { background: #F0FDF4; color: #166534; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .alert { border-radius: 10px; border: none; }
+    </style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <div class="page-header">
+        <div>
+            <div class="eyebrow">Documents</div>
+            <h2 class="page-title">My Documents</h2>
+        </div>
+        <div class="page-header-badge">Secure uploads</div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Upload New</h5></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-4"><label class="form-label">Category</label><select id="catSelect" class="form-select"><option>Offer Letter</option><option>ID Proof</option><option>Address Proof</option><option>Education</option><option>Certification</option><option>Other</option></select></div>
+                <div class="col-md-4"><label class="form-label">File</label><input id="fileInput" class="form-control" type="file"></div>
+                <div class="col-md-4"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="uploadDoc()">Upload</button></div>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">My Documents</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Name</th><th>Category</th><th>Size</th><th>Uploaded</th><th>Actions</th></tr></thead>
+                    <tbody id="docsTable"><tr><td colspan="5" class="text-center text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', loadDocs);
+async function loadDocs() {
+    const r = await fetch('/api/documents');
+    const data = await r.json();
+    const tbody = document.getElementById('docsTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No documents</td></tr>'; return; }
+    tbody.innerHTML = data.map(d => {
+        const sz = d.file_size ? (d.file_size / 1024).toFixed(1) + ' KB' : '-';
+        return `<tr>
+            <td>${d.name}</td><td>${d.category}</td><td>${sz}</td>
+            <td>${d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString() : '-'}</td>
+            <td><a class="btn btn-sm btn-outline-primary" href="/api/documents/${d.id}/download">Download</a> <button class="btn btn-sm btn-outline-danger" onclick="deleteDoc(${d.id})">Delete</button></td>
+        </tr>`;
+    }).join('');
+}
+async function uploadDoc() {
+    const file = document.getElementById('fileInput').files[0];
+    if (!file) return alert('Select a file');
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('category', document.getElementById('catSelect').value);
+    const r = await fetch('/api/upload', { method:'POST', body: fd });
+    if (r.ok) { loadDocs(); document.getElementById('fileInput').value = ''; } else alert((await r.json()).error);
+}
+async function deleteDoc(id) {
+    if (!confirm('Delete this document?')) return;
+    const r = await fetch(`/api/documents/${id}`, { method:'DELETE' });
+    if (r.ok) loadDocs(); else alert('Failed');
+}
+</script>
+</body>
+</html>

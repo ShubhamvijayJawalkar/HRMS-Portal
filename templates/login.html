@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - Login</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0F172A;
+            --primary-light: #1E293B;
+            --secondary: #334155;
+            --accent: #0369A1;
+            --accent-light: #E0F2FE;
+            --background: #F8FAFC;
+            --surface: #FFFFFF;
+            --text: #020617;
+            --text-muted: #64748B;
+            --muted: #E8ECF1;
+            --border: #E2E8F0;
+            --destructive: #DC2626;
+            --success: #22C55E;
+            --warning: #EAB308;
+            --card-radius: 16px;
+            --button-radius: 10px;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 40px rgba(15,23,42,0.15);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #0F172A 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        .login-container { width: 100%; max-width: 520px; }
+        .brand { text-align: center; margin-bottom: 28px; }
+        .brand-icon { width: 56px; height: 56px; background: rgba(255,255,255,0.12); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; backdrop-filter: blur(8px); }
+        .brand-icon i { font-size: 28px; color: #60A5FA; }
+        .brand h1 { color: #FFFFFF; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; margin: 0; }
+        .brand p { color: #94A3B8; font-size: 14px; margin: 4px 0 0; }
+        .card { background: rgba(255,255,255,0.98); border-radius: var(--card-radius); box-shadow: var(--shadow-lg); padding: 36px; border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(20px); }
+        .card h2 { color: var(--text); font-weight: 800; font-size: 20px; text-align: center; margin-bottom: 4px; letter-spacing: -0.3px; }
+        .card .subtitle { color: var(--text-muted); font-size: 14px; text-align: center; margin-bottom: 24px; }
+        .form-label { font-weight: 600; color: var(--text); margin-bottom: 6px; font-size: 13px; }
+        .form-control { border: 1.5px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 14px; background: var(--background); transition: all 0.2s; }
+        .form-control:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control::placeholder { color: #94A3B8; font-size: 13px; }
+        .input-group-text { background: var(--background); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text-muted); }
+        .btn-login { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: var(--button-radius); font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.25s; letter-spacing: 0.3px; }
+        .btn-login:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(15,23,42,0.25); }
+        .btn-login:active { transform: translateY(0); }
+        .btn-login:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .forgot-link { color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; transition: color 0.2s; }
+        .forgot-link:hover { color: #075985; text-decoration: underline; }
+        hr { margin: 24px 0; border-color: var(--border); opacity: 0.6; }
+        .credentials-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--text); margin-bottom: 12px; }
+        .credentials-title i { color: var(--accent); }
+        .table { margin: 0; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 10px 8px; background: #F1F5F9; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; padding: 8px; font-size: 13px; border-color: var(--border); }
+        .table tbody tr:hover { background: #F8FAFC; }
+        .pass-badge { background: #F0FDF4; color: #166534; font-weight: 600; padding: 2px 10px; border-radius: 20px; font-size: 12px; display: inline-block; }
+        .error-message { color: var(--destructive); font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #FEF2F2; padding: 8px 12px; border-radius: 8px; }
+        .success-message { color: #166534; font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #F0FDF4; padding: 8px 12px; border-radius: 8px; }
+        .role-badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+        .role-badge.admin { background: #F1F5F9; color: var(--primary); }
+        .role-badge.employee { background: #EFF6FF; color: var(--accent); }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+    </style>
+</head>
+<body>
+<div class="login-container">
+    <div class="brand">
+        <div class="brand-icon"><i class="bi bi-building"></i></div>
+        <h1>HRMS Portal</h1>
+        <p>Employee &amp; Break Management System</p>
+    </div>
+    <div class="card">
+        <h2>Welcome Back</h2>
+        <p class="subtitle">Sign in to your account</p>
+
+        <form id="loginForm" autocomplete="off">
+            <div class="mb-3">
+                <label for="empId" class="form-label">Employee ID</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-person-badge"></i></span>
+                    <input type="text" id="empId" class="form-control" placeholder="e.g. EMP001" required autocomplete="off">
+                </div>
+            </div>
+            <div class="mb-3">
+                <label for="password" class="form-label">Password</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-lock"></i></span>
+                    <input type="password" id="password" class="form-control" placeholder="Enter password" required autocomplete="off">
+                </div>
+            </div>
+            <button type="submit" class="btn-login" id="loginBtn">
+                <span id="loginBtnText">Sign In</span>
+                <span id="loginBtnSpinner" class="spinner-border spinner-border-sm d-none" role="status"></span>
+            </button>
+            <div class="text-center mt-3">
+                <a href="#" onclick="showForgotPassword()" class="forgot-link"><i class="bi bi-shield-exclamation me-1"></i>Forgot Password?</a>
+            </div>
+            <div class="error-message" id="errorMsg"></div>
+            <div class="success-message" id="successMsg"></div>
+        </form>
+
+        <hr>
+        <div class="credentials-title"><i class="bi bi-people-fill"></i> User Credentials</div>
+        <div class="table-responsive" style="max-height:320px;overflow-y:auto;">
+            <table class="table table-hover">
+                <thead><tr><th>ID</th><th>Name</th><th>Role</th><th>Department</th><th>Password</th></tr></thead>
+                <tbody id="credentialsTable">
+                    <tr><td colspan="5" class="text-center text-muted">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('loginForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const empId = document.getElementById('empId').value.trim().toUpperCase();
+    const password = document.getElementById('password').value;
+    const errorMsg = document.getElementById('errorMsg');
+    const successMsg = document.getElementById('successMsg');
+    const btn = document.getElementById('loginBtn');
+    const btnText = document.getElementById('loginBtnText');
+    const spinner = document.getElementById('loginBtnSpinner');
+    errorMsg.style.display = 'none'; successMsg.style.display = 'none';
+    if (!empId || !password) { errorMsg.textContent = 'Please fill in all fields'; errorMsg.style.display = 'block'; return; }
+    btn.disabled = true; btnText.textContent = 'Signing in...'; spinner.classList.remove('d-none');
+    try {
+        const response = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: empId, password: password }) });
+        const data = await response.json();
+        if (!response.ok) { errorMsg.textContent = data.error || 'Login failed'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); return; }
+        localStorage.setItem('userName', data.name || empId);
+        successMsg.textContent = 'Login successful! Redirecting...';
+        successMsg.style.display = 'block';
+        setTimeout(() => { window.location.href = data.redirect; }, 800);
+    } catch (error) { errorMsg.textContent = 'Connection error. Please try again.'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); }
+});
+
+async function loadCredentials() {
+    try {
+        const r = await fetch('/api/credentials');
+        const users = await r.json();
+        document.getElementById('credentialsTable').innerHTML = users.map(u => `
+            <tr>
+                <td><strong>${u.emp_id}</strong></td>
+                <td>${u.name}</td>
+                <td><span class="role-badge ${u.role === 'admin' ? 'admin' : 'employee'}">${u.role}</span></td>
+                <td>${u.department || '-'}</td>
+                <td><span class="pass-badge"><i class="bi bi-key-fill me-1" style="font-size:10px;"></i>${u.password}</span></td>
+            </tr>
+        `).join('');
+    } catch(e) {
+        document.getElementById('credentialsTable').innerHTML = '<tr><td colspan="5" class="text-center text-danger">Failed to load credentials</td></tr>';
+    }
+}
+
+async function showForgotPassword() {
+    const empId = prompt('Enter your Employee ID:');
+    if (!empId) return;
+    const email = prompt('Enter your registered email:');
+    if (!email) return;
+    try {
+        const r = await fetch('/api/forgot-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: empId, email: email }) });
+        const data = await r.json();
+        alert(data.message || 'If details match, an email has been sent.');
+    } catch(e) { alert('Error processing request'); }
+}
+
+loadCredentials();
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

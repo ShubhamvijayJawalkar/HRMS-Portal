@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  hrms:
+    build: .
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./hrms.duckdb:/app/hrms.duckdb
+    environment:
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - FLASK_DEBUG=0
+      - FLASK_ENV=production
+      - LOG_LEVEL=INFO
+    restart: unless-stopped

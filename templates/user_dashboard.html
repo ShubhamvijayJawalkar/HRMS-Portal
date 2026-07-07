@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
+            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
+            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
+            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
+            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
+            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 22px 20px; box-shadow: var(--shadow-sm); transition: all 0.25s; height: 100%; }
+        .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+        .stat-icon { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 10px; }
+        .stat-value { font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
+        .stat-label { color: var(--text-muted); font-size: 13px; font-weight: 500; }
+        .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 10px 20px; border-radius: 10px; transition: all 0.2s; font-size: 14px; }
+        .nav-pills .nav-link:hover { background: #E2E8F0; color: var(--text); }
+        .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(15,23,42,0.25); }
+        .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 24px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
+        .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 22px 18px; box-shadow: var(--shadow-sm); transition: all 0.3s; cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
+        .module-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
+        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; }
+        .module-icon { width: 46px; height: 46px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 10px; }
+        .module-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+        .module-desc { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
+        .card-header-custom { background: var(--primary); color: white; padding: 14px 20px; border-radius: 12px 12px 0 0; font-weight: 700; font-size: 14px; }
+        .card-header-custom i { margin-right: 8px; color: #60A5FA; }
+        .break-type-btn { margin: 6px; background: #F8FAFC; color: var(--text); border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 18px; font-weight: 600; transition: all 0.2s; font-size: 13px; }
+        .break-type-btn:hover { background: var(--primary); color: white; border-color: var(--primary); transform: translateY(-1px); }
+        .break-item { border-left: 4px solid var(--primary); padding: 14px 16px; margin-bottom: 10px; background: #F8FAFC; border-radius: 10px; }
+        .break-item.completed { border-left-color: var(--success); }
+        .break-item.active { border-left-color: var(--warning); background: #FEFCE8; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+        .status-badge.active { background: #FEFCE8; color: #92400E; }
+        .status-badge.completed { background: #F0FDF4; color: #166534; }
+        .time-display { font-size: 28px; font-weight: 800; color: var(--text); margin: 16px 0; letter-spacing: -0.5px; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .notification-item { border-left: 3px solid var(--accent); padding: 12px 14px; margin-bottom: 8px; background: #F8FAFC; border-radius: 10px; transition: background 0.2s; }
+        .notification-item:hover { background: #F1F5F9; }
+        .notif-badge { position: absolute; top: -4px; right: -4px; font-size: 10px; padding: 2px 6px; border-radius: 50%; }
+        .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .live-dot.green { background: var(--success); }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+        .pulse { animation: pulse 2s infinite; }
+    </style>
+</head>
+<body>
+{% include "_navbar.html" %}
+
+
+<div class="container-fluid p-4">
+    <!-- Stats -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:#EFF6FF;color:var(--accent);"><i class="bi bi-clock-fill"></i></div><div class="stat-value" id="todayLogins">0</div><div class="stat-label">Total Logins Today</div></div></div>
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-stopwatch-fill"></i></div><div class="stat-value" id="totalLoginHours">0</div><div class="stat-label">Login Hours</div></div></div>
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="totalBreakTime">0 min</div><div class="stat-label">Total Break Time</div></div></div>
+    </div>
+
+    <!-- Tabs -->
+    <ul class="nav nav-pills mb-0" id="dashTabs" role="tablist">
+        <li class="nav-item"><button class="nav-link active" id="modules-tab" data-bs-toggle="pill" data-bs-target="#modules" type="button"><i class="bi bi-grid-3x3-gap-fill me-2"></i>Modules</button></li>
+        <li class="nav-item"><button class="nav-link" id="breaktab" data-bs-toggle="pill" data-bs-target="#breakpanel" type="button"><i class="bi bi-cup-hot-fill me-2"></i>Breaks</button></li>
+        <li class="nav-item"><button class="nav-link" id="activitytab" data-bs-toggle="pill" data-bs-target="#activitypanel" type="button"><i class="bi bi-activity me-2"></i>My Activity</button></li>
+    </ul>
+
+    <div class="tab-content" id="dashTabContent">
+        <!-- Modules -->
+        <div class="tab-pane fade show active" id="modules" role="tabpanel">
+            <div class="row g-3">
+                <div class="col-md-4"><a href="/leaves" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-calendar-check-fill"></i></div><div class="module-title">Leaves</div><div class="module-desc">Apply for leave & track balance</div></a></div>
+                <div class="col-md-4"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Fix missing or incorrect attendance</div></a></div>
+                <div class="col-md-4"><a href="/onboarding" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-rocket-takeoff-fill"></i></div><div class="module-title">Onboarding</div><div class="module-desc">Track your onboarding tasks</div></a></div>
+                <div class="col-md-4"><a href="/goals" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-bullseye"></i></div><div class="module-title">Goals</div><div class="module-desc">Set personal performance goals</div></a></div>
+                <div class="col-md-4"><a href="/expenses" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-receipt-cutoff"></i></div><div class="module-title">Expenses</div><div class="module-desc">Submit expense claims</div></a></div>
+                <div class="col-md-4"><a href="/tickets" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-ticket-perforated-fill"></i></div><div class="module-title">Tickets</div><div class="module-desc">Raise support requests</div></a></div>
+                <div class="col-md-4"><a href="/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-text-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Upload & manage your files</div></a></div>
+                <div class="col-md-4"><a href="/profile" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-person-fill-gear"></i></div><div class="module-title">Profile</div><div class="module-desc">Edit personal details & dependents</div></a></div>
+            </div>
+        </div>
+
+        <!-- Breaks -->
+        <div class="tab-pane fade" id="breakpanel" role="tabpanel">
+            <div class="row g-3">
+                <div class="col-lg-5"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-plus-circle-fill"></i>Request Break</div><div class="card-body"><p class="text-muted mb-3" style="font-size:13px;">Select a break type to start:</p><div id="breakTypesContainer"></div><div id="breakMessage" style="margin-top:16px;display:none;"><small id="breakMessageText" class="text-success"></small></div></div></div></div>
+                <div class="col-lg-3"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Break</div><div class="card-body text-center"><div id="activeBreakInfo"><p class="text-muted mb-0">No active break</p></div></div></div></div>
+                <div class="col-lg-4"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-info-circle-fill"></i>Break Types</div><div class="card-body"><div id="availableBreaksContainer"></div></div></div></div>
+            </div>
+            <div class="row g-3 mt-2">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-clock-history"></i>Today's Breaks</div><div class="card-body"><div id="breaksHistoryContainer"></div></div></div></div>
+            </div>
+        </div>
+
+        <!-- Activity -->
+        <div class="tab-pane fade" id="activitypanel" role="tabpanel">
+            <div class="row g-3">
+                <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-door-open-fill"></i>Login Sessions Today</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Login</th><th>Logout</th><th>Duration</th></tr></thead><tbody id="loginSessionsTable"><tr><td colspan="3" class="text-center text-muted py-4">No sessions</td></tr></tbody></table></div></div></div></div>
+                <div class="col-lg-3"><div class="card border-0 shadow-sm h-100"><div class="card-header-custom"><i class="bi bi-balloon-heart-fill"></i>Upcoming Holidays</div><div class="card-body"><div id="holidaysContainer"><p class="text-muted mb-0">Loading...</p></div></div></div></div>
+                <div class="col-lg-3"><div class="card border-0 shadow-sm h-100"><div class="card-header-custom position-relative"><i class="bi bi-bell-fill"></i>Notifications<span id="notifBadge" class="badge bg-danger notif-badge" style="display:none;">0</span></div><div class="card-body"><div id="notificationsContainer"><p class="text-muted mb-0">Loading...</p></div></div></div></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    loadUserInfo(); loadAvailableBreaks(); loadUserBreaks(); loadLoginHours(); checkActiveBreak(); loadHolidays(); loadNotifications();
+    setInterval(checkActiveBreak, 5000); setInterval(loadUserBreaks, 10000);
+});
+function loadUserInfo() {
+    fetch('/api/profile').then(r=>r.json()).then(d=>{
+        document.getElementById('userName').textContent=d.name;
+        document.getElementById('userInitial').textContent=d.name.charAt(0).toUpperCase();
+        localStorage.setItem('userName',d.name);
+    }).catch(()=>{
+        const n=localStorage.getItem('userName')||'Employee';
+        document.getElementById('userName').textContent=n;
+        document.getElementById('userInitial').textContent=n.charAt(0).toUpperCase();
+    });
+}
+function loadAvailableBreaks() {
+    fetch('/api/break-types').then(r=>r.json()).then(breaks=>{
+        const c1=document.getElementById('breakTypesContainer'), c2=document.getElementById('availableBreaksContainer');
+        c1.innerHTML=''; c2.innerHTML='';
+        breaks.forEach(b=>{
+            const btn=document.createElement('button'); btn.className='btn break-type-btn';
+            btn.textContent=`${b.break_type} (${b.daily_limit_minutes} min)`;
+            btn.onclick=()=>startBreak(b.break_type); c1.appendChild(btn);
+            c2.innerHTML+=`<div class="break-item py-2 px-3 mb-2"><strong>${b.break_type}</strong><br><small class="text-muted" style="font-size:11px;">${b.description}</small></div>`;
+        });
+    }).catch(()=>{});
+}
+function startBreak(breakType) {
+    fetch('/api/start-break',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({break_type:breakType})})
+        .then(r=>r.json()).then(d=>{if(d.break_id){localStorage.setItem('activeBreakId',d.break_id);checkActiveBreak();showMsg('Break started!','success');}else showMsg(d.error||'Failed','error');})
+        .catch(()=>showMsg('Error starting break','error'));
+}
+function endBreak() {
+    const id=localStorage.getItem('activeBreakId'); if(!id) return;
+    fetch(`/api/end-break/${id}`,{method:'POST'}).then(r=>r.json()).then(d=>{localStorage.removeItem('activeBreakId');checkActiveBreak();loadUserBreaks();showMsg(`Break ended: ${d.duration_minutes} min`,'success');}).catch(()=>showMsg('Failed to end break','error'));
+}
+function checkActiveBreak() {
+    fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
+        const ab=breaks.find(b=>b.status==='Active'); const c=document.getElementById('activeBreakInfo');
+        if(ab){const el=calcElapsed(ab.start_time);c.innerHTML=`<div class="p-3"><h5 class="mb-1" style="font-weight:700;">${ab.break_type} Break</h5><small class="text-muted">Started ${ab.start_time}</small><div class="time-display">${el} min</div><button class="btn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:8px 24px;" onclick="endBreak()"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;localStorage.setItem('activeBreakId',ab.break_id);
+        }else{c.innerHTML='<p class="text-muted mb-0">No active break</p>';localStorage.removeItem('activeBreakId');}
+    }).catch(()=>{});
+}
+function loadUserBreaks() {
+    fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
+        const c=document.getElementById('breaksHistoryContainer'), bt=document.getElementById('totalBreakTime');
+        if(!breaks.length){c.innerHTML='<p class="text-muted mb-0">No breaks today</p>';bt.textContent='0 min';return;}
+        c.innerHTML=breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${b.break_type}</strong> <span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></div><div class="text-end"><small class="text-muted">${b.start_time} - ${b.end_time||'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
+        bt.textContent=breaks.filter(b=>b.status==='Completed').reduce((s,b)=>s+b.duration_minutes,0)+' min';
+    }).catch(()=>{});
+}
+function loadLoginHours() {
+    fetch('/api/login-hours').then(r=>r.json()).then(sessions=>{
+        const tbody=document.getElementById('loginSessionsTable');
+        document.getElementById('todayLogins').textContent=sessions.length;
+        if(!sessions.length){tbody.innerHTML='<tr><td colspan="3" class="text-center text-muted py-4">No sessions</td></tr>';document.getElementById('totalLoginHours').textContent='0';return;}
+        tbody.innerHTML=sessions.map(s=>`<tr><td>${s.login_time}</td><td>${s.logout_time||'-'}</td><td>${s.total_hours.toFixed(2)} hrs</td></tr>`).join('');
+        document.getElementById('totalLoginHours').textContent=sessions.reduce((sum,s)=>sum+s.total_hours,0).toFixed(2);
+    }).catch(()=>{});
+}
+function calcElapsed(t){const[h,m,s]=t.split(':').map(Number);const st=new Date();st.setHours(h,m,s);return Math.max(0,Math.floor((new Date()-st)/60000));}
+function showMsg(text,type){const d=document.getElementById('breakMessage');document.getElementById('breakMessageText').textContent=text;document.getElementById('breakMessageText').className=type==='success'?'text-success':'text-danger';d.style.display='block';setTimeout(()=>d.style.display='none',3000);}
+async function loadHolidays(){const r=await fetch('/api/holidays');const data=await r.json();const c=document.getElementById('holidaysContainer');const now=new Date();const upcoming=data.filter(h=>new Date(h.date)>=now).sort((a,b)=>new Date(a.date)-new Date(b.date)).slice(0,5);if(!upcoming.length){c.innerHTML='<p class="text-muted mb-0">No upcoming holidays</p>';return;}c.innerHTML=upcoming.map(h=>`<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:#F8FAFC;border-radius:8px;"><span><strong style="font-size:13px;">${esc(h.name)}</strong><br><small class="text-muted">${h.date}</small></span><span class="badge ${h.type==='National'?'bg-primary':'bg-warning text-dark'} rounded-pill">${h.type}</span></div>`).join('');}
+async function loadNotifications(){const r=await fetch('/api/notifications');const data=await r.json();const b=document.getElementById('notifBadge');if(data.unread>0){b.style.display='inline';b.textContent=data.unread;}else b.style.display='none';const c=document.getElementById('notificationsContainer');const items=data.data.slice(0,5);if(!items.length){c.innerHTML='<p class="text-muted mb-0">No notifications</p>';return;}c.innerHTML=items.map(n=>`<div class="notification-item ${n.is_read?'':'fw-bold'}" style="${n.is_read?'':'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');if(data.unread>0){fetch('/api/notifications/read',{method:'POST'});}}setInterval(loadNotifications,30000);
+function esc(t){const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'};return(t||'').replace(/[&<>"']/g,c=>m[c]);}
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

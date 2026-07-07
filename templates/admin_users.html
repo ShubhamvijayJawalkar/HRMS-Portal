@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - User Management</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
+            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
+            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
+            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
+            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
+            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-body { padding: 24px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
+        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .alert { border-radius: 10px; border: none; }
+        .status-badge { padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status-active { background: #d4edda; color: #155724; }
+        .status-blocked { background: #f8d7da; color: #721c24; }
+        .status-restricted { background: #fff3cd; color: #856404; }
+        .permission-badge { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; margin: 2px; display: inline-block; }
+        .permission-allowed { background: #d1e7dd; color: #0f5132; }
+        .permission-denied { background: #f8d7da; color: #842029; }
+        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+        .form-section { background: var(--surface); border-radius: var(--card-radius); padding: 0; margin-bottom: 20px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); overflow: hidden; }
+        .section-header { background: var(--primary); color: white; padding: 18px 24px; font-size: 16px; font-weight: 700; letter-spacing: -0.25px; }
+        .section-header small { display: block; color: rgba(255,255,255,0.75); margin-top: 4px; font-weight: 500; }
+        .section-body { padding: 24px; }
+        .message { padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: none; }
+        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; display: block; }
+        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; display: block; }
+        .nav-tabs { border-bottom: 2px solid var(--border); }
+        .nav-tabs .nav-link { color: var(--text); border: none; border-bottom: 3px solid transparent; font-weight: 600; padding: 10px 16px; }
+        .nav-tabs .nav-link:hover { border-bottom-color: #94A3B8; }
+        .nav-tabs .nav-link.active { background: transparent; border-bottom-color: var(--primary); color: var(--primary); }
+        .checkbox-group { display: flex; gap: 20px; flex-wrap: wrap; }
+        .checkbox-item { display: flex; align-items: center; gap: 8px; }
+        .checkbox-item input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+        .checkbox-item label { margin: 0; cursor: pointer; font-weight: 500; color: var(--text); }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <h2 class="page-title">User Management</h2>
+    <div id="successMsg" class="message success"></div>
+    <div id="errorMsg" class="message error"></div>
+    <ul class="nav nav-tabs mb-4" role="tablist">
+        <li class="nav-item"><button class="nav-link active" id="create-tab" data-bs-toggle="tab" data-bs-target="#createTab">+ Create User</button></li>
+        <li class="nav-item"><button class="nav-link" id="manage-tab" data-bs-toggle="tab" data-bs-target="#manageTab">Manage Users</button></li>
+    </ul>
+    <div class="tab-content">
+        <div class="tab-pane fade show active" id="createTab">
+            <div class="form-section">
+                <div class="section-header">Create New User<small>Quickly add employees with role and access controls.</small></div>
+                <div class="section-body">
+                    <form id="createUserForm">
+                    <div class="row">
+                        <div class="col-md-6 mb-3"><label for="empId" class="form-label">Employee ID *</label><input type="text" id="empId" class="form-control" placeholder="e.g., EMP002" required></div>
+                        <div class="col-md-6 mb-3"><label for="name" class="form-label">Full Name *</label><input type="text" id="name" class="form-control" placeholder="John Doe" required></div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3"><label for="email" class="form-label">Email *</label><input type="email" id="email" class="form-control" placeholder="john@company.com" required></div>
+                        <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option></select></div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
+                        <div class="col-md-6 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
+                    </div>
+                    <div class="row mb-4">
+                        <div class="col-md-12">
+                            <label class="form-label d-block mb-3">Permissions</label>
+                            <div class="checkbox-group">
+                                <div class="checkbox-item"><input type="checkbox" id="allowLogin" checked><label for="allowLogin">Allow Login</label></div>
+                                <div class="checkbox-item"><input type="checkbox" id="allowBreaks" checked><label for="allowBreaks">Allow Breaks</label></div>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary btn-lg">Create User</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    <div class="tab-pane fade" id="manageTab">
+            <div class="form-section">
+                <div class="section-header">All Users<small>View, edit, and manage employee access from one place.</small></div>
+                <div class="section-body">
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h5 class="mb-0">All Users</h5>
+                            <span id="userCount" class="text-white-50"></span>
+                        </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead>
+                            <tbody id="usersTableBody"><tr><td colspan="8" class="text-center text-muted">Loading...</td></tr></tbody>
+                        </table>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mt-3">
+                        <button class="btn btn-outline-secondary btn-sm" onclick="prevPage()">&larr; Previous</button>
+                        <span id="pageInfo" class="text-muted">Page 1</span>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="nextPage()">Next &rarr;</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</div>
+</div>
+<div class="modal fade" id="editUserModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header" style="background: #1e293b; color: white;"><h5 class="modal-title">Edit User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <form id="editUserForm">
+                    <input type="hidden" id="editEmpId">
+                    <div class="row">
+                        <div class="col-md-6 mb-3"><label class="form-label">Full Name</label><input type="text" id="editName" class="form-control" required></div>
+                        <div class="col-md-6 mb-3"><label class="form-label">Email</label><input type="email" id="editEmail" class="form-control" required></div>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6 mb-3"><label class="form-label">Department</label><select id="editDepartment" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option></select></div>
+                        <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <label class="form-label d-block mb-3">Permissions</label>
+                            <div class="checkbox-group">
+                                <div class="checkbox-item"><input type="checkbox" id="editAllowLogin"><label for="editAllowLogin">Allow Login</label></div>
+                                <div class="checkbox-item"><input type="checkbox" id="editAllowBreaks"><label for="editAllowBreaks">Allow Breaks</label></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row"><div class="col-md-12 mb-3"><label class="form-label">Status</label><select id="editStatus" class="form-select" required><option>Active</option><option>Blocked</option></select></div></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveUserChanges()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+let currentPage = 1;
+let totalUsers = 0;
+const PER_PAGE = 20;
+document.getElementById('manage-tab').addEventListener('click', () => loadUsers(1));
+document.getElementById('createUserForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const d = { emp_id: document.getElementById('empId').value.trim().toUpperCase(), name: document.getElementById('name').value.trim(), email: document.getElementById('email').value.trim(), department: document.getElementById('department').value || '', role: document.getElementById('role').value, password: document.getElementById('password').value || 'pass123', allow_login: document.getElementById('allowLogin').checked ? 1 : 0, allow_breaks: document.getElementById('allowBreaks').checked ? 1 : 0 };
+    if (!d.emp_id || !d.name || !d.email) { showMsg('Fill required fields', 'error'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { showMsg('Invalid email', 'error'); return; }
+    const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
+    showMsg('User created!', 'success');
+    document.getElementById('createUserForm').reset();
+    document.getElementById('allowLogin').checked = true;
+    document.getElementById('allowBreaks').checked = true;
+});
+function loadUsers(page) {
+    currentPage = page || 1;
+    fetch(`/api/users?page=${currentPage}&per_page=${PER_PAGE}`).then(r => r.json()).then(d => {
+        totalUsers = d.total;
+        const tbody = document.getElementById('usersTableBody');
+        document.getElementById('userCount').textContent = `Total: ${d.total}`;
+        document.getElementById('pageInfo').textContent = `Page ${d.page} of ${Math.ceil(d.total/PER_PAGE) || 1}`;
+        if (!d.data.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No users</td></tr>'; return; }
+        tbody.innerHTML = d.data.map(u => `<tr><td><strong>${esc(u.emp_id)}</strong></td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.department||'N/A')}</td><td>${esc(u.role)}</td><td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td><td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td><td><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')">Edit</button> <button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button></td></tr>`).join('');
+    }).catch(() => showMsg('Failed to load users', 'error'));
+}
+async function openEditModal(id) {
+    const r = await fetch(`/api/users/${id}`);
+    const u = await r.json();
+    document.getElementById('editEmpId').value = u.emp_id;
+    document.getElementById('editName').value = u.name;
+    document.getElementById('editEmail').value = u.email;
+    document.getElementById('editDepartment').value = u.department || '';
+    document.getElementById('editRole').value = u.role;
+    document.getElementById('editStatus').value = u.status;
+    document.getElementById('editAllowLogin').checked = !!u.allow_login;
+    document.getElementById('editAllowBreaks').checked = !!u.allow_breaks;
+    new bootstrap.Modal(document.getElementById('editUserModal')).show();
+}
+async function saveUserChanges() {
+    const id = document.getElementById('editEmpId').value;
+    const d = { name: document.getElementById('editName').value.trim(), email: document.getElementById('editEmail').value.trim(), department: document.getElementById('editDepartment').value || '', role: document.getElementById('editRole').value, status: document.getElementById('editStatus').value, allow_login: document.getElementById('editAllowLogin').checked?1:0, allow_breaks: document.getElementById('editAllowBreaks').checked?1:0 };
+    const r = await fetch(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error||'Failed', 'error'); return; }
+    showMsg('User updated!', 'success');
+    bootstrap.Modal.getInstance(document.getElementById('editUserModal')).hide();
+    loadUsers(currentPage);
+}
+async function toggleStatus(id, status) {
+    if (!confirm(`Sure to ${status==='Active'?'block':'unblock'}?`)) return;
+    const ep = status==='Active' ? 'block' : 'unblock';
+    const r = await fetch(`/api/users/${id}/${ep}`, { method: 'POST' });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error||'Failed', 'error'); return; }
+    showMsg(res.message, 'success');
+    loadUsers(currentPage);
+}
+function nextPage() { if (currentPage * PER_PAGE < totalUsers) loadUsers(currentPage + 1); }
+function prevPage() { if (currentPage > 1) loadUsers(currentPage - 1); }
+function showMsg(text, type) {
+    const s = document.getElementById('successMsg'), e = document.getElementById('errorMsg');
+    if (type==='success') { s.textContent=text; s.classList.add('success'); setTimeout(()=>s.classList.remove('success'),3000); }
+    else { e.textContent=text; e.classList.add('error'); setTimeout(()=>e.classList.remove('error'),3000); }
+}
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Environment
+.env
+
+# Database
+*.duckdb
+*.duckdb.wal
+
+# Generated / Build
+ppt_screenshots/
+*.pptx
+uploads/*
+
+# IDE / Config
+.DS_Store
+.opencode/
+
+# Dev utilities
+scripts/
+generate_ppt.py

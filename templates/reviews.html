@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - Performance Reviews</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root {
+            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
+            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
+            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
+            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
+            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
+            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+        }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .navbar-nav .nav-link i { margin-right: 6px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-body { padding: 24px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
+        .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
+        .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; }
+        .page-header-badge { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
+        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
+        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Approved { background: #F0FDF4; color: #166534; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .alert { border-radius: 10px; border: none; }
+        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+        .status-Draft { background: #fff3cd; color: #856404; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status-Submitted { background: #d4edda; color: #155724; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    </style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <div class="page-header">
+        <div>
+            <div class="eyebrow">Performance</div>
+            <h2 class="page-title">Performance Reviews</h2>
+        </div>
+        <div class="page-header-badge">Growth focus</div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">New Review</h5></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><label class="form-label">Employee</label><select id="empSelect" class="form-select"></select></div>
+                <div class="col-md-3"><label class="form-label">Reviewer</label><select id="reviewerSelect" class="form-select"></select></div>
+                <div class="col-md-3"><label class="form-label">Period</label><input id="period" class="form-control" placeholder="Q1 2026"></div>
+                <div class="col-md-3"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="createReview()">Create</button></div>
+            </div>
+        </div>
+    </div>
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">All Reviews</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Employee</th><th>Reviewer</th><th>Period</th><th>Rating</th><th>Status</th><th>Submitted</th></tr></thead>
+                    <tbody id="reviewsTable"><tr><td colspan="6" class="text-center text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const r = await fetch('/api/users?active=1');
+    const users = await r.json();
+    ['empSelect','reviewerSelect'].forEach(id => {
+        const sel = document.getElementById(id);
+        users.data.forEach(u => { const o = document.createElement('option'); o.value = u.emp_id; o.textContent = `${u.name} (${u.emp_id})`; sel.appendChild(o); });
+    });
+    loadReviews();
+});
+async function loadReviews() {
+    const r = await fetch('/api/performance-reviews');
+    const data = await r.json();
+    const tbody = document.getElementById('reviewsTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No reviews</td></tr>'; return; }
+    tbody.innerHTML = data.map(rv => `<tr>
+        <td><strong>${rv.employee}</strong></td><td>${rv.reviewer}</td><td>${rv.period}</td>
+        <td>${rv.rating ? rv.rating.toFixed(1) + ' / 5' : '-'}</td>
+        <td><span class="status-${rv.status}">${rv.status}</span></td>
+        <td>${rv.submitted_at ? new Date(rv.submitted_at).toLocaleDateString() : '-'}</td>
+    </tr>`).join('');
+}
+async function createReview() {
+    const body = { emp_id: document.getElementById('empSelect').value, reviewer_id: document.getElementById('reviewerSelect').value, review_period: document.getElementById('period').value };
+    if (!body.emp_id || !body.reviewer_id || !body.review_period) return alert('All fields required');
+    const r = await fetch('/api/performance-reviews', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    if (r.ok) { loadReviews(); document.getElementById('period').value = ''; } else alert((await r.json()).error);
+}
+</script>
+</body>
+</html>

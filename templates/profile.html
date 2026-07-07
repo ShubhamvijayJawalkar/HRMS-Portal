@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - My Profile</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        :root { --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155; --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9; --surface: #FFFFFF; --text: #020617; --text-muted: #64748B; --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626; --success: #22C55E; --warning: #EAB308; --card-radius: 16px; --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06); --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1); }
+        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); }
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .navbar-nav .nav-link i { margin-right: 6px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-body { padding: 24px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
+        .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
+        .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; }
+        .page-header-badge { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
+        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
+        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
+        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Approved { background: #F0FDF4; color: #166534; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .alert { border-radius: 10px; border: none; }
+        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+    </style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <div class="page-header">
+        <div>
+            <div class="eyebrow">People experience</div>
+            <h2 class="page-title">My Profile</h2>
+        </div>
+        <div class="page-header-badge">Updated experience</div>
+    </div>
+    <div class="row">
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Personal Information</h5></div>
+                <div class="card-body">
+                    <form id="profileForm">
+                        <div class="mb-3"><label class="form-label">Employee ID</label><input type="text" id="profEmpId" class="form-control" readonly></div>
+                        <div class="mb-3"><label class="form-label">Full Name</label><input type="text" id="profName" class="form-control" required></div>
+                        <div class="mb-3"><label class="form-label">Email</label><input type="email" id="profEmail" class="form-control" required></div>
+                        <div class="mb-3"><label class="form-label">Phone</label><input type="text" id="profPhone" class="form-control"></div>
+                        <div class="mb-3"><label class="form-label">Department</label><input type="text" id="profDepartment" class="form-control"></div>
+                        <div class="mb-3"><label class="form-label">Role</label><input type="text" id="profRole" class="form-control" readonly></div>
+                        <div class="mb-3"><label class="form-label">Date of Joining</label><input type="text" id="profDoj" class="form-control" readonly></div>
+                        <div class="mb-3"><label class="form-label">Address</label><textarea id="profAddress" class="form-control" rows="2"></textarea></div>
+                        <h6 class="mt-4 mb-3" style="color:#1e293b;font-weight:bold;">Emergency Contact</h6>
+                        <div class="mb-3"><label class="form-label">Contact Name</label><input type="text" id="profEmerName" class="form-control"></div>
+                        <div class="mb-3"><label class="form-label">Contact Phone</label><input type="text" id="profEmerPhone" class="form-control"></div>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </form>
+                    <div id="profileMsg" style="margin-top: 15px; display: none;"></div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0">Change Password</h5></div>
+                <div class="card-body">
+                    <form id="passwordForm">
+                        <div class="mb-3"><label class="form-label">Current Password</label><input type="password" id="currentPwd" class="form-control" required></div>
+                        <div class="mb-3"><label class="form-label">New Password (min 6 chars)</label><input type="password" id="newPwd" class="form-control" required></div>
+                        <button type="submit" class="btn btn-primary">Change Password</button>
+                    </form>
+                    <div id="pwdMsg" style="margin-top: 15px; display: none;"></div>
+                </div>
+            </div>
+            <div class="card mt-4">
+                <div class="card-header"><h5 class="mb-0">Dependents</h5></div>
+                <div class="card-body">
+                    <div id="dependentsList"><p class="text-muted">Loading...</p></div>
+                    <hr>
+                    <h6 style="color:#1e293b;font-weight:bold;">Add Dependent</h6>
+                    <form id="dependentForm">
+                        <div class="mb-2"><input type="text" id="depName" class="form-control" placeholder="Name" required></div>
+                        <div class="mb-2"><input type="text" id="depRelation" class="form-control" placeholder="Relationship (e.g., Spouse, Child)" required></div>
+                        <button type="submit" class="btn btn-primary btn-sm">Add</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', () => { loadProfile(); loadDependents(); document.getElementById('profileForm').addEventListener('submit', updateProfile); document.getElementById('passwordForm').addEventListener('submit', changePassword); document.getElementById('dependentForm').addEventListener('submit', addDependent); });
+async function loadProfile() {
+    const r = await fetch('/api/profile'); const d = await r.json();
+    document.getElementById('profEmpId').value = d.emp_id; document.getElementById('profName').value = d.name;
+    document.getElementById('profEmail').value = d.email; document.getElementById('profDepartment').value = d.department || '';
+    document.getElementById('profRole').value = d.role; document.getElementById('userName').textContent = d.name;
+    document.getElementById('roleBadge').textContent = d.role;
+    document.getElementById('profPhone').value = d.phone || '';
+    document.getElementById('profDoj').value = d.date_of_joining || '';
+    document.getElementById('profAddress').value = d.address || '';
+    document.getElementById('profEmerName').value = d.emergency_contact_name || '';
+    document.getElementById('profEmerPhone').value = d.emergency_contact_phone || '';
+}
+async function updateProfile(e) {
+    e.preventDefault();
+    const r = await fetch('/api/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        name: document.getElementById('profName').value,
+        email: document.getElementById('profEmail').value,
+        department: document.getElementById('profDepartment').value,
+        phone: document.getElementById('profPhone').value,
+        address: document.getElementById('profAddress').value,
+        emergency_contact_name: document.getElementById('profEmerName').value,
+        emergency_contact_phone: document.getElementById('profEmerPhone').value
+    })});
+    const d = await r.json(); const msg = document.getElementById('profileMsg');
+    msg.style.display = 'block'; msg.className = r.ok ? 'text-success' : 'text-danger';
+    msg.textContent = d.message || d.error; if (r.ok) document.getElementById('userName').textContent = document.getElementById('profName').value;
+}
+async function changePassword(e) {
+    e.preventDefault();
+    const r = await fetch('/api/change-password', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ current_password: document.getElementById('currentPwd').value, new_password: document.getElementById('newPwd').value }) });
+    const d = await r.json(); const msg = document.getElementById('pwdMsg');
+    msg.style.display = 'block'; msg.className = r.ok ? 'text-success' : 'text-danger';
+    msg.textContent = d.message || d.error; if (r.ok) document.getElementById('passwordForm').reset();
+}
+async function loadDependents() {
+    const r = await fetch('/api/dependents');
+    const data = await r.json();
+    const c = document.getElementById('dependentsList');
+    if (!data.length) { c.innerHTML = '<p class="text-muted">No dependents added</p>'; return; }
+    c.innerHTML = data.map(d => `<div class="d-flex justify-content-between align-items-center mb-2 p-2 bg-light rounded"><span><strong>${esc(d.name)}</strong> (${esc(d.relationship)})</span><button class="btn btn-danger btn-sm" onclick="deleteDep(${d.id})">&times;</button></div>`).join('');
+}
+async function addDependent(e) {
+    e.preventDefault();
+    const r = await fetch('/api/dependents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('depName').value, relationship: document.getElementById('depRelation').value }) });
+    if (r.ok) { document.getElementById('dependentForm').reset(); loadDependents(); }
+}
+async function deleteDep(id) { await fetch(`/api/dependents/${id}`, { method: 'DELETE' }); loadDependents(); }
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

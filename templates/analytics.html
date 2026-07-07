@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HRMS - Analytics</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <style>
+        body { background: #f5f7fb; }
+        .navbar { background: #1e293b !important; }
+        .navbar-brand { color: white !important; }
+        .navbar-nav .nav-link { color: #cbd5e1 !important; }
+        .navbar-nav .nav-link:hover, .navbar-nav .nav-link.active { color: white !important; }
+        .card { background: #fff; border: none; border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .card-header { background: #1e293b; color: white; border-radius: 15px 15px 0 0; padding: 20px; border: none; }
+        .card-body { padding: 25px; }
+        .page-title { color: #333; font-weight: bold; font-size: 24px; margin-bottom: 20px; }
+        .logout-btn { color: #cbd5e1; font-weight: 600; text-decoration: none; }
+        .user-info { display: flex; align-items: center; gap: 15px; color: #cbd5e1; }
+        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+        .metric-card { text-align: center; padding: 20px; }
+        .metric-value { font-size: 32px; font-weight: bold; color: #198754; }
+        .metric-label { color: #666; margin-top: 10px; font-size: 14px; font-weight: 500; }
+        .chart-container { position: relative; height: 280px; width: 100%; }
+        .table th { color: #333; font-weight: 600; border: none; padding: 15px; }
+        .table td { vertical-align: middle; border-color: #e0e0e0; padding: 12px 15px; color: #333; }
+        .table thead { background: #e9ecef; }
+        .risk-high { background: #f8d7da; color: #721c24; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .risk-medium { background: #fff3cd; color: #856404; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .risk-low { background: #d4edda; color: #155724; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .btn-primary { background: #1e293b; border: none; border-radius: 8px; }
+        .btn-primary:hover { background: #0f172a; }
+    </style>
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <h2 class="page-title">Advanced Analytics</h2>
+
+    <div class="row mb-4">
+        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="hcTotal">0</div><div class="metric-label">Employees</div></div></div>
+        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="expTotal">₹0</div><div class="metric-label">Approved Expenses</div></div></div>
+        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="pendingExp">0</div><div class="metric-label">Pending Claims</div></div></div>
+        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="avgPerf">0</div><div class="metric-label">Avg Performance</div></div></div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Headcount by Department</h5></div><div class="card-body"><div class="chart-container"><canvas id="deptChart"></canvas></div></div></div></div>
+        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Leave Trends (6 months)</h5></div><div class="card-body"><div class="chart-container"><canvas id="leaveChart"></canvas></div></div></div></div>
+    </div>
+
+    <div class="row mb-4">
+        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Expense by Category</h5></div><div class="card-body"><div class="chart-container"><canvas id="expChart"></canvas></div></div></div></div>
+        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Performance by Department</h5></div><div class="card-body"><div class="chart-container"><canvas id="perfChart"></canvas></div></div></div></div>
+    </div>
+
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Attrition Risk Analysis</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Employee</th><th>Department</th><th>Leaves (3mo)</th><th>Pending Reg.</th><th>Risk Score</th><th>Level</th></tr></thead>
+                    <tbody id="riskTable"><tr><td colspan="6" class="text-center text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+let deptChart, leaveChart, expChart, perfChart;
+const COLORS = ['#1e293b','#198754','#0d6efd','#ffc107','#dc3545','#6f42c1','#fd7e14','#20c997'];
+
+document.addEventListener('DOMContentLoaded', () => { loadAll(); });
+async function loadAll() {
+    await Promise.all([loadHeadcount(), loadLeaveTrends(), loadExpenses(), loadPerformance(), loadAttrition()]);
+}
+async function loadHeadcount() {
+    const r = await fetch('/api/analytics/headcount');
+    const d = await r.json();
+    document.getElementById('hcTotal').textContent = d.total;
+    const depts = d.by_department || [];
+    if (deptChart) deptChart.destroy();
+    deptChart = new Chart(document.getElementById('deptChart'), {
+        type: 'doughnut',
+        data: { labels: depts.map(x => x.dept), datasets: [{ data: depts.map(x => x.count), backgroundColor: COLORS }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+    });
+}
+async function loadLeaveTrends() {
+    const r = await fetch('/api/analytics/leave-trends');
+    const data = await r.json();
+    const months = [...new Set(data.map(x => x.month))].sort();
+    const types = [...new Set(data.map(x => x.type))];
+    const datasets = types.map((t, i) => ({
+        label: t, data: months.map(m => { const f = data.find(x => x.month === m && x.type === t); return f ? f.count : 0; }),
+        backgroundColor: COLORS[i % COLORS.length], borderColor: COLORS[i % COLORS.length]
+    }));
+    if (leaveChart) leaveChart.destroy();
+    leaveChart = new Chart(document.getElementById('leaveChart'), {
+        type: 'bar',
+        data: { labels: months, datasets },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } }, scales: { x: { stacked: true }, y: { stacked: true } } }
+    });
+}
+async function loadExpenses() {
+    const r = await fetch('/api/analytics/expense-summary');
+    const d = await r.json();
+    document.getElementById('expTotal').textContent = '₹' + d.total.toLocaleString('en-IN', {maximumFractionDigits:0});
+    document.getElementById('pendingExp').textContent = d.pending_claims;
+    const cats = d.by_category || [];
+    if (expChart) expChart.destroy();
+    expChart = new Chart(document.getElementById('expChart'), {
+        type: 'pie',
+        data: { labels: cats.map(x => x.cat), datasets: [{ data: cats.map(x => x.amount), backgroundColor: COLORS }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
+    });
+}
+async function loadPerformance() {
+    const r = await fetch('/api/analytics/performance-summary');
+    const d = await r.json();
+    document.getElementById('avgPerf').textContent = d.avg_rating.toFixed(2);
+    const depts = d.by_department || [];
+    if (perfChart) perfChart.destroy();
+    perfChart = new Chart(document.getElementById('perfChart'), {
+        type: 'bar',
+        data: { labels: depts.map(x => x.dept), datasets: [{ label: 'Avg Rating', data: depts.map(x => x.avg), backgroundColor: '#198754' }] },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { min: 0, max: 5 } }, plugins: { legend: { display: false } } }
+    });
+}
+async function loadAttrition() {
+    const r = await fetch('/api/analytics/attrition-risk');
+    const data = await r.json();
+    const tbody = document.getElementById('riskTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No data</td></tr>'; return; }
+    tbody.innerHTML = data.map(x => {
+        const level = x.risk_score >= 3 ? 'High' : x.risk_score >= 1 ? 'Medium' : 'Low';
+        return `<tr><td><strong>${x.name}</strong><br><small>${x.emp_id}</small></td><td>${x.department || '-'}</td><td>${x.leave_count}</td><td>${x.reg_count}</td><td>${x.risk_score}</td><td><span class="risk-${level.toLowerCase()}">${level}</span></td></tr>`;
+    }).join('');
+}
+</script>
+</body>
+</html>
