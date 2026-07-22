@@ -11,6 +11,8 @@ import bcrypt
 import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from flasgger import Swagger, swag_from
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,13 +29,34 @@ logger = logging.getLogger('hrms')
 
 # ── Flask App ──────────────────────────────────────────────────────────
 app = Flask(__name__)
-app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
+
+_secret = os.getenv('SECRET_KEY', '')
+if not _secret or _secret in ('change-me-to-random-string', 'hrms_secret_key_2024', 'change-me-in-production'):
+    if os.getenv('FLASK_ENV') == 'production':
+        logger.critical("SECRET_KEY is not set or is insecure. Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\"")
+        raise RuntimeError("SECRET_KEY must be set to a secure random value in production")
+    _secret = secrets.token_hex(32)
+    logger.warning("Using auto-generated SECRET_KEY (sessions will not persist across restarts)")
+app.secret_key = _secret
+
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = (os.getenv('FLASK_ENV') == 'production')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 
+if os.getenv('FLASK_ENV') == 'production':
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
 DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
+
+# ── Rate Limiter ──────────────────────────────────────────────────────
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["200 per minute"],
+    storage_uri="memory://",
+)
 
 # ── Swagger ───────────────────────────────────────────────────────────
 swagger_config = {
@@ -76,6 +99,10 @@ STARTED = False
 
 def get_db():
     conn = duckdb.connect(DB_FILE)
+    try:
+        conn.execute("PRAGMA enable_progress_bar")
+    except Exception:
+        pass
     return conn
 
 
@@ -961,12 +988,20 @@ def init_db():
 
 init_db()
 
+if os.getenv('FLASK_ENV') == 'production':
+    _conn = get_db()
+    _seed_check = _conn.execute("SELECT COUNT(*) FROM users WHERE password = ?", [hash_password('pass123')]).fetchone()[0]
+    _conn.close()
+    if _seed_check > 0:
+        logger.warning("⚠️  SEED USERS WITH DEFAULT PASSWORDS DETECTED — Change all passwords before use!")
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════
 
 def audit_log(emp_id, action, details=None):
+    conn = None
     try:
         conn = get_db()
         log_id = int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
@@ -974,9 +1009,11 @@ def audit_log(emp_id, action, details=None):
             "INSERT INTO audit_log (log_id, emp_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [log_id, emp_id, action, details, request.remote_addr, datetime.now()]
         )
-        conn.close()
     except Exception as e:
         logger.warning("audit_log failed: %s", e)
+    finally:
+        if conn:
+            conn.close()
 
 
 def parse_date(date_string, default=None):
@@ -1163,6 +1200,7 @@ def get_credentials():
 
 
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("20 per minute")
 def login():
     """User login
     ---
@@ -1202,18 +1240,7 @@ def login():
 
     stored_hash = row[3]
     if not check_password(password, stored_hash):
-        if stored_hash.startswith('$2'):
-            return jsonify({'error': 'Invalid Password'}), 401
-        try:
-            import hashlib
-            if hashlib.md5(password.encode()).hexdigest() != stored_hash:
-                return jsonify({'error': 'Invalid Password'}), 401
-            conn = get_db()
-            new_hash = hash_password(password)
-            conn.execute("UPDATE users SET password = ? WHERE emp_id = ?", [new_hash, emp_id])
-            conn.close()
-        except Exception:
-            return jsonify({'error': 'Invalid Password'}), 401
+        return jsonify({'error': 'Invalid Password'}), 401
 
     if not row[5]:
         return jsonify({'error': 'Login is not allowed for this user'}), 403
@@ -1344,6 +1371,7 @@ def profile_api():
 
 
 @app.route('/api/change-password', methods=['POST'])
+@limiter.limit("10 per minute")
 @login_required
 def change_password():
     """Change own password
@@ -1377,11 +1405,7 @@ def change_password():
         return jsonify({'error': 'User not found'}), 404
 
     stored = row[0]
-    valid = check_password(current, stored)
-    if not valid and not stored.startswith('$2'):
-        import hashlib
-        valid = hashlib.md5(current.encode()).hexdigest() == stored
-    if not valid:
+    if not check_password(current, stored):
         conn.close()
         return jsonify({'error': 'Current password is incorrect'}), 400
 
@@ -1392,6 +1416,7 @@ def change_password():
 
 
 @app.route('/api/forgot-password', methods=['POST'])
+@limiter.limit("5 per minute")
 def forgot_password():
     """Request password reset (generates token)
     ---
@@ -1437,6 +1462,7 @@ def forgot_password():
 
 
 @app.route('/api/reset-password', methods=['POST'])
+@limiter.limit("5 per minute")
 def reset_password():
     """Reset password using token
     ---
@@ -1600,15 +1626,18 @@ def delete_holiday(hid):
 # ══════════════════════════════════════════════════════════════════════
 
 def add_notification(emp_id, ntype, message, link=None):
+    conn = None
     try:
         conn = get_db()
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [gen_id(), emp_id, ntype, message, link, datetime.now()]
         )
-        conn.close()
     except Exception as e:
         logger.warning("Notification failed: %s", e)
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.route('/api/v1/notifications', methods=['GET'])
@@ -1725,6 +1754,7 @@ def import_users_csv():
     f = request.files['file']
     if not f.filename.endswith('.csv'):
         return jsonify({'error': 'CSV file required'}), 400
+    conn = None
     try:
         df = pd.read_csv(f)
         required = ['emp_id', 'name', 'email']
@@ -1745,10 +1775,12 @@ def import_users_csv():
                  datetime.now(), datetime.now()]
             )
             count += 1
-        conn.close()
         return jsonify({'message': f'{count} users imported'}), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 400
+    finally:
+        if conn:
+            conn.close()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -4301,11 +4333,49 @@ def not_found(error):
     return jsonify({'error': 'Not found'}), 404
 
 
+@app.errorhandler(429)
+def rate_limited(error):
+    return jsonify({'error': 'Too many requests. Please try again later.'}), 429
+
 
 @app.errorhandler(500)
 def server_error(error):
     logger.exception("Internal server error")
     return jsonify({'error': 'Internal server error'}), 500
+
+
+@app.after_request
+def set_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    if os.getenv('FLASK_ENV') == 'production':
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    return response
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  CSRF TOKEN
+# ══════════════════════════════════════════════════════════════════════
+
+@app.route('/api/csrf-token', methods=['GET'])
+@login_required
+def get_csrf_token():
+    token = secrets.token_hex(32)
+    session['csrf_token'] = token
+    return jsonify({'csrf_token': token})
+
+
+def csrf_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+            token = request.headers.get('X-CSRF-Token') or (request.get_json(silent=True) or {}).get('csrf_token')
+            if not token or token != session.get('csrf_token'):
+                return jsonify({'error': 'CSRF token missing or invalid'}), 403
+        return f(*args, **kwargs)
+    return decorated
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -4322,11 +4392,15 @@ def cleanup_expired_tokens():
         logger.warning("Cleanup failed: %s", e)
 
 
-# ── Start scheduler ────────────────────────────────────────────────────
+# ── Start scheduler (only in master gunicorn process) ──────────────────
 if not STARTED:
-    scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
-    scheduler.start()
-    STARTED = True
+    _is_gunicorn_master = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or os.getenv('GUNICORN_MASTER') == 'true'
+    _is_dev = os.getenv('FLASK_DEBUG') == '1' or os.getenv('FLASK_ENV') != 'production'
+    if _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
+        scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
+        scheduler.start()
+        STARTED = True
+        logger.info("Scheduler started")
 
 
 # ── Entry point ──────────────────────────────────────────────────────

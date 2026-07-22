@@ -1,23 +1,28 @@
-version: '3.8'
-
 services:
   hrms:
     build:
       context: .
       target: production
     ports:
-      - "5000:5000"
+      - "5000:10000"
     volumes:
-      - ./hrms.duckdb:/app/hrms.duckdb
-      - ./uploads:/app/uploads
+      - hrms-data:/data
+      - hrms-uploads:/app/uploads
     environment:
-      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - SECRET_KEY=${SECRET_KEY}
       - FLASK_DEBUG=0
       - FLASK_ENV=production
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=WARNING
+      - DB_FILE=/data/hrms.duckdb
+      - PORT=10000
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:10000/login"]
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 10s
+
+volumes:
+  hrms-data:
+  hrms-uploads:

@@ -15,9 +15,12 @@ __pycache__/
 
 # Generated / Build
 uploads/*
+*.pptx
+generate_ppt.py
+ppt_screenshots/
+HRMS_Deployment_Guide.docx
 
 # IDE / Config
 .DS_Store
 .opencode/
-
 

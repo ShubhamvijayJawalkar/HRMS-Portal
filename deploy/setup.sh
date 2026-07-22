@@ -58,7 +58,7 @@ After=network.target
 User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$APP_DIR
-ExecStart=$APP_DIR/venv/bin/gunicorn --workers 3 --bind 127.0.0.1:5000 app:app
+ExecStart=$APP_DIR/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
 Restart=always
 RestartSec=5
 Environment="DB_FILE=$DB_DIR/hrms.duckdb"
