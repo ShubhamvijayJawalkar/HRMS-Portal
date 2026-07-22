@@ -3459,8 +3459,8 @@ def get_user_breaks():
     conn.close()
     return jsonify([{
         'break_id': b[0], 'break_type': b[1],
-        'start_time': b[2].isoformat() if b[2] else None,
-        'end_time': b[3].isoformat() if b[3] else None,
+        'start_time': b[2].isoformat() + 'Z' if b[2] else None,
+        'end_time': b[3].isoformat() + 'Z' if b[3] else None,
         'duration_minutes': b[4] or 0, 'status': b[5]
     } for b in breaks]), 200
 
