@@ -2,7 +2,7 @@ import os
 import logging
 import secrets
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
 
@@ -1153,7 +1153,7 @@ def department_required(*depts):
 @login_required
 def get_credentials():
     """Return known user credentials for demo purposes (admin only)"""
-    if session.get('role') != 'admin':
+    if session.get('role') not in ('Admin', 'admin'):
         return jsonify({'error': 'Admin access required'}), 403
     conn = get_db()
     rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
@@ -3397,7 +3397,7 @@ def start_break():
             return jsonify({'error': f'Daily limit of {limit} min reached for {break_type}'}), 400
     if break_type == 'Lunch':
         pending = conn.execute(
-            "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND start_time >= ? AND status = 'Pending'",
+            "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND created_at >= ? AND status = 'Pending'",
             [emp_id, break_type, shift_start_dt]
         ).fetchone()
         if not pending:
@@ -3414,10 +3414,11 @@ def start_break():
         conn.commit()
     break_id = gen_id()
     now = datetime.now()
+    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
     shift_date = _get_shift_date_for_dt(emp_id, now, conn)
     conn.execute(
         "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) VALUES (?, ?, ?, ?, ?, 'Active')",
-        [break_id, emp_id, break_type, now, shift_date]
+        [break_id, emp_id, break_type, utc_now, shift_date]
     )
     conn.close()
     return jsonify({'message': 'Break started', 'break_id': break_id, 'break_type': break_type}), 201
@@ -3435,7 +3436,7 @@ def end_break(break_id):
     if not info:
         conn.close()
         return jsonify({'error': 'Break not found'}), 404
-    end_time = datetime.now()
+    end_time = datetime.now(timezone.utc).replace(tzinfo=None)
     duration = int((end_time - info[0]).total_seconds() / 60)
     conn.execute(
         "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
@@ -3879,7 +3880,7 @@ def admin_breaks():
     return jsonify({
         'active_breaks': [{
             'break_id': r[0], 'emp_name': r[1], 'break_type': r[2],
-            'duration': int((datetime.now() - r[3]).total_seconds() / 60) if r[3] else 0
+            'duration': int((datetime.now(timezone.utc).replace(tzinfo=None) - r[3]).total_seconds() / 60) if r[3] else 0
         } for r in active],
         'disposed_breaks': [{
             'emp_name': r[0], 'break_type': r[1],
@@ -3905,7 +3906,7 @@ def admin_dispose_break(break_id):
     if not info:
         conn.close()
         return jsonify({'error': 'Break not found or already ended'}), 404
-    end_time = datetime.now()
+    end_time = datetime.now(timezone.utc).replace(tzinfo=None)
     duration = int((end_time - info[0]).total_seconds() / 60)
     conn.execute(
         "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
@@ -4085,7 +4086,7 @@ def delete_user(emp_id):
     tables = [
         ('user_sessions', 'emp_id'), ('breaks', 'emp_id'), ('leave_requests', 'emp_id'),
         ('leave_balance', 'emp_id'), ('break_approvals', 'emp_id'), ('audit_log', 'emp_id'),
-        ('notifications', 'emp_id'), ('password_resets', 'emp_id'), ('tokens', 'emp_id'),
+        ('notifications', 'emp_id'), ('password_reset_tokens', 'emp_id'),
         ('regularization_requests', 'emp_id'), ('onboarding_tasks', 'emp_id'),
         ('offboarding_tasks', 'emp_id'), ('exit_interviews', 'emp_id'),
         ('salary_structures', 'emp_id'), ('payroll_items', 'emp_id'),
@@ -4093,9 +4094,8 @@ def delete_user(emp_id):
         ('feedback_360', 'emp_id'), ('expense_claims', 'emp_id'),
         ('tickets', 'emp_id'), ('ticket_comments', 'emp_id'),
         ('assets', 'emp_id'), ('documents', 'emp_id'), ('dependents', 'emp_id'),
-        ('interviews', 'interviewer_id'), ('interviews', 'emp_id'),
+        ('interviews', 'interviewer'), ('interviews', 'emp_id'),
         ('offer_letters', 'emp_id'), ('offer_letters', 'candidate_id'),
-        ('candidate_documents', 'candidate_id'),
     ]
     for table, col in tables:
         try:
@@ -4168,7 +4168,7 @@ def get_reports():
                COALESCE((SELECT COUNT(*) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0)
         FROM users u {user_where} ORDER BY u.name
     """, [start_date, end_date, start_date, end_date, start_date, end_date,
-          start_date, end_date, start_date, end_date, start_date, end_date] + user_params + user_params).fetchall()
+          start_date, end_date, start_date, end_date, start_date, end_date] + user_params).fetchall()
 
     break_where = "WHERE b.break_date BETWEEN ? AND ?"
     break_params = [start_date, end_date]

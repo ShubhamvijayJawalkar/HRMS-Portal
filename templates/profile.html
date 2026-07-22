@@ -131,8 +131,9 @@ async function loadProfile() {
     const r = await fetch('/api/profile'); const d = await r.json();
     document.getElementById('profEmpId').value = d.emp_id; document.getElementById('profName').value = d.name;
     document.getElementById('profEmail').value = d.email; document.getElementById('profDepartment').value = d.department || '';
-    document.getElementById('profRole').value = d.role; document.getElementById('userName').textContent = d.name;
-    document.getElementById('roleBadge').textContent = d.role;
+    document.getElementById('profRole').value = d.role;
+    const un = document.getElementById('userName'); if(un) un.textContent = d.name;
+    const rb = document.getElementById('roleBadge'); if(rb) rb.textContent = d.role;
     document.getElementById('profPhone').value = d.phone || '';
     document.getElementById('profDoj').value = d.date_of_joining || '';
     document.getElementById('profAddress').value = d.address || '';
