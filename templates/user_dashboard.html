@@ -279,7 +279,7 @@ function checkActiveBreak() {
         const c=document.getElementById('activeBreakInfo');
         if(!c)return;
         const ab=breaks.find(b=>b.status==='Active');
-        if(ab){            const el=calcElapsed(ab.start_time);c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${ab.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started ${ab.start_time}</small><div class="time-display">${el} min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;localStorage.setItem('activeBreakId',ab.break_id);
+        if(ab){            const el=calcElapsed(ab.start_time);const st=fmtHMSShort(ab.start_time);c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${ab.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started ${st}</small><div class="time-display">${el} min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;localStorage.setItem('activeBreakId',ab.break_id);
             const bm=document.getElementById('breakMessage');if(bm)bm.style.display='none';
         }else{c.innerHTML='<p class="text-muted mb-0">No active break</p>';localStorage.removeItem('activeBreakId');}
     }).catch(()=>{setTimeout(checkActiveBreak,2000);});
@@ -290,7 +290,7 @@ function loadUserBreaks() {
         const c=document.getElementById('breaksHistoryContainer');
         if(!c)return;
         if(!breaks.length){c.innerHTML='<p class="text-muted mb-0">No breaks this shift</p>';return;}
-        c.innerHTML=breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${b.break_type}</strong> <span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></div><div class="text-end"><small class="text-muted">${b.start_time} - ${b.end_time||'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
+        c.innerHTML=breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${b.break_type}</strong> <span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></div><div class="text-end"><small class="text-muted">${fmtHMSShort(b.start_time)} - ${b.end_time?fmtHMSShort(b.end_time):'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
     }).catch(()=>{});
 }
 function loadLoginHours() {
@@ -312,7 +312,19 @@ function loadShiftSummary() {
         if(ef)ef.textContent=d.efficiency+'%';
     }).catch(()=>{});
 }
-function calcElapsed(t){const[h,m,s]=t.split(':').map(Number);const st=new Date();st.setHours(h,m,s);return Math.max(0,Math.floor((new Date()-st)/60000));}
+function calcElapsed(isoStr){
+    if(!isoStr)return 0;
+    const start=new Date(isoStr);
+    const now=new Date();
+    const diff=now-start;
+    if(diff<0)return 0;
+    return Math.floor(diff/60000);
+}
+function fmtHMSShort(isoStr){
+    if(!isoStr)return 'N/A';
+    const d=new Date(isoStr);
+    return d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
 function showMsg(text,type){const d=document.getElementById('breakMessage');document.getElementById('breakMessageText').textContent=text;document.getElementById('breakMessageText').className=type==='success'?'text-success':'text-danger';d.style.display='block';setTimeout(()=>d.style.display='none',3000);}
 async function loadHolidays(){const r=await fetch('/api/holidays');const data=await r.json();const c=document.getElementById('holidaysContainer');if(!c||!Array.isArray(data))return;const now=new Date();const upcoming=data.filter(h=>new Date(h.date)>=now).sort((a,b)=>new Date(a.date)-new Date(b.date)).slice(0,5);if(!upcoming.length){c.innerHTML='<p class="text-muted mb-0">No upcoming holidays</p>';return;}c.innerHTML=upcoming.map(h=>`<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:#F8FAFC;border-radius:8px;"><span><strong style="font-size:13px;">${esc(h.name)}</strong><br><small class="text-muted">${h.date}</small></span><span class="badge ${h.type==='National'?'bg-primary':'bg-warning text-dark'} rounded-pill">${h.type}</span></div>`).join('');}
 async function loadNotifications(){const r=await fetch('/api/notifications');const data=await r.json();const b=document.getElementById('notifBadge');if(!b)return;if(data&&data.unread>0){b.style.display='inline';b.textContent=data.unread;}else b.style.display='none';const c=document.getElementById('notificationsContainer');if(!c)return;const items=data&&data.data?data.data.slice(0,5):[];if(!items.length){c.innerHTML='<p class="text-muted mb-0">No notifications</p>';return;}c.innerHTML=items.map(n=>`<div class="notification-item ${n.is_read?'':'fw-bold'}" style="${n.is_read?'':'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');if(data.unread>0){fetch('/api/notifications/read',{method:'POST'});}}setInterval(loadNotifications,30000);
