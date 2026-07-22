@@ -990,7 +990,7 @@ init_db()
 
 if os.getenv('FLASK_ENV') == 'production':
     _conn = get_db()
-    _seed_check = _conn.execute("SELECT COUNT(*) FROM users WHERE password = ?", [hash_password('pass123')]).fetchone()[0]
+    _seed_check = _conn.execute("SELECT COUNT(*) FROM users WHERE password = ?", [bcrypt.hashpw(b'pass123', bcrypt.gensalt()).decode()]).fetchone()[0]
     _conn.close()
     if _seed_check > 0:
         logger.warning("⚠️  SEED USERS WITH DEFAULT PASSWORDS DETECTED — Change all passwords before use!")
