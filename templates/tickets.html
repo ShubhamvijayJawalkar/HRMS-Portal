@@ -12,10 +12,15 @@
             --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
-            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
+            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+            --transition-fast: 150ms ease; --transition-base: 250ms ease;
         }
+        *, *::before, *::after { box-sizing: border-box; }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: var(--background); }
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
@@ -24,9 +29,9 @@
         .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
         .navbar-nav .nav-link i { margin-right: 6px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
         .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 24px; }
+        .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
         .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
         .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
@@ -53,7 +58,7 @@
         .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
         .alert { border-radius: 10px; border: none; }
         .status-Open { background: #cff4fc; color: #055160; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-        .status-In Progress { background: #fff3cd; color: #856404; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .status-InProgress { background: #fff3cd; color: #856404; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .status-Resolved { background: #d4edda; color: #155724; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .status-Closed { background: #e2e3e5; color: #41464b; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .priority-High { color: #dc3545; font-weight: 600; }
@@ -110,7 +115,7 @@ async function loadTickets() {
         <td>${t.id}</td><td><strong>${t.subject}</strong></td>
         <td>${t.category || '-'}</td>
         <td class="priority-${t.priority}">${t.priority}</td>
-        <td><span class="status-${t.status.replace(' ','%20')}">${t.status}</span></td>
+        <td><span class="status-${t.status.replace(' ','')}">${t.status}</span></td>
         <td>${new Date(t.created_at).toLocaleDateString()}</td>
     </tr>`).join('');
 }

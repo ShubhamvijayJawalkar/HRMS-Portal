@@ -11,8 +11,7 @@ import bcrypt
 import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
+
 from flasgger import Swagger, swag_from
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -31,16 +30,10 @@ app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', secrets.token_hex(32))
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SECURE'] = (os.getenv('FLASK_ENV') == 'production')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 
 DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
-
-# ── Rate Limiter ──────────────────────────────────────────────────────
-limiter = Limiter(
-    get_remote_address,
-    app=app,
-    default_limits=['200 per day', '50 per hour'],
-    storage_uri='memory://',
-)
 
 # ── Swagger ───────────────────────────────────────────────────────────
 swagger_config = {
@@ -85,6 +78,36 @@ def get_db():
     conn = duckdb.connect(DB_FILE)
     conn.execute("SET TimeZone = 'UTC'")
     return conn
+
+
+def _get_shift_date_for_dt(emp_id, dt, conn):
+    row = conn.execute("SELECT shift_start FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+    if row and row[0] and row[0] != '24x7':
+        try:
+            parts = row[0].split(':')
+            h, m = int(parts[0]), int(parts[1])
+            shift_start_today = dt.replace(hour=h, minute=m, second=0, microsecond=0)
+            if dt >= shift_start_today:
+                return dt.date()
+            else:
+                return (dt - timedelta(days=1)).date()
+        except Exception:
+            pass
+    return dt.date()
+
+
+def _fix_seed_shift_dates(conn, now):
+    sessions = conn.execute("SELECT session_id, emp_id, login_time FROM user_sessions").fetchall()
+    for sid, eid, lt in sessions:
+        if lt:
+            correct_date = _get_shift_date_for_dt(eid, lt, conn)
+            conn.execute("UPDATE user_sessions SET session_date = ? WHERE session_id = ?", [correct_date, sid])
+    breaks = conn.execute("SELECT break_id, emp_id, start_time FROM breaks").fetchall()
+    for bid, eid, st in breaks:
+        if st:
+            correct_date = _get_shift_date_for_dt(eid, st, conn)
+            conn.execute("UPDATE breaks SET break_date = ? WHERE break_id = ?", [correct_date, bid])
+    conn.commit()
 
 
 def init_db():
@@ -137,6 +160,22 @@ def init_db():
         )
     ''')
 
+    # ── Break Approvals ───────────────────────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS break_approvals (
+            approval_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            break_type VARCHAR NOT NULL,
+            break_date DATE NOT NULL,
+            reason VARCHAR,
+            status VARCHAR DEFAULT 'Pending',
+            approved_by VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            FOREIGN KEY (break_type) REFERENCES break_types(break_type)
+        )
+    ''')
+
     # ── Breaks ─────────────────────────────────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS breaks (
@@ -173,6 +212,7 @@ def init_db():
             leave_type VARCHAR NOT NULL,
             start_date DATE NOT NULL,
             end_date DATE NOT NULL,
+            year INTEGER NOT NULL DEFAULT 0,
             reason VARCHAR,
             status VARCHAR DEFAULT 'Pending',
             approved_by VARCHAR,
@@ -181,6 +221,13 @@ def init_db():
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+
+    # ── Migration: add year column to leave_requests ─────────────
+    try:
+        conn.execute("ALTER TABLE leave_requests ADD COLUMN year INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    conn.execute("UPDATE leave_requests SET year = CAST(strftime('%Y', start_date) AS INTEGER) WHERE year = 0 OR year IS NULL")
 
     # ── Leave Balance (new) ────────────────────────────────────────
     conn.execute('''
@@ -566,58 +613,10 @@ def init_db():
              'Employee', 'Operations', 'Jr Developer', '9876543211', datetime.now().date(),
              'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
         )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP003', 'Mangesh', 'Mangesh@abc.com', pwd_hash,
-             'Employee', 'Support', 'Support Engineer', '9876543212', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP004', 'Priya Sharma', 'priya@company.com', pwd_hash,
-             'Employee', 'Engineering', 'Sr Software Engineer', '9876543213', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP005', 'Rahul Verma', 'rahul@company.com', pwd_hash,
-             'Employee', 'Engineering', 'Software Engineer', '9876543214', datetime.now().date(),
-             'EMP004', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP006', 'Anita Desai', 'anita@company.com', pwd_hash,
-             'Employee', 'HR', 'HR Manager', '9876543215', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP007', 'Vikram Singh', 'vikram@company.com', pwd_hash,
-             'Employee', 'Finance', 'Finance Manager', '9876543216', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP008', 'Neha Kapoor', 'neha@company.com', pwd_hash,
-             'Employee', 'Marketing', 'Marketing Lead', '9876543217', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP009', 'Amit Patel', 'amit@company.com', pwd_hash,
-             'Employee', 'Sales', 'Sales Executive', '9876543218', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
-        conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ['EMP010', 'Sonali Joshi', 'sonali@company.com', pwd_hash,
-             'Employee', 'Design', 'UI/UX Designer', '9876543219', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
-        )
 
         # Seed some holidays
         year = datetime.now().year
-        base = int(datetime.now().timestamp() * 1000) % 1000000
+        base = 9000000 + (datetime.now().microsecond % 100000)
         holidays_data = [
             [base + 1, 'New Year', f'{year}-01-01', year, 'National'],
             [base + 2, 'Republic Day', f'{year}-01-26', year, 'National'],
@@ -647,7 +646,7 @@ def init_db():
     )
 
     # ── Migrate: add new columns if missing ───────────────────────
-    for col in ['designation', 'manager_emp_id', 'phone', 'date_of_birth', 'date_of_joining', 'address', 'emergency_contact_name', 'emergency_contact_phone']:
+    for col in ['designation', 'manager_emp_id', 'phone', 'date_of_birth', 'date_of_joining', 'address', 'emergency_contact_name', 'emergency_contact_phone', 'shift_start', 'shift_end']:
         try:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} VARCHAR")
         except Exception:
@@ -711,12 +710,12 @@ def init_db():
 
     if conn.execute("SELECT COUNT(*) FROM leave_requests").fetchone()[0] < 2:
         conn.execute(
-            "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 7, 'EMP002', 'Casual', (now + timedelta(days=3)).date(), (now + timedelta(days=4)).date(), 'Personal work', 'Pending', None, now, now]
+            "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 7, 'EMP002', 'Casual', (now + timedelta(days=3)).date(), (now + timedelta(days=4)).date(), (now + timedelta(days=3)).year, 'Personal work', 'Pending', None, now, now]
         )
         conn.execute(
-            "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 8, 'EMP003', 'Sick', (now + timedelta(days=10)).date(), (now + timedelta(days=12)).date(), 'Medical appointment', 'Approved', 'EMP001', now, now]
+            "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 8, 'EMP002', 'Sick', (now + timedelta(days=10)).date(), (now + timedelta(days=12)).date(), (now + timedelta(days=10)).year, 'Medical appointment', 'Approved', 'EMP001', now, now]
         )
 
     if conn.execute("SELECT COUNT(*) FROM password_reset_tokens").fetchone()[0] < 2:
@@ -726,7 +725,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at, used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 10, 'EMP003', 'reset-token-002', now + timedelta(hours=4), 0, now]
+            [base_id + 10, 'EMP002', 'reset-token-002', now + timedelta(hours=4), 0, now]
         )
 
     if conn.execute("SELECT COUNT(*) FROM employee_documents").fetchone()[0] < 2:
@@ -766,7 +765,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 18, 'EMP003', (now - timedelta(days=1)).date(), 'Forgot punch', 'Approved', 'EMP001', now - timedelta(days=1), now]
+            [base_id + 18, 'EMP002', (now - timedelta(days=1)).date(), 'Forgot punch', 'Approved', 'EMP001', now - timedelta(days=1), now]
         )
 
     if conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0] < 2:
@@ -776,7 +775,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO assets (asset_id, emp_id, asset_type, asset_tag, brand, model, serial_number, issued_date, return_date, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 20, 'EMP003', 'Phone', 'PH-001', 'Samsung', 'Galaxy S24', 'SN-1002', (now - timedelta(days=10)).date(), None, 'Issued', 'Company phone']
+            [base_id + 20, 'EMP002', 'Phone', 'PH-001', 'Samsung', 'Galaxy S24', 'SN-1002', (now - timedelta(days=10)).date(), None, 'Issued', 'Company phone']
         )
 
     if conn.execute("SELECT COUNT(*) FROM job_postings").fetchone()[0] < 2:
@@ -806,7 +805,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO interviews (interview_id, candidate_id, scheduled_at, interviewer, mode, feedback, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 26, base_id + 24, now + timedelta(days=3), 'EMP006', 'In-person', 'Good fit', 'Scheduled']
+            [base_id + 26, base_id + 24, now + timedelta(days=3), 'EMP002', 'In-person', 'Good fit', 'Scheduled']
         )
 
     if conn.execute("SELECT COUNT(*) FROM offer_letters").fetchone()[0] < 2:
@@ -826,27 +825,27 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 30, 'EMP003', 'HR paperwork', 'EMP006', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(hours=3)]
+            [base_id + 30, 'EMP002', 'HR paperwork', 'EMP002', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(hours=3)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM offboarding_tasks").fetchone()[0] < 2:
         conn.execute(
             "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 31, 'EMP004', 'Collect company assets', 'EMP001', 'Pending', (now + timedelta(days=5)).date(), None]
+            [base_id + 31, 'EMP002', 'Collect company assets', 'EMP001', 'Pending', (now + timedelta(days=5)).date(), None]
         )
         conn.execute(
             "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 32, 'EMP005', 'Revoke access', 'EMP001', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(days=1)]
+            [base_id + 32, 'EMP002', 'Revoke access', 'EMP001', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(days=1)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM exit_interviews").fetchone()[0] < 2:
         conn.execute(
             "INSERT INTO exit_interviews (interview_id, emp_id, reason, feedback, exit_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 33, 'EMP004', 'Career change', 'Positive experience', (now - timedelta(days=2)).date(), now - timedelta(days=2)]
+            [base_id + 33, 'EMP002', 'Career change', 'Positive experience', (now - timedelta(days=2)).date(), now - timedelta(days=2)]
         )
         conn.execute(
             "INSERT INTO exit_interviews (interview_id, emp_id, reason, feedback, exit_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 34, 'EMP005', 'Relocation', 'Clear onboarding', (now - timedelta(days=5)).date(), now - timedelta(days=5)]
+            [base_id + 34, 'EMP002', 'Relocation', 'Clear onboarding', (now - timedelta(days=5)).date(), now - timedelta(days=5)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM salary_structures").fetchone()[0] < 2:
@@ -856,7 +855,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 36, 'EMP003', 28000.00, 8400.00, 3200.00, 1200.00, (now - timedelta(days=60)).date()]
+            [base_id + 36, 'EMP002', 28000.00, 8400.00, 3200.00, 1200.00, (now - timedelta(days=60)).date()]
         )
 
     if conn.execute("SELECT COUNT(*) FROM payroll_runs").fetchone()[0] < 2:
@@ -870,14 +869,16 @@ def init_db():
         )
 
     if conn.execute("SELECT COUNT(*) FROM payroll_items").fetchone()[0] < 2:
-        conn.execute(
-            "INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt, payslip_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 39, base_id + 37, 'EMP002', 50000.00, 5000.00, 45000.00, 2500.00, 1500.00, 200.00, 0]
-        )
-        conn.execute(
-            "INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt, payslip_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 40, base_id + 38, 'EMP003', 48000.00, 4800.00, 43200.00, 2400.00, 1400.00, 200.00, 1]
-        )
+        runs = conn.execute("SELECT run_id FROM payroll_runs ORDER BY run_id LIMIT 2").fetchall()
+        if len(runs) >= 2:
+            conn.execute(
+                "INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt, payslip_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [base_id + 39, runs[0][0], 'EMP002', 50000.00, 5000.00, 45000.00, 2500.00, 1500.00, 200.00, 0]
+            )
+            conn.execute(
+                "INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt, payslip_generated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [base_id + 40, runs[1][0], 'EMP002', 48000.00, 4800.00, 43200.00, 2400.00, 1400.00, 200.00, 1]
+            )
 
     if conn.execute("SELECT COUNT(*) FROM goals").fetchone()[0] < 2:
         conn.execute(
@@ -886,7 +887,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO goals (goal_id, emp_id, title, description, target_date, weight, rating, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 42, 'EMP003', 'Customer support excellence', 'Maintain SLA', (now + timedelta(days=45)).date(), 4, 5, 'Active', now]
+            [base_id + 42, 'EMP002', 'Customer support excellence', 'Maintain SLA', (now + timedelta(days=45)).date(), 4, 5, 'Active', now]
         )
 
     if conn.execute("SELECT COUNT(*) FROM performance_reviews").fetchone()[0] < 2:
@@ -896,17 +897,17 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO performance_reviews (review_id, emp_id, reviewer_id, review_period, overall_rating, comments, status, created_at, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 44, 'EMP003', 'EMP001', 'Q2 2026', 4.6, 'Excellent ownership', 'Draft', now - timedelta(days=2), None]
+            [base_id + 44, 'EMP002', 'EMP001', 'Q2 2026', 4.6, 'Excellent ownership', 'Draft', now - timedelta(days=2), None]
         )
 
     if conn.execute("SELECT COUNT(*) FROM feedback_360").fetchone()[0] < 2:
         conn.execute(
             "INSERT INTO feedback_360 (feedback_id, emp_id, reviewer_id, category, rating, comment, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 45, 'EMP002', 'EMP006', 'Collaboration', 5, 'Great teammate', now - timedelta(days=1)]
+            [base_id + 45, 'EMP002', 'EMP002', 'Collaboration', 5, 'Great teammate', now - timedelta(days=1)]
         )
         conn.execute(
             "INSERT INTO feedback_360 (feedback_id, emp_id, reviewer_id, category, rating, comment, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 46, 'EMP003', 'EMP004', 'Communication', 4, 'Clear updates', now - timedelta(days=2)]
+            [base_id + 46, 'EMP002', 'EMP002', 'Communication', 4, 'Clear updates', now - timedelta(days=2)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM expense_claims").fetchone()[0] < 2:
@@ -916,7 +917,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO expense_claims (claim_id, emp_id, cat_id, amount, description, receipt_path, status, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 48, 'EMP003', 2, 850.00, 'Client lunch', 'food.pdf', 'Approved', 'EMP001', now - timedelta(days=2)]
+            [base_id + 48, 'EMP002', 2, 850.00, 'Client lunch', 'food.pdf', 'Approved', 'EMP001', now - timedelta(days=2)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] < 2:
@@ -926,7 +927,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, status, assigned_to, created_at, updated_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 50, 'EMP003', 'Payroll question', 'Need pay slip clarification', 'HR', 'Medium', 'Resolved', 'EMP006', now - timedelta(days=1), now - timedelta(hours=2), now - timedelta(hours=1)]
+            [base_id + 50, 'EMP002', 'Payroll question', 'Need pay slip clarification', 'HR', 'Medium', 'Resolved', 'EMP002', now - timedelta(days=1), now - timedelta(hours=2), now - timedelta(hours=1)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM ticket_comments").fetchone()[0] < 2:
@@ -936,7 +937,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) VALUES (?, ?, ?, ?, ?)",
-            [base_id + 52, base_id + 50, 'EMP006', 'Shared the payslip details', now - timedelta(hours=1)]
+            [base_id + 52, base_id + 50, 'EMP002', 'Shared the payslip details', now - timedelta(hours=1)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] < 2:
@@ -948,6 +949,12 @@ def init_db():
             "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 54, 'EMP002', 'ID Proof', 'ID Proof', '/uploads/id.pdf', 153600, now - timedelta(days=1)]
         )
+
+    # ── Assign default shift 20:00-05:00 to all employees ────────
+    conn.execute("UPDATE users SET shift_start = '20:00', shift_end = '05:00' WHERE shift_start IS NULL")
+
+    # ── Fix seed session/break dates to use shift-based dates ─────
+    _fix_seed_shift_dates(conn, now)
 
     conn.close()
     logger.info("Database initialized")
@@ -986,6 +993,62 @@ def gen_id():
     return int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
 
 
+def _get_shift_start_dt(emp_id, conn=None, target_date=None):
+    now = datetime.now()
+    if conn is None:
+        conn = get_db()
+        close = True
+    else:
+        close = False
+    row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+    if close:
+        conn.close()
+    shift_start_str = row[0] if row else None
+    shift_end_str = row[1] if row else None
+    if shift_start_str and shift_start_str != '24x7':
+        try:
+            parts = shift_start_str.split(':')
+            h, m = int(parts[0]), int(parts[1])
+            if target_date:
+                dt = datetime(target_date.year, target_date.month, target_date.day, h, m, 0, 0)
+            else:
+                dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if dt > now:
+                    dt -= timedelta(days=1)
+            return dt
+        except Exception:
+            pass
+    if target_date:
+        return datetime(target_date.year, target_date.month, target_date.day, 0, 0, 0, 0)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
+    if conn is None:
+        conn = get_db()
+        close = True
+    else:
+        close = False
+    row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+    if close:
+        conn.close()
+    shift_start_str = row[0] if row else None
+    shift_end_str = row[1] if row else None
+    if shift_start_str and shift_start_str != '24x7' and shift_end_str:
+        try:
+            sp = shift_start_str.split(':')
+            ep = shift_end_str.split(':')
+            sh, sm = int(sp[0]), int(sp[1])
+            eh, em = int(ep[0]), int(ep[1])
+            end_dt = shift_start_dt.replace(hour=eh, minute=em, second=0, microsecond=0)
+            if eh < sh or (eh == sh and em < sm):
+                end_dt += timedelta(days=1)
+            return end_dt
+        except Exception:
+            pass
+    return shift_start_dt + timedelta(days=1)
+
+
 def hash_password(password):
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
@@ -1000,7 +1063,7 @@ def check_password(password, hashed):
 def get_user(emp_id):
     conn = get_db()
     u = conn.execute(
-        "SELECT emp_id, name, email, role, status, department, allow_login, allow_breaks, designation, manager_emp_id, phone, date_of_birth, date_of_joining, address, emergency_contact_name, emergency_contact_phone FROM users WHERE emp_id = ?",
+        "SELECT emp_id, name, email, role, status, department, allow_login, allow_breaks, designation, manager_emp_id, phone, date_of_birth, date_of_joining, address, emergency_contact_name, emergency_contact_phone, shift_start, shift_end FROM users WHERE emp_id = ?",
         [emp_id]
     ).fetchone()
     conn.close()
@@ -1034,7 +1097,9 @@ def admin_required(f):
         row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         conn.close()
         if not row or row[0] != 'Admin':
-            return jsonify({'error': 'Forbidden'}), 403
+            if request.is_json:
+                return jsonify({'error': 'Forbidden'}), 403
+            return redirect(url_for('dashboard'))
         return f(*args, **kwargs)
     return decorated
 
@@ -1086,17 +1151,19 @@ def department_required(*depts):
 # ══════════════════════════════════════════════════════════════════════
 
 @app.route('/api/credentials')
+@login_required
 def get_credentials():
-    """Return known user credentials for demo purposes"""
+    """Return known user credentials for demo purposes (admin only)"""
+    if session.get('role') != 'admin':
+        return jsonify({'error': 'Admin access required'}), 403
     conn = get_db()
     rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
     conn.close()
-    result = [{'emp_id': r[0], 'name': r[1], 'role': r[2], 'department': r[3] or '-', 'password': 'pass123'} for r in rows]
+    result = [{'emp_id': r[0], 'name': r[1], 'role': r[2], 'department': r[3] or '-'} for r in rows]
     return jsonify(result), 200
 
 
 @app.route('/login', methods=['GET', 'POST'])
-@limiter.limit("10 per minute")
 def login():
     """User login
     ---
@@ -1163,9 +1230,10 @@ def login():
 
     now = datetime.now()
     conn = get_db()
+    shift_date = _get_shift_date_for_dt(row[0], now, conn)
     conn.execute(
         "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) VALUES (?, ?, ?, ?)",
-        [session_id, row[0], now, now.date()]
+        [session_id, row[0], now, shift_date]
     )
     conn.close()
 
@@ -1476,9 +1544,11 @@ def documents_api():
 def get_holidays():
     year = request.args.get('year', datetime.now().year, type=int)
     conn = get_db()
-    rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
-    conn.close()
-    return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat(), 'type': r[3]} for r in rows]), 200
+    try:
+        rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
+        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat(), 'type': r[3]} for r in rows]), 200
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/holidays', methods=['POST'])
@@ -1488,13 +1558,23 @@ def add_holiday():
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('date'):
         return jsonify({'error': 'name and date required'}), 400
+    htype = data.get('type', 'National')
+    if htype not in ('National', 'Optional'):
+        return jsonify({'error': 'type must be National or Optional'}), 400
     d = parse_date(data['date'])
+    if d is None:
+        return jsonify({'error': 'Invalid date format'}), 400
     hid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)",
-                 [hid, data['name'], d, d.year, data.get('type', 'National')])
-    conn.close()
-    return jsonify({'message': 'Holiday added', 'id': hid}), 201
+    try:
+        dup = conn.execute("SELECT 1 FROM holidays WHERE holiday_date = ? AND name = ?", [d, data['name']]).fetchone()
+        if dup:
+            return jsonify({'error': 'Holiday with this name and date already exists'}), 409
+        conn.execute("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)",
+                     [hid, data['name'], d, d.year, htype])
+        return jsonify({'message': 'Holiday added', 'id': hid}), 201
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/holidays/<int:hid>', methods=['DELETE'])
@@ -1502,33 +1582,18 @@ def add_holiday():
 @admin_required
 def delete_holiday(hid):
     conn = get_db()
-    conn.execute("DELETE FROM holidays WHERE holiday_id = ?", [hid])
-    conn.close()
-    return jsonify({'message': 'Deleted'}), 200
+    try:
+        result = conn.execute("DELETE FROM holidays WHERE holiday_id = ?", [hid])
+        if result.rowcount == 0:
+            return jsonify({'error': 'Holiday not found'}), 404
+        return jsonify({'message': 'Deleted'}), 200
+    finally:
+        conn.close()
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  ORG CHART
 # ══════════════════════════════════════════════════════════════════════
-
-@app.route('/api/v1/org-chart')
-@app.route('/api/org-chart')
-@admin_required
-def org_chart():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT emp_id, name, designation, department, manager_emp_id, status FROM users WHERE status = 'Active' ORDER BY name"
-    ).fetchall()
-    conn.close()
-    employees = [{
-        'id': r[0],
-        'name': r[1],
-        'designation': r[2] or '',
-        'department': r[3] or '',
-        'manager_id': r[4] or '',
-        'status': r[5] or 'Active'
-    } for r in rows]
-    return jsonify(employees), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1550,6 +1615,7 @@ def add_notification(emp_id, ntype, message, link=None):
 @app.route('/api/v1/notifications', methods=['GET'])
 @app.route('/api/notifications', methods=['GET'])
 @login_required
+
 def get_notifications():
     conn = get_db()
     rows = conn.execute(
@@ -1605,8 +1671,14 @@ def regularization_api():
     d = parse_date(data.get('date'))
     if not d or not data.get('reason'):
         return jsonify({'error': 'date and reason required'}), 400
-    rid = gen_id()
     conn = get_db()
+    if conn.execute(
+        "SELECT 1 FROM regularization_requests WHERE emp_id = ? AND request_date = ? AND status = 'Pending'",
+        [emp_id, d]
+    ).fetchone():
+        conn.close()
+        return jsonify({'error': 'A pending request already exists for this date'}), 409
+    rid = gen_id()
     conn.execute(
         "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, status) VALUES (?, ?, ?, ?, 'Pending')",
         [rid, emp_id, d, data['reason']]
@@ -2681,7 +2753,6 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
-from io import BytesIO
 
 
 def generate_payslip_pdf(run_id, emp_id):
@@ -2865,27 +2936,49 @@ def leaves_api():
 
     if request.method == 'GET':
         status_filter = request.args.get('status')
+        month_filter = request.args.get('month', type=int)
+        year_filter = request.args.get('year', type=int)
         if session.get('role') == 'Admin':
-            query = "SELECT leave_id, emp_id, leave_type, start_date, end_date, reason, status, approved_by, created_at FROM leave_requests"
+            query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
+                       l.reason, l.status, l.approved_by, l.created_at
+                       FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id"""
             params = []
+            conditions = []
             if status_filter:
-                query += " WHERE status = ?"
+                conditions.append("l.status = ?")
                 params.append(status_filter)
-            query += " ORDER BY created_at DESC"
+            if year_filter:
+                conditions.append("l.year = ?")
+                params.append(year_filter)
+            if month_filter:
+                conditions.append("CAST(strftime('%m', l.start_date) AS INTEGER) = ?")
+                params.append(month_filter)
+            if conditions:
+                query += " WHERE " + " AND ".join(conditions)
+            query += " ORDER BY l.created_at DESC"
         else:
-            query = "SELECT leave_id, emp_id, leave_type, start_date, end_date, reason, status, approved_by, created_at FROM leave_requests WHERE emp_id = ?"
+            query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
+                       l.reason, l.status, l.approved_by, l.created_at
+                       FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id
+                       WHERE l.emp_id = ?"""
             params = [emp_id]
             if status_filter:
-                query += " AND status = ?"
+                query += " AND l.status = ?"
                 params.append(status_filter)
-            query += " ORDER BY created_at DESC"
+            if year_filter:
+                query += " AND l.year = ?"
+                params.append(year_filter)
+            if month_filter:
+                query += " AND CAST(strftime('%m', l.start_date) AS INTEGER) = ?"
+                params.append(month_filter)
+            query += " ORDER BY l.created_at DESC"
         rows = conn.execute(query, params).fetchall()
         conn.close()
         return jsonify([{
-            'leave_id': r[0], 'emp_id': r[1], 'leave_type': r[2],
-            'start_date': r[3].isoformat(), 'end_date': r[4].isoformat(),
-            'reason': r[5], 'status': r[6], 'approved_by': r[7],
-            'created_at': r[8].isoformat() if r[8] else None
+            'leave_id': r[0], 'emp_id': r[1], 'emp_name': r[2] or r[1], 'leave_type': r[3],
+            'start_date': r[4].isoformat(), 'end_date': r[5].isoformat(),
+            'reason': r[6], 'status': r[7], 'approved_by': r[8],
+            'created_at': r[9].isoformat() if r[9] else None
         } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
@@ -2900,7 +2993,7 @@ def leaves_api():
 
     balance = conn.execute(
         "SELECT balance_id, total_days, used_days FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",
-        [emp_id, lt, sd.year]
+        [emp_id, lt, datetime.now().year]
     ).fetchone()
     if balance:
         requested = (ed - sd).days + 1
@@ -2909,15 +3002,61 @@ def leaves_api():
             conn.close()
             return jsonify({'error': f'Insufficient balance. Remaining: {remaining} days'}), 400
 
+    if conn.execute(
+        "SELECT 1 FROM leave_requests WHERE emp_id = ? AND status IN ('Pending','Approved') AND start_date <= ? AND end_date >= ?",
+        [emp_id, ed, sd]
+    ).fetchone():
+        conn.close()
+        return jsonify({'error': 'Overlapping leave request already exists for these dates'}), 409
+
     leave_id = gen_id()
     conn.execute(
-        "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, reason, status) VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
-        [leave_id, emp_id, lt, sd, ed, data.get('reason', '')]
+        "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')",
+        [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', '')]
     )
     conn.close()
     audit_log(emp_id, 'LEAVE_APPLY', f'{lt} leave {sd} to {ed}')
     add_notification(session['emp_id'], 'LEAVE_APPLIED', f'Your {lt} leave ({sd} to {ed}) has been submitted.', '/leaves')
     return jsonify({'message': 'Leave application submitted', 'leave_id': leave_id}), 201
+
+
+@app.route('/api/v1/leaves/export', methods=['GET'])
+@app.route('/api/leaves/export', methods=['GET'])
+@admin_required
+def export_leaves():
+    month = request.args.get('month', datetime.now().month, type=int)
+    year = request.args.get('year', datetime.now().year, type=int)
+    status_filter = request.args.get('status')
+    conn = get_db()
+    try:
+        query = """SELECT l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
+                   l.reason, l.status, l.approved_by, l.created_at
+                   FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id
+                   WHERE l.year = ? AND CAST(strftime('%m', l.start_date) AS INTEGER) = ?"""
+        params = [year, month]
+        if status_filter:
+            query += " AND l.status = ?"
+            params.append(status_filter)
+        query += " ORDER BY l.start_date"
+        rows = conn.execute(query, params).fetchall()
+    finally:
+        conn.close()
+
+    import io, pandas as pd
+    data = [{
+        'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
+        'From': r[3].isoformat(), 'To': r[4].isoformat(), 'Days': (r[4] - r[3]).days + 1,
+        'Reason': r[5] or '', 'Status': r[6], 'Approved By': r[7] or ''
+    } for r in rows]
+
+    buf = io.BytesIO()
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=['Employee ID','Employee Name','Leave Type','From','To','Days','Reason','Status','Approved By'])
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Leaves')
+    buf.seek(0)
+    month_name = datetime(2000, month, 1).strftime('%B')
+    return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                     download_name=f'leaves_{month_name}_{year}.xlsx', as_attachment=True)
 
 
 @app.route('/api/v1/leaves/<int:leave_id>/approve', methods=['POST'])
@@ -3068,33 +3207,74 @@ def export_report():
     """
     start_date = parse_date(request.args.get('start_date'), datetime.now().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
-    fmt = request.args.get('format', 'csv')
+    fmt = request.args.get('format', 'xlsx')
 
     conn = get_db()
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department,
                COALESCE((SELECT SUM(total_hours) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0) AS total_hours,
                COALESCE((SELECT SUM(duration_minutes) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0) AS break_minutes,
-               COALESCE((SELECT COUNT(*) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0) AS break_count
+               COALESCE((SELECT COUNT(*) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0) AS break_count,
+               (SELECT MIN(login_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?) AS first_login,
+               (SELECT MAX(logout_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?) AS last_logout
         FROM users u WHERE u.role = 'Employee' ORDER BY u.name
-    """, [start_date, end_date, start_date, end_date, start_date, end_date]).fetchall()
+    """, [start_date, end_date, start_date, end_date, start_date, end_date,
+          start_date, end_date, start_date, end_date]).fetchall()
     conn.close()
 
-    df = pd.DataFrame(rows, columns=['Employee ID', 'Name', 'Department', 'Total Hours', 'Break Minutes', 'Break Count'])
-    df['Total Hours'] = df['Total Hours'].astype(float)
-    df['Break Minutes'] = df['Break Minutes'].astype(float)
-    df['Productive Hours'] = (df['Total Hours'] - df['Break Minutes'] / 60).round(2)
-    df['Efficiency %'] = ((df['Productive Hours'] / df['Total Hours'].replace(0, 1)) * 100).round(1)
+    def mins_to_hms(minutes):
+        total = int(round(float(minutes) * 60))
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        return f'{h:02d}:{m:02d}:{s:02d}'
+
+    def hours_to_hms(hours):
+        total = int(round(float(hours) * 3600))
+        h = total // 3600
+        m = (total % 3600) // 60
+        s = total % 60
+        return f'{h:02d}:{m:02d}:{s:02d}'
+
+    def fmt_time(val):
+        if val is None:
+            return '--:--:--'
+        try:
+            return val.strftime('%H:%M:%S')
+        except Exception:
+            return '--:--:--'
+
+    data = []
+    for r in rows:
+        sh = float(r[3] or 0)
+        bm = float(r[4] or 0)
+        ph = max(0, sh - bm / 60)
+        eff = round((ph / sh) * 100, 1) if sh > 0 else 0
+        data.append({
+            'Employee ID': r[0], 'Name': r[1], 'Department': r[2] or 'N/A',
+            'First Login': fmt_time(r[6]),
+            'Last Logout': fmt_time(r[7]),
+            'Total Hours': hours_to_hms(sh),
+            'Break Duration': mins_to_hms(bm),
+            'Break Count': int(r[5]),
+            'Productive Hours': hours_to_hms(ph),
+            'Efficiency %': eff,
+        })
+
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=[
+        'Employee ID', 'Name', 'Department', 'First Login', 'Last Logout',
+        'Total Hours', 'Break Duration', 'Break Count', 'Productive Hours', 'Efficiency %'])
     df['Period'] = f'{start_date} to {end_date}'
 
     if fmt == 'xlsx':
         buf = BytesIO()
-        df.to_csv(buf, index=False)
+        with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Report')
         buf.seek(0)
         return send_file(
-            buf, mimetype='text/csv',
+            buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             as_attachment=True,
-            download_name=f'hrms_report_{start_date}_{end_date}.csv'
+            download_name=f'hrms_report_{start_date}_{end_date}.xlsx'
         )
 
     csv_buf = BytesIO()
@@ -3104,6 +3284,84 @@ def export_report():
         csv_buf, mimetype='text/csv',
         as_attachment=True,
         download_name=f'hrms_report_{start_date}_{end_date}.csv'
+    )
+
+
+@app.route('/api/v1/reports/pdf')
+@app.route('/api/reports/pdf')
+@admin_required
+def export_report_pdf():
+    """Export report as PDF
+    ---
+    get:
+      tags: [Reports]
+      parameters:
+        - in: query
+          name: start_date
+          type: string
+        - in: query
+          name: end_date
+          type: string
+      responses:
+        200:
+          description: PDF file download
+    """
+    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    end_date = parse_date(request.args.get('end_date'), start_date)
+    if end_date and end_date < start_date:
+        start_date, end_date = end_date, start_date
+
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT u.emp_id, u.name, u.department,
+               COALESCE((SELECT SUM(total_hours) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0) AS total_hours,
+               COALESCE((SELECT SUM(duration_minutes) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0) AS break_minutes,
+               COALESCE((SELECT COUNT(*) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0) AS session_count
+        FROM users u WHERE u.role = 'Employee' ORDER BY u.name
+    """, [start_date, end_date, start_date, end_date, start_date, end_date]).fetchall()
+    conn.close()
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=30, bottomMargin=30)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('ReportTitle', parent=styles['Title'], fontSize=18, spaceAfter=6, textColor=colors.HexColor('#0F172A'))
+    subtitle_style = ParagraphStyle('Subtitle', parent=styles['Normal'], fontSize=11, spaceAfter=20, textColor=colors.HexColor('#64748B'), alignment=1)
+    elements = []
+
+    elements.append(Paragraph('HRMS Employee Efficiency Report', title_style))
+    elements.append(Paragraph(f'Period: {start_date} to {end_date}', subtitle_style))
+    elements.append(Spacer(1, 12))
+
+    header = ['Employee ID', 'Name', 'Department', 'Hours', 'Break Min', 'Sessions', 'Efficiency']
+    table_data = [header]
+    for r in rows:
+        sh = float(r[3] or 0)
+        bm = int(r[4] or 0)
+        ph = max(0, sh - bm / 60)
+        eff = f'{round((ph / sh) * 100, 1) if sh > 0 else 0}%'
+        table_data.append([str(r[0]), str(r[1]), str(r[2] or 'N/A'), f'{sh:.2f}', str(int(bm)), str(int(r[5])), eff])
+
+    table = Table(table_data, colWidths=[60, 90, 80, 50, 55, 55, 60])
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F172A')),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 8),
+        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#F8FAFC')]),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+    ]))
+    elements.append(table)
+
+    doc.build(elements)
+    buf.seek(0)
+    return send_file(
+        buf, mimetype='application/pdf',
+        as_attachment=True,
+        download_name=f'hrms_report_{start_date}_{end_date}.pdf'
     )
 
 
@@ -3124,16 +3382,43 @@ def start_break():
     if user and not user[0]:
         conn.close()
         return jsonify({'error': 'Breaks not allowed'}), 403
-    if not conn.execute("SELECT 1 FROM break_types WHERE break_type = ?", [break_type]).fetchone():
+    shift_start_dt = _get_shift_start_dt(emp_id, conn)
+    bt = conn.execute("SELECT daily_limit_minutes FROM break_types WHERE break_type = ?", [break_type]).fetchone()
+    if not bt:
         conn.close()
         return jsonify({'error': 'Invalid break type'}), 400
-    if conn.execute("SELECT 1 FROM breaks WHERE emp_id = ? AND status = 'Active'", [emp_id]).fetchone():
-        conn.close()
-        return jsonify({'error': 'Already on a break'}), 409
+    limit = bt[0]
+    if limit:
+        today_total = conn.execute(
+            "SELECT COALESCE(SUM(duration_minutes), 0) FROM breaks WHERE emp_id = ? AND break_type = ? AND start_time >= ? AND status = 'Completed'",
+            [emp_id, break_type, shift_start_dt]
+        ).fetchone()[0]
+        if today_total >= limit:
+            conn.close()
+            return jsonify({'error': f'Daily limit of {limit} min reached for {break_type}'}), 400
+    if break_type == 'Lunch':
+        pending = conn.execute(
+            "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND start_time >= ? AND status = 'Pending'",
+            [emp_id, break_type, shift_start_dt]
+        ).fetchone()
+        if not pending:
+            conn.close()
+            return jsonify({'error': 'Lunch break requires manager approval'}), 403
+    active = conn.execute(
+        "SELECT break_id FROM breaks WHERE emp_id = ? AND status = 'Active'", [emp_id]
+    ).fetchone()
+    if active:
+        conn.execute(
+            "UPDATE breaks SET end_time = ?, status = 'Completed' WHERE break_id = ?",
+            [datetime.now(), active[0]]
+        )
+        conn.commit()
     break_id = gen_id()
+    now = datetime.now()
+    shift_date = _get_shift_date_for_dt(emp_id, now, conn)
     conn.execute(
         "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) VALUES (?, ?, ?, ?, ?, 'Active')",
-        [break_id, emp_id, break_type, datetime.now(), datetime.now().date()]
+        [break_id, emp_id, break_type, now, shift_date]
     )
     conn.close()
     return jsonify({'message': 'Break started', 'break_id': break_id, 'break_type': break_type}), 201
@@ -3163,12 +3448,14 @@ def end_break(break_id):
 
 @app.route('/api/user-breaks')
 @login_required
+
 def get_user_breaks():
     emp_id = session['emp_id']
     conn = get_db()
+    shift_start_dt = _get_shift_start_dt(emp_id, conn)
     breaks = conn.execute(
-        "SELECT break_id, break_type, start_time, end_time, duration_minutes, status FROM breaks WHERE emp_id = ? AND break_date = ? ORDER BY start_time DESC",
-        [emp_id, datetime.now().date()]
+        "SELECT break_id, break_type, start_time, end_time, duration_minutes, status FROM breaks WHERE emp_id = ? AND (status = 'Active' OR start_time >= ?) ORDER BY start_time DESC",
+        [emp_id, shift_start_dt]
     ).fetchall()
     conn.close()
     return jsonify([{
@@ -3177,6 +3464,81 @@ def get_user_breaks():
         'end_time': b[3].strftime('%H:%M:%S') if b[3] else 'Ongoing',
         'duration_minutes': b[4] or 0, 'status': b[5]
     } for b in breaks]), 200
+
+
+@app.route('/api/break-approvals', methods=['GET', 'POST'])
+@login_required
+def break_approvals_api():
+    emp_id = session['emp_id']
+    if request.method == 'GET':
+        conn = get_db()
+        if session.get('role') == 'Admin':
+            rows = conn.execute(
+                "SELECT a.approval_id, a.emp_id, u.name, a.break_type, a.break_date, a.reason, a.status, a.approved_by, a.created_at FROM break_approvals a JOIN users u ON a.emp_id = u.emp_id ORDER BY a.created_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT a.approval_id, a.emp_id, u.name, a.break_type, a.break_date, a.reason, a.status, a.approved_by, a.created_at FROM break_approvals a JOIN users u ON a.emp_id = u.emp_id WHERE a.emp_id = ? ORDER BY a.created_at DESC",
+                [emp_id]
+            ).fetchall()
+        conn.close()
+        return jsonify([{
+            'approval_id': r[0], 'emp_id': r[1], 'emp_name': r[2],
+            'break_type': r[3], 'break_date': r[4].isoformat(),
+            'reason': r[5], 'status': r[6], 'approved_by': r[7],
+            'created_at': r[8].isoformat() if r[8] else None
+        } for r in rows]), 200
+
+    data = request.get_json(silent=True) or {}
+    bt = data.get('break_type')
+    if bt != 'Lunch':
+        return jsonify({'error': 'Only Lunch breaks require approval'}), 400
+    conn = get_db()
+    if conn.execute(
+        "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND break_date = ? AND status = 'Pending'",
+        [emp_id, bt, _get_shift_date_for_dt(emp_id, datetime.now(), conn)]
+    ).fetchone():
+        conn.close()
+        return jsonify({'error': 'Pending approval already exists for today'}), 409
+    aid = gen_id()
+    shift_date = _get_shift_date_for_dt(emp_id, datetime.now(), conn)
+    conn.execute(
+        "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) VALUES (?, ?, ?, ?, ?, 'Pending')",
+        [aid, emp_id, bt, shift_date, data.get('reason', '')]
+    )
+    conn.close()
+    return jsonify({'message': 'Lunch break approval requested', 'approval_id': aid}), 201
+
+
+@app.route('/api/break-approvals/<int:aid>/approve', methods=['POST'])
+@admin_required
+def approve_break(aid):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT emp_id, break_type, break_date FROM break_approvals WHERE approval_id = ? AND status = 'Pending'",
+        [aid]
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Approval request not found or already processed'}), 404
+    conn.execute(
+        "UPDATE break_approvals SET status = 'Approved', approved_by = ? WHERE approval_id = ?",
+        [session['emp_id'], aid]
+    )
+    conn.close()
+    return jsonify({'message': 'Break approved'}), 200
+
+
+@app.route('/api/break-approvals/<int:aid>/reject', methods=['POST'])
+@admin_required
+def reject_break(aid):
+    conn = get_db()
+    conn.execute(
+        "UPDATE break_approvals SET status = 'Rejected', approved_by = ? WHERE approval_id = ? AND status = 'Pending'",
+        [session['emp_id'], aid]
+    )
+    conn.close()
+    return jsonify({'message': 'Break rejected'}), 200
 
 
 @app.route('/api/break-types')
@@ -3195,9 +3557,17 @@ def get_break_types():
 def get_login_hours():
     emp_id = session['emp_id']
     conn = get_db()
+    date_str = request.args.get('date', '')
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            target_date = datetime.now().date()
+    else:
+        target_date = datetime.now().date()
     sessions = conn.execute(
-        "SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time DESC",
-        [emp_id, datetime.now().date()]
+        "SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC",
+        [emp_id, target_date]
     ).fetchall()
     conn.close()
     return jsonify([{
@@ -3208,6 +3578,168 @@ def get_login_hours():
     } for s in sessions]), 200
 
 
+@app.route('/api/user/shift-summary')
+@login_required
+def get_shift_summary():
+    emp_id = session['emp_id']
+    conn = get_db()
+    date_str = request.args.get('date', '')
+    if date_str:
+        try:
+            target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        except ValueError:
+            target_date = datetime.now().date()
+    else:
+        target_date = datetime.now().date()
+
+    shift_start_dt = _get_shift_start_dt(emp_id, conn, target_date)
+    shift_end_dt = _get_shift_end_dt(emp_id, shift_start_dt, conn)
+
+    sessions = conn.execute(
+        "SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC",
+        [emp_id, target_date]
+    ).fetchall()
+
+    breaks = conn.execute(
+        "SELECT break_type, start_time, end_time, duration_minutes, status FROM breaks WHERE emp_id = ? AND break_date = ? ORDER BY start_time ASC",
+        [emp_id, target_date]
+    ).fetchall()
+
+    conn.close()
+
+    total_session_hours = sum(float(s[2]) for s in sessions if s[2])
+    total_break_minutes = sum(int(b[3]) for b in breaks if b[3])
+    session_count = len(sessions)
+
+    first_login = sessions[0][0] if sessions else None
+    last_logout = None
+    for s in reversed(sessions):
+        if s[1]:
+            last_logout = s[1]
+            break
+
+    shift_hours = 0
+    if first_login and last_logout:
+        shift_hours = round((last_logout - first_login).total_seconds() / 3600, 2)
+    elif first_login and not last_logout:
+        shift_hours = round((datetime.now() - first_login).total_seconds() / 3600, 2)
+
+    productive_hours = max(0, shift_hours - total_break_minutes / 60)
+    efficiency = round((productive_hours / shift_hours) * 100, 1) if shift_hours > 0 else 0
+
+    return jsonify({
+        'date': target_date.isoformat(),
+        'shift_start': shift_start_dt.strftime('%H:%M'),
+        'shift_end': shift_end_dt.strftime('%H:%M'),
+        'first_login': first_login.strftime('%H:%M:%S') if first_login else None,
+        'last_logout': last_logout.strftime('%H:%M:%S') if last_logout else None,
+        'shift_hours': shift_hours,
+        'total_session_hours': total_session_hours,
+        'total_break_minutes': total_break_minutes,
+        'productive_hours': round(productive_hours, 2),
+        'efficiency': efficiency,
+        'session_count': session_count,
+        'break_count': len(breaks)
+    }), 200
+
+
+@app.route('/api/user/calendar')
+@login_required
+def get_user_calendar():
+    emp_id = session['emp_id']
+    month = int(request.args.get('month', datetime.now().month))
+    year = int(request.args.get('year', datetime.now().year))
+
+    start_date = datetime(year, month, 1).date()
+    if month == 12:
+        end_date = datetime(year + 1, 1, 1).date() - timedelta(days=1)
+    else:
+        end_date = datetime(year, month + 1, 1).date() - timedelta(days=1)
+
+    conn = get_db()
+
+    sessions = conn.execute(
+        "SELECT session_date, login_time, logout_time, total_hours FROM user_sessions WHERE emp_id = ? AND session_date BETWEEN ? AND ? ORDER BY session_date, login_time",
+        [emp_id, start_date, end_date]
+    ).fetchall()
+
+    breaks = conn.execute(
+        "SELECT break_date, break_type, start_time, end_time, duration_minutes, status FROM breaks WHERE emp_id = ? AND break_date BETWEEN ? AND ? ORDER BY break_date, start_time",
+        [emp_id, start_date, end_date]
+    ).fetchall()
+
+    leaves = conn.execute(
+        "SELECT start_date, end_date, leave_type, status FROM leave_requests WHERE emp_id = ? AND start_date <= ? AND end_date >= ? ORDER BY start_date",
+        [emp_id, end_date, start_date]
+    ).fetchall()
+
+    holidays = conn.execute(
+        "SELECT holiday_date, name FROM holidays WHERE holiday_date BETWEEN ? AND ? ORDER BY holiday_date",
+        [start_date, end_date]
+    ).fetchall()
+
+    user_row = conn.execute(
+        "SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]
+    ).fetchone()
+
+    conn.close()
+
+    sess_map = {}
+    for s in sessions:
+        d = s[0].isoformat() if s[0] else None
+        if not d: continue
+        if d not in sess_map: sess_map[d] = []
+        sess_map[d].append({
+            'login': s[1].strftime('%H:%M') if s[1] else None,
+            'logout': s[2].strftime('%H:%M') if s[2] else 'Active',
+            'hours': float(s[3]) if s[3] else 0
+        })
+
+    brk_map = {}
+    for b in breaks:
+        d = b[0].isoformat() if b[0] else None
+        if not d: continue
+        if d not in brk_map: brk_map[d] = []
+        brk_map[d].append({
+            'type': b[1],
+            'start': b[2].strftime('%H:%M') if b[2] else None,
+            'end': b[3].strftime('%H:%M') if b[3] else None,
+            'minutes': int(b[4]) if b[4] else 0,
+            'status': b[5]
+        })
+
+    leave_map = {}
+    for l in leaves:
+        ld_start = l[0]
+        ld_end = l[1]
+        leave_type = l[2]
+        leave_status = l[3]
+        current = ld_start
+        while current <= ld_end:
+            d = current.isoformat()
+            leave_map[d] = {'type': leave_type, 'status': leave_status}
+            current += timedelta(days=1)
+
+    holiday_map = {}
+    for h in holidays:
+        d = h[0].isoformat() if h[0] else None
+        if d: holiday_map[d] = h[1]
+
+    shift_start = user_row[0] if user_row and user_row[0] else None
+    shift_end = user_row[1] if user_row and user_row[1] else None
+
+    return jsonify({
+        'sessions': sess_map,
+        'breaks': brk_map,
+        'leaves': leave_map,
+        'holidays': holiday_map,
+        'shift_start': shift_start,
+        'shift_end': shift_end,
+        'month': month,
+        'year': year
+    }), 200
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  ADMIN MONITORING ROUTES
 # ══════════════════════════════════════════════════════════════════════
@@ -3216,12 +3748,18 @@ def get_login_hours():
 @admin_required
 def live_monitoring():
     conn = get_db()
+    now = datetime.now()
+    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
+    shift_starts = []
+    for (eid,) in all_employees:
+        shift_starts.append(_get_shift_start_dt(eid, conn))
+    earliest = min(shift_starts) if shift_starts else now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department, b.break_type, b.start_time, b.status
         FROM breaks b JOIN users u ON b.emp_id = u.emp_id
-        WHERE b.status = 'Active' AND b.break_date = ?
+        WHERE b.status = 'Active' AND b.start_time >= ?
         ORDER BY b.start_time DESC
-    """, [datetime.now().date()]).fetchall()
+    """, [earliest]).fetchall()
     conn.close()
     return jsonify([{
         'emp_id': r[0], 'employee_name': r[1], 'department': r[2],
@@ -3233,14 +3771,20 @@ def live_monitoring():
 @admin_required
 def get_break_summary():
     conn = get_db()
+    now = datetime.now()
+    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
+    shift_starts = []
+    for (eid,) in all_employees:
+        shift_starts.append(_get_shift_start_dt(eid, conn))
+    earliest = min(shift_starts) if shift_starts else now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department,
                COUNT(CASE WHEN b.status = 'Active' THEN 1 END),
                COUNT(CASE WHEN b.status = 'Completed' THEN 1 END),
                SUM(CASE WHEN b.status = 'Completed' THEN b.duration_minutes ELSE 0 END)
-        FROM users u LEFT JOIN breaks b ON u.emp_id = b.emp_id AND b.break_date = ?
+        FROM users u LEFT JOIN breaks b ON u.emp_id = b.emp_id AND b.start_time >= ?
         WHERE u.role = 'Employee' GROUP BY u.emp_id, u.name, u.department ORDER BY u.name
-    """, [datetime.now().date()]).fetchall()
+    """, [earliest]).fetchall()
     conn.close()
     return jsonify([{
         'emp_id': r[0], 'employee_name': r[1], 'department': r[2],
@@ -3254,12 +3798,18 @@ def get_break_summary():
 def get_disposed_breaks():
     one_hour_ago = datetime.now() - timedelta(hours=1)
     conn = get_db()
+    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
+    shift_starts = []
+    for (eid,) in all_employees:
+        shift_starts.append(_get_shift_start_dt(eid, conn))
+    earliest_shift = min(shift_starts) if shift_starts else datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    current_shift_date = earliest_shift.date()
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department, b.break_type, b.start_time, b.end_time, b.duration_minutes, b.status
         FROM breaks b JOIN users u ON b.emp_id = u.emp_id
         WHERE b.status = 'Completed' AND b.end_time >= ? AND b.break_date = ?
         ORDER BY b.end_time DESC
-    """, [one_hour_ago, datetime.now().date()]).fetchall()
+    """, [one_hour_ago, current_shift_date]).fetchall()
     conn.close()
     return jsonify([{
         'emp_id': r[0], 'employee_name': r[1], 'department': r[2],
@@ -3270,25 +3820,100 @@ def get_disposed_breaks():
 
 @app.route('/api/dashboard-stats')
 @admin_required
+
 def get_dashboard_stats():
     conn = get_db()
+    now = datetime.now()
     total = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'Employee'").fetchone()[0]
-    online = conn.execute(
-        "SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE logout_time IS NULL AND session_date = ?",
-        [datetime.now().date()]
+    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
+    shift_starts = []
+    for (eid,) in all_employees:
+        shift_starts.append(_get_shift_start_dt(eid, conn))
+    shift_date = min(shift_starts).date() if shift_starts else now.date()
+    logged_in_today = conn.execute(
+        "SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE session_date = ?",
+        [shift_date]
     ).fetchone()[0]
     on_break = conn.execute(
         "SELECT COUNT(DISTINCT emp_id) FROM breaks WHERE status = 'Active' AND break_date = ?",
-        [datetime.now().date()]
+        [shift_date]
     ).fetchone()[0]
     blocked = conn.execute("SELECT COUNT(*) FROM users WHERE status = 'Blocked'").fetchone()[0]
     pending_leaves = conn.execute("SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'").fetchone()[0]
     conn.close()
     return jsonify({
-        'total_employees': total, 'online': online,
+        'total_employees': total, 'logged_in_today': logged_in_today,
         'on_break': on_break, 'blocked_users': blocked,
         'pending_leaves': pending_leaves
     }), 200
+
+
+@app.route('/api/admin/breaks')
+@admin_required
+
+def admin_breaks():
+    conn = get_db()
+    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
+    shift_starts = []
+    for (eid,) in all_employees:
+        shift_starts.append(_get_shift_start_dt(eid, conn))
+    shift_date = min(shift_starts).date() if shift_starts else datetime.now().date()
+    active = conn.execute("""
+        SELECT b.break_id, u.name, b.break_type, b.start_time
+        FROM breaks b JOIN users u ON b.emp_id = u.emp_id
+        WHERE b.status = 'Active' AND b.break_date = ?
+        ORDER BY b.start_time DESC
+    """, [shift_date]).fetchall()
+    disposed = conn.execute("""
+        SELECT u.name, b.break_type, b.duration_minutes, b.end_time
+        FROM breaks b JOIN users u ON b.emp_id = u.emp_id
+        WHERE b.status = 'Completed' AND b.break_date = ?
+        ORDER BY b.end_time DESC LIMIT 20
+    """, [shift_date]).fetchall()
+    summary = conn.execute("""
+        SELECT break_type, COUNT(*), AVG(duration_minutes), MAX(duration_minutes),
+               COUNT(DISTINCT emp_id)
+        FROM breaks WHERE break_date = ? AND status = 'Completed'
+        GROUP BY break_type
+    """, [shift_date]).fetchall()
+    conn.close()
+    return jsonify({
+        'active_breaks': [{
+            'break_id': r[0], 'emp_name': r[1], 'break_type': r[2],
+            'duration': int((datetime.now() - r[3]).total_seconds() / 60) if r[3] else 0
+        } for r in active],
+        'disposed_breaks': [{
+            'emp_name': r[0], 'break_type': r[1],
+            'duration': r[2] or 0,
+            'end_time': r[3].strftime('%H:%M') if r[3] else ''
+        } for r in disposed],
+        'break_summary': [{
+            'break_type': r[0], 'count': r[1],
+            'avg_duration': float(r[2] or 0),
+            'max_duration': float(r[3] or 0),
+            'employees': r[4]
+        } for r in summary]
+    }), 200
+
+@app.route('/api/admin/dispose-break/<int:break_id>', methods=['POST'])
+@admin_required
+def admin_dispose_break(break_id):
+    conn = get_db()
+    info = conn.execute(
+        "SELECT start_time FROM breaks WHERE break_id = ? AND status = 'Active'",
+        [break_id]
+    ).fetchone()
+    if not info:
+        conn.close()
+        return jsonify({'error': 'Break not found or already ended'}), 404
+    end_time = datetime.now()
+    duration = int((end_time - info[0]).total_seconds() / 60)
+    conn.execute(
+        "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
+        [end_time, duration, break_id]
+    )
+    conn.close()
+    return jsonify({'message': 'Break ended by admin', 'duration_minutes': duration}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -3308,12 +3933,33 @@ def get_users():
     per_page = request.args.get('per_page', 50, type=int)
     offset = (page - 1) * per_page
     active_only = request.args.get('active', '').lower() in ('1', 'true', 'yes', 'on')
+    search = request.args.get('search', '').strip()
+    role_filter = request.args.get('role', '').strip()
+    status_filter = request.args.get('status', '').strip()
+    dept_filter = request.args.get('department', '').strip()
     conn = get_db()
-    where_clause = " WHERE status = 'Active'" if active_only else ""
-    total = conn.execute(f"SELECT COUNT(*) FROM users{where_clause}").fetchone()[0]
+    conditions = []
+    params = []
+    if active_only:
+        conditions.append("status = 'Active'")
+    if search:
+        conditions.append("(LOWER(emp_id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(email) LIKE ?)")
+        like = f"%{search.lower()}%"
+        params.extend([like, like, like])
+    if role_filter:
+        conditions.append("role = ?")
+        params.append(role_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if dept_filter:
+        conditions.append("department = ?")
+        params.append(dept_filter)
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM users{where_clause}", params).fetchone()[0]
     rows = conn.execute(
-        f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        [per_page, offset]
+        f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params + [per_page, offset]
     ).fetchall()
     conn.close()
     return jsonify({
@@ -3323,7 +3969,9 @@ def get_users():
             'status': r[4], 'department': r[5],
             'first_login': r[6].strftime('%I:%M %p') if r[6] else 'N/A',
             'allow_login': int(r[7]) if r[7] else 1,
-            'allow_breaks': int(r[8]) if r[8] else 1
+            'allow_breaks': int(r[8]) if r[8] else 1,
+            'shift_start': r[9] or '',
+            'shift_end': r[10] or ''
         } for r in rows]
     }), 200
 
@@ -3342,15 +3990,35 @@ def add_user():
         return jsonify({'error': 'Employee ID already exists'}), 409
     pwd = data.get('password', 'pass123')
     conn.execute(
-        "INSERT INTO users (emp_id, name, email, password, role, department, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?)",
+        "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks, shift_start, shift_end) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?)",
         [data['emp_id'], data['name'], data['email'], hash_password(pwd),
          data.get('role', 'Employee'), data.get('department', ''),
+         data.get('designation', ''),
          datetime.now(), datetime.now(),
-         int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1))]
+         int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1)),
+         data.get('shift_start', ''), data.get('shift_end', '')]
     )
     conn.close()
     audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}')
-    return jsonify({'message': 'User added'}), 201
+
+    admin_name = session.get('name', 'Admin')
+    creds_body = f"""<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;">
+        <h2 style="color:#0f172a;margin:0 0 16px;">Welcome to HRMS</h2>
+        <p style="color:#334155;">Hi <strong>{data['name']}</strong>,</p>
+        <p style="color:#334155;">Your account has been created by <strong>{admin_name}</strong>. Here are your login credentials:</p>
+        <div style="background:white;border:1px solid #e2e8f0;border-radius:8px;padding:16px;margin:16px 0;">
+            <p style="margin:4px 0;"><strong>Employee ID:</strong> {data['emp_id']}</p>
+            <p style="margin:4px 0;"><strong>Email:</strong> {data['email']}</p>
+            <p style="margin:4px 0;"><strong>Password:</strong> {pwd}</p>
+            <p style="margin:4px 0;"><strong>Role:</strong> {data.get('role', 'Employee')}</p>
+            <p style="margin:4px 0;"><strong>Department:</strong> {data.get('department', 'N/A')}</p>
+        </div>
+        <p style="color:#64748b;font-size:12px;">Please change your password after first login. Do not share these credentials with anyone.</p>
+        <p style="color:#64748b;font-size:12px;">- HRMS Team</p>
+    </div>"""
+    send_email(data['email'], 'Your HRMS Account Credentials', creds_body)
+
+    return jsonify({'message': 'User added', 'email_sent': True}), 201
 
 
 @app.route('/api/users/<emp_id>', methods=['GET'])
@@ -3363,7 +4031,9 @@ def get_user_route(emp_id):
         'emp_id': u[0], 'name': u[1], 'email': u[2], 'role': u[3],
         'status': u[4], 'department': u[5],
         'allow_login': int(u[6]) if u[6] else 1,
-        'allow_breaks': int(u[7]) if u[7] else 1
+        'allow_breaks': int(u[7]) if u[7] else 1,
+        'shift_start': u[16] or '' if len(u) > 16 else '',
+        'shift_end': u[17] or '' if len(u) > 17 else ''
     }), 200
 
 
@@ -3373,10 +4043,10 @@ def update_user(emp_id):
     data = request.get_json(silent=True) or {}
     conn = get_db()
     conn.execute(
-        "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ? WHERE emp_id = ?",
+        "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ?, shift_start = ?, shift_end = ? WHERE emp_id = ?",
         [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
          data.get('status', 'Active'), int(data.get('allow_login', 1)),
-         int(data.get('allow_breaks', 1)), emp_id]
+         int(data.get('allow_breaks', 1)), data.get('shift_start', ''), data.get('shift_end', ''), emp_id]
     )
     conn.close()
     audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}')
@@ -3403,6 +4073,42 @@ def unblock_user(emp_id):
     return jsonify({'message': 'User unblocked'}), 200
 
 
+@app.route('/api/users/<emp_id>', methods=['DELETE'])
+@admin_required
+def delete_user(emp_id):
+    if emp_id == session.get('emp_id'):
+        return jsonify({'error': 'Cannot delete your own account'}), 400
+    conn = get_db()
+    user = conn.execute("SELECT name FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+    if not user:
+        conn.close()
+        return jsonify({'error': 'User not found'}), 404
+    tables = [
+        ('user_sessions', 'emp_id'), ('breaks', 'emp_id'), ('leave_requests', 'emp_id'),
+        ('leave_balance', 'emp_id'), ('break_approvals', 'emp_id'), ('audit_log', 'emp_id'),
+        ('notifications', 'emp_id'), ('password_resets', 'emp_id'), ('tokens', 'emp_id'),
+        ('regularization_requests', 'emp_id'), ('onboarding_tasks', 'emp_id'),
+        ('offboarding_tasks', 'emp_id'), ('exit_interviews', 'emp_id'),
+        ('salary_structures', 'emp_id'), ('payroll_items', 'emp_id'),
+        ('goals', 'emp_id'), ('performance_reviews', 'emp_id'),
+        ('feedback_360', 'emp_id'), ('expense_claims', 'emp_id'),
+        ('tickets', 'emp_id'), ('ticket_comments', 'emp_id'),
+        ('assets', 'emp_id'), ('documents', 'emp_id'), ('dependents', 'emp_id'),
+        ('interviews', 'interviewer_id'), ('interviews', 'emp_id'),
+        ('offer_letters', 'emp_id'), ('offer_letters', 'candidate_id'),
+        ('candidate_documents', 'candidate_id'),
+    ]
+    for table, col in tables:
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE {col} = ?", [emp_id])
+        except Exception:
+            pass
+    conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
+    conn.close()
+    audit_log(session['emp_id'], 'USER_DELETE', f'Deleted user {emp_id} ({user[0]})')
+    return jsonify({'message': f'User {emp_id} deleted permanently'}), 200
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  REPORTS
 # ══════════════════════════════════════════════════════════════════════
@@ -3411,12 +4117,6 @@ def unblock_user(emp_id):
 @hr_or_admin_required
 def admin_reports():
     return render_template('admin_reports.html')
-
-
-@app.route('/admin/org-chart')
-@admin_required
-def admin_org_chart():
-    return render_template('org_chart.html')
 
 
 @app.route('/admin/holidays')
@@ -3445,8 +4145,21 @@ def get_reports():
     if end_date and end_date < start_date:
         start_date, end_date = end_date, start_date
 
+    department = request.args.get('department', '').strip()
+    emp_id_filter = request.args.get('emp_id', '').strip()
+
     conn = get_db()
-    summary = conn.execute("""
+
+    user_where = "WHERE u.role = 'Employee'"
+    user_params = []
+    if department:
+        user_where += " AND u.department = ?"
+        user_params.append(department)
+    if emp_id_filter:
+        user_where += " AND u.emp_id = ?"
+        user_params.append(emp_id_filter)
+
+    summary = conn.execute(f"""
         SELECT u.emp_id, u.name, u.department,
                (SELECT MIN(login_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
                (SELECT MAX(logout_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
@@ -3454,19 +4167,40 @@ def get_reports():
                COALESCE((SELECT SUM(duration_minutes) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
                COALESCE((SELECT COUNT(*) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
                COALESCE((SELECT COUNT(*) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0)
-        FROM users u WHERE u.role = 'Employee' ORDER BY u.name
+        FROM users u {user_where} ORDER BY u.name
     """, [start_date, end_date, start_date, end_date, start_date, end_date,
-          start_date, end_date, start_date, end_date, start_date, end_date]).fetchall()
+          start_date, end_date, start_date, end_date, start_date, end_date] + user_params + user_params).fetchall()
 
-    break_details = conn.execute("""
+    break_where = "WHERE b.break_date BETWEEN ? AND ?"
+    break_params = [start_date, end_date]
+    if department:
+        break_where += " AND u.department = ?"
+        break_params.append(department)
+    if emp_id_filter:
+        break_where += " AND b.emp_id = ?"
+        break_params.append(emp_id_filter)
+
+    break_details = conn.execute(f"""
         SELECT b.break_id, b.emp_id, u.name, u.department, b.break_type, b.start_time, b.end_time, b.duration_minutes, b.break_date, b.status
-        FROM breaks b JOIN users u ON b.emp_id = u.emp_id WHERE b.break_date BETWEEN ? AND ? ORDER BY b.break_date DESC, b.start_time DESC
-    """, [start_date, end_date]).fetchall()
+        FROM breaks b JOIN users u ON b.emp_id = u.emp_id {break_where} ORDER BY b.break_date DESC, b.start_time DESC
+    """, break_params).fetchall()
 
-    session_details = conn.execute("""
+    sess_where = "WHERE us.session_date BETWEEN ? AND ?"
+    sess_params = [start_date, end_date]
+    if department:
+        sess_where += " AND u.department = ?"
+        sess_params.append(department)
+    if emp_id_filter:
+        sess_where += " AND us.emp_id = ?"
+        sess_params.append(emp_id_filter)
+
+    session_details = conn.execute(f"""
         SELECT us.session_id, us.emp_id, u.name, u.department, us.login_time, us.logout_time, us.total_hours, us.session_date
-        FROM user_sessions us JOIN users u ON us.emp_id = u.emp_id WHERE us.session_date BETWEEN ? AND ? ORDER BY us.session_date DESC, us.login_time DESC
-    """, [start_date, end_date]).fetchall()
+        FROM user_sessions us JOIN users u ON us.emp_id = u.emp_id {sess_where} ORDER BY us.session_date DESC, us.login_time DESC
+    """, sess_params).fetchall()
+
+    departments = [r[0] for r in conn.execute("SELECT DISTINCT department FROM users WHERE role = 'Employee' AND department IS NOT NULL ORDER BY department").fetchall()]
+    employees = conn.execute(f"SELECT emp_id, name FROM users u {user_where} ORDER BY name", user_params).fetchall()
     conn.close()
 
     summary_list = []
@@ -3503,8 +4237,49 @@ def get_reports():
 
     return jsonify({
         'report_range': {'start_date': start_date.isoformat(), 'end_date': end_date.isoformat()},
+        'departments': departments,
+        'employees': [{'emp_id': e[0], 'name': e[1]} for e in employees],
         'summary': summary_list, 'break_details': break_list, 'session_details': session_list
     }), 200
+
+
+@app.route('/api/reports/department-summary')
+@admin_required
+def get_department_summary():
+    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    end_date = parse_date(request.args.get('end_date'), start_date)
+    if end_date and end_date < start_date:
+        start_date, end_date = end_date, start_date
+
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT u.department,
+               COUNT(DISTINCT u.emp_id) AS employee_count,
+               COALESCE(SUM(us.total_hours), 0) AS total_hours,
+               COALESCE(SUM(b.duration_minutes), 0) AS total_break_minutes,
+               COALESCE(SUM(CASE WHEN b.status = 'Completed' THEN 1 ELSE 0 END), 0) AS total_breaks
+        FROM users u
+        LEFT JOIN user_sessions us ON us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?
+        LEFT JOIN breaks b ON b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ?
+        WHERE u.role = 'Employee' AND u.department IS NOT NULL
+        GROUP BY u.department ORDER BY u.department
+    """, [start_date, end_date, start_date, end_date]).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        sh = float(r[2] or 0)
+        bm = int(r[3] or 0)
+        ph = max(0, sh - bm / 60)
+        eff = round((ph / sh) * 100, 1) if sh > 0 else 0
+        result.append({
+            'department': r[0], 'employee_count': int(r[1]),
+            'total_hours': round(sh, 2), 'total_break_minutes': bm,
+            'total_breaks': int(r[4]), 'productive_hours': round(ph, 2),
+            'efficiency_percent': eff
+        })
+
+    return jsonify({'departments': result}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -3527,10 +4302,6 @@ def not_found(error):
     return jsonify({'error': 'Not found'}), 404
 
 
-@app.errorhandler(429)
-def ratelimit_handler(error):
-    return jsonify({'error': 'Rate limit exceeded. Try again later.'}), 429
-
 
 @app.errorhandler(500)
 def server_error(error):
@@ -3552,13 +4323,16 @@ def cleanup_expired_tokens():
         logger.warning("Cleanup failed: %s", e)
 
 
+# ── Start scheduler ────────────────────────────────────────────────────
+if not STARTED:
+    scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
+    scheduler.start()
+    STARTED = True
+
+
 # ── Entry point ──────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    if not STARTED:
-        scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
-        scheduler.start()
-
     sentry_dsn = os.getenv('SENTRY_DSN')
     if sentry_dsn:
         import sentry_sdk

@@ -31,20 +31,23 @@
                 {% if session.get('role') == 'Admin' %}
                 <li class="nav-item"><a class="nav-link {% if request.path.startswith('/admin/users') %}active{% endif %}" href="/admin/users"><i class="bi bi-people-fill"></i>Users</a></li>
                 {% endif %}
-                <li class="nav-item"><a class="nav-link {% if request.path.startswith('/admin/org-chart') %}active{% endif %}" href="/admin/org-chart"><i class="bi bi-diagram-3"></i>Org Chart</a></li>
+                {% if session.get('role') == 'Admin' %}
                 <li class="nav-item"><a class="nav-link {% if request.path.startswith('/admin/holidays') %}active{% endif %}" href="/admin/holidays"><i class="bi bi-calendar-event"></i>Holidays</a></li>
+                {% endif %}
+                {% set is_admin = session.get('role') == 'Admin' %}
+                {% set is_hr = session.get('department') == 'HR' %}
+                {% if is_admin or is_hr %}
                 <li class="nav-item dropdown">
                     <a class="nav-link dropdown-toggle {% if request.path.startswith('/admin/assets') or request.path.startswith('/admin/jobs') or request.path.startswith('/admin/candidates') or request.path.startswith('/admin/payroll') or request.path.startswith('/admin/salary') or request.path.startswith('/admin/goals') or request.path.startswith('/admin/reviews') or request.path.startswith('/admin/expenses') or request.path.startswith('/admin/tickets') or request.path.startswith('/admin/documents') or request.path.startswith('/admin/analytics') or request.path.startswith('/admin/audit') or request.path.startswith('/admin/reports') or request.path.startswith('/admin/import-users') %}active{% endif %}" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-grid-3x3-gap-fill"></i>Modules</a>
                     <ul class="dropdown-menu dropdown-menu-dark">
                         <li><a class="dropdown-item" href="/admin/assets"><i class="bi bi-laptop"></i>Assets</a></li>
                         <li><a class="dropdown-item" href="/admin/jobs"><i class="bi bi-briefcase"></i>Jobs</a></li>
-                        {% if session.get('role') == 'Admin' or session.get('department') == 'HR' %}
                         <li><a class="dropdown-item" href="/admin/candidates"><i class="bi bi-person-lines-fill"></i>Candidates</a></li>
                         <li><a class="dropdown-item" href="/admin/payroll"><i class="bi bi-cash-stack"></i>Payroll</a></li>
+                        {% if is_admin %}
                         <li><a class="dropdown-item" href="/admin/salary-structures"><i class="bi bi-wallet"></i>Salary</a></li>
-                        <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item" href="/admin/documents"><i class="bi bi-file-earmark-text"></i>Documents</a></li>
                         {% endif %}
+                        <li><a class="dropdown-item" href="/admin/documents"><i class="bi bi-file-earmark-text"></i>Documents</a></li>
                         <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item" href="/admin/goals"><i class="bi bi-bullseye"></i>Goals</a></li>
                         <li><a class="dropdown-item" href="/admin/reviews"><i class="bi bi-star"></i>Reviews</a></li>
@@ -53,11 +56,19 @@
                         <li><a class="dropdown-item" href="/admin/analytics"><i class="bi bi-graph-up"></i>Analytics</a></li>
                         <li><a class="dropdown-item" href="/admin/audit"><i class="bi bi-journal-text"></i>Audit</a></li>
                         <li><a class="dropdown-item" href="/admin/reports"><i class="bi bi-file-spreadsheet"></i>Reports</a></li>
+                        {% if is_admin %}
                         <li><hr class="dropdown-divider"></li>
                         <li><a class="dropdown-item" href="/admin/import-users"><i class="bi bi-upload"></i>Import</a></li>
+                        {% endif %}
                     </ul>
                 </li>
-                <li class="nav-item"><a class="nav-link {% if request.path.startswith('/admin/leaves') or request.path.startswith('/leaves') %}active{% endif %}" href="/admin/leaves"><i class="bi bi-calendar-check"></i>Leaves</a></li>
+                {% endif %}
+                {% if session.get('role') != 'Admin' %}
+                <li class="nav-item"><a class="nav-link {% if request.path.startswith('/leaves') %}active{% endif %}" href="/leaves"><i class="bi bi-calendar-check"></i>Leaves</a></li>
+                {% endif %}
+                <li class="nav-item"><a class="nav-link {% if request.path == '/regularization' %}active{% endif %}" href="/regularization"><i class="bi bi-pencil-square"></i>Regularization</a></li>
+                <li class="nav-item"><a class="nav-link {% if request.path == '/onboarding' %}active{% endif %}" href="/onboarding"><i class="bi bi-rocket-takeoff"></i>Onboarding</a></li>
+                <li class="nav-item"><a class="nav-link {% if request.path == '/profile' %}active{% endif %}" href="/profile"><i class="bi bi-person-fill-gear"></i>Profile</a></li>
             </ul>
             <div class="d-flex align-items-center gap-3">
                 <div class="user-pill d-flex align-items-center">

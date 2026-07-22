@@ -24,13 +24,21 @@
             --border: #E2E8F0;
             --destructive: #DC2626;
             --success: #22C55E;
+            --success-light: #F0FDF4;
             --warning: #EAB308;
-            --card-radius: 16px;
-            --button-radius: 10px;
+            --warning-light: #FEFCE8;
+            --info: #0369A1;
+            --card-radius: 14px;
+            --button-radius: 8px;
             --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
             --shadow: 0 2px 12px rgba(0,0,0,0.06);
             --shadow-lg: 0 10px 40px rgba(15,23,42,0.15);
+            --transition-fast: 150ms ease;
+            --transition-base: 250ms ease;
         }
+        *, *::before, *::after { box-sizing: border-box; }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #0F172A 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
         .login-container { width: 100%; max-width: 520px; }
@@ -54,13 +62,6 @@
         .forgot-link { color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; transition: color 0.2s; }
         .forgot-link:hover { color: #075985; text-decoration: underline; }
         hr { margin: 24px 0; border-color: var(--border); opacity: 0.6; }
-        .credentials-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: var(--text); margin-bottom: 12px; }
-        .credentials-title i { color: var(--accent); }
-        .table { margin: 0; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 10px 8px; background: #F1F5F9; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; padding: 8px; font-size: 13px; border-color: var(--border); }
-        .table tbody tr:hover { background: #F8FAFC; }
-        .pass-badge { background: #F0FDF4; color: #166534; font-weight: 600; padding: 2px 10px; border-radius: 20px; font-size: 12px; display: inline-block; }
         .error-message { color: var(--destructive); font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #FEF2F2; padding: 8px 12px; border-radius: 8px; }
         .success-message { color: #166534; font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #F0FDF4; padding: 8px 12px; border-radius: 8px; }
         .role-badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
@@ -107,16 +108,7 @@
             <div class="success-message" id="successMsg"></div>
         </form>
 
-        <hr>
-        <div class="credentials-title"><i class="bi bi-people-fill"></i> User Credentials</div>
-        <div class="table-responsive" style="max-height:320px;overflow-y:auto;">
-            <table class="table table-hover">
-                <thead><tr><th>ID</th><th>Name</th><th>Role</th><th>Department</th><th>Password</th></tr></thead>
-                <tbody id="credentialsTable">
-                    <tr><td colspan="5" class="text-center text-muted">Loading...</td></tr>
-                </tbody>
-            </table>
-        </div>
+
     </div>
 </div>
 
@@ -144,24 +136,6 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     } catch (error) { errorMsg.textContent = 'Connection error. Please try again.'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); }
 });
 
-async function loadCredentials() {
-    try {
-        const r = await fetch('/api/credentials');
-        const users = await r.json();
-        document.getElementById('credentialsTable').innerHTML = users.map(u => `
-            <tr>
-                <td><strong>${u.emp_id}</strong></td>
-                <td>${u.name}</td>
-                <td><span class="role-badge ${u.role === 'admin' ? 'admin' : 'employee'}">${u.role}</span></td>
-                <td>${u.department || '-'}</td>
-                <td><span class="pass-badge"><i class="bi bi-key-fill me-1" style="font-size:10px;"></i>${u.password}</span></td>
-            </tr>
-        `).join('');
-    } catch(e) {
-        document.getElementById('credentialsTable').innerHTML = '<tr><td colspan="5" class="text-center text-danger">Failed to load credentials</td></tr>';
-    }
-}
-
 async function showForgotPassword() {
     const empId = prompt('Enter your Employee ID:');
     if (!empId) return;
@@ -174,7 +148,6 @@ async function showForgotPassword() {
     } catch(e) { alert('Error processing request'); }
 }
 
-loadCredentials();
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

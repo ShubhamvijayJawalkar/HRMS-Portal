@@ -6,146 +6,214 @@
     <title>HRMS - User Management</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
             --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
-            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
+            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+            --transition-fast: 150ms ease; --transition-base: 250ms ease;
         }
+        *, *::before, *::after { box-sizing: border-box; }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: var(--background); }
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
-        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 12px; padding: 12px 10px !important; }
         .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 24px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
+        .card-header i { margin-right: 6px; color: #60A5FA; font-size: 13px; }
+        .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
-        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; background: var(--background); }
         .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
-        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 14px; font-size: 12px; }
         .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
         .table tbody tr:hover { background: #FAFBFC; }
-        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
-        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
-        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .alert { border-radius: 10px; border: none; }
-        .status-badge { padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
+        .alert { border-radius: 8px; border: none; }
+        .status-badge { padding: 4px 8px; border-radius: 16px; font-size: 11px; font-weight: 600; }
         .status-active { background: #d4edda; color: #155724; }
         .status-blocked { background: #f8d7da; color: #721c24; }
-        .status-restricted { background: #fff3cd; color: #856404; }
-        .permission-badge { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; margin: 2px; display: inline-block; }
+        .permission-badge { padding: 3px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; margin: 1px; display: inline-block; }
         .permission-allowed { background: #d1e7dd; color: #0f5132; }
         .permission-denied { background: #f8d7da; color: #842029; }
-        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
-        .form-section { background: var(--surface); border-radius: var(--card-radius); padding: 0; margin-bottom: 20px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); overflow: hidden; }
-        .section-header { background: var(--primary); color: white; padding: 18px 24px; font-size: 16px; font-weight: 700; letter-spacing: -0.25px; }
-        .section-header small { display: block; color: rgba(255,255,255,0.75); margin-top: 4px; font-weight: 500; }
-        .section-body { padding: 24px; }
-        .message { padding: 12px 20px; border-radius: 8px; margin-bottom: 20px; display: none; }
-        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; display: block; }
-        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; display: block; }
-        .nav-tabs { border-bottom: 2px solid var(--border); }
-        .nav-tabs .nav-link { color: var(--text); border: none; border-bottom: 3px solid transparent; font-weight: 600; padding: 10px 16px; }
-        .nav-tabs .nav-link:hover { border-bottom-color: #94A3B8; }
-        .nav-tabs .nav-link.active { background: transparent; border-bottom-color: var(--primary); color: var(--primary); }
-        .checkbox-group { display: flex; gap: 20px; flex-wrap: wrap; }
-        .checkbox-item { display: flex; align-items: center; gap: 8px; }
-        .checkbox-item input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
-        .checkbox-item label { margin: 0; cursor: pointer; font-weight: 500; color: var(--text); }
+        .message { padding: 8px 14px; border-radius: 6px; margin-bottom: 14px; display: none; font-size: 12px; opacity: 0; transition: opacity 0.25s ease, background 0.25s ease; }
+        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; display: block; opacity: 1; }
+        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; display: block; opacity: 1; }
+        .create-user-btn { background: var(--success); color: white; border: none; border-radius: 6px; padding: 4px 10px; font-weight: 600; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+        .create-user-btn i { color: white !important; }
+        .create-user-btn:hover { background: #16a34a; color: white; transform: translateY(-1px); box-shadow: 0 2px 8px rgba(34,197,94,0.3); }
+        .modal-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0; padding: 10px 14px; font-size: 13px; }
+        .modal-content { border-radius: var(--card-radius); border: none; overflow: hidden; }
+        .checkbox-group { display: flex; gap: 14px; flex-wrap: wrap; }
+        .checkbox-item { display: flex; align-items: center; gap: 6px; }
+        .checkbox-item input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+        .checkbox-item label { margin: 0; cursor: pointer; font-weight: 500; font-size: 12px; color: var(--text); }
+        .card-header h5 { font-size: 13px; margin: 0; }
+        .card-header h5 i { font-size: 13px; }
+        .table tbody tr { transition: background 0.15s ease; }
+        .table tbody tr:nth-child(even) { background: #FAFBFD; }
+        .table tbody tr:hover { background: #F1F5F9 !important; }
+        .action-btns { display: flex; gap: 4px; align-items: center; }
+        .pagination-btn { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 11px; font-weight: 600; color: var(--text-muted); cursor: pointer; transition: all 0.15s ease; }
+        .pagination-btn:hover { background: var(--primary); color: white; border-color: var(--primary); }
+        .pagination-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .pagination-btn:disabled:hover { background: var(--surface); color: var(--text-muted); border-color: var(--border); }
+        .role-badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+        .role-admin { background: #EDE9FE; color: #6D28D9; }
+        .role-team-leader { background: #DBEAFE; color: #1D4ED8; }
+        .role-employee { background: #F1F5F9; color: #475569; }
+        .empty-state { text-align: center; padding: 32px 16px; color: var(--text-muted); }
+        .empty-state i { font-size: 32px; margin-bottom: 8px; display: block; opacity: 0.4; }
+        .empty-state p { font-size: 12px; margin: 0; }
+        .modal-footer { padding: 10px 14px; border-top: 1px solid var(--border); }
+        .modal-body { padding: 14px; }
+        .shift-label { font-size: 11px; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .filter-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 14px; background: #F8FAFC; border-radius: 8px; border: 1px solid var(--border); }
+        .filter-bar .search-box { position: relative; flex: 1; min-width: 180px; }
+        .filter-bar .search-box input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px 6px 28px; font-size: 12px; background: var(--surface); outline: none; transition: border-color 0.15s; }
+        .filter-bar .search-box input:focus { border-color: var(--accent); }
+        .filter-bar .search-box i { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); font-size: 12px; color: var(--text-muted); pointer-events: none; }
+        .filter-bar select { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 11px; background: var(--surface); color: var(--text); cursor: pointer; outline: none; min-width: 100px; }
+        .filter-bar select:focus { border-color: var(--accent); }
+        .filter-bar .filter-reset { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 11px; color: var(--text-muted); cursor: pointer; transition: all 0.15s; white-space: nowrap; }
+        .filter-bar .filter-reset:hover { background: var(--destructive); color: white; border-color: var(--destructive); }
     </style>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
 </head>
 <body>
 {% include "_navbar.html" %}
 
-<div class="container-fluid p-4">
+    <div class="container-fluid px-4 py-3">
     <h2 class="page-title">User Management</h2>
-    <div id="successMsg" class="message success"></div>
-    <div id="errorMsg" class="message error"></div>
-    <ul class="nav nav-tabs mb-4" role="tablist">
-        <li class="nav-item"><button class="nav-link active" id="create-tab" data-bs-toggle="tab" data-bs-target="#createTab">+ Create User</button></li>
-        <li class="nav-item"><button class="nav-link" id="manage-tab" data-bs-toggle="tab" data-bs-target="#manageTab">Manage Users</button></li>
-    </ul>
-    <div class="tab-content">
-        <div class="tab-pane fade show active" id="createTab">
-            <div class="form-section">
-                <div class="section-header">Create New User<small>Quickly add employees with role and access controls.</small></div>
-                <div class="section-body">
-                    <form id="createUserForm">
+    <div id="successMsg" class="message"></div>
+    <div id="errorMsg" class="message"></div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="bi bi-people-fill"></i> All Users</h5>
+            <div class="d-flex align-items-center gap-3">
+                <span id="userCount" class="text-white-50"></span>
+                <button class="create-user-btn" onclick="openCreateModal()"><i class="bi bi-plus-lg"></i> Create User</button>
+            </div>
+        </div>
+        <div class="card-body">
+            <div class="filter-bar">
+                <div class="search-box">
+                    <i class="bi bi-search"></i>
+                    <input type="text" id="searchInput" placeholder="Search by ID, name, or email..." oninput="debounceSearch()">
+                </div>
+                <select id="filterRole" onchange="applyFilters()">
+                    <option value="">All Roles</option>
+                    <option value="Admin">Admin</option>
+                    <option value="Team Leader">Team Leader</option>
+                    <option value="Employee">Employee</option>
+                </select>
+                <select id="filterDept" onchange="applyFilters()">
+                    <option value="">All Departments</option>
+                    <option>MIS</option>
+                    <option>Operations</option>
+                    <option>Support</option>
+                    <option>HR</option>
+                    <option>Finance</option>
+                    <option>Engineering</option>
+                    <option>Marketing</option>
+                    <option>Sales</option>
+                    <option>Design</option>
+                </select>
+                <select id="filterStatus" onchange="applyFilters()">
+                    <option value="">All Status</option>
+                    <option value="Active">Active</option>
+                    <option value="Blocked">Blocked</option>
+                </select>
+                <button class="filter-reset" onclick="clearFilters()"><i class="bi bi-x-lg"></i> Clear</button>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Role</th><th>Shift</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead>
+                    <tbody id="usersTableBody"><tr><td colspan="9"><div class="empty-state"><i class="bi bi-arrow-repeat" style="animation:spin 1s linear infinite;"></i><p>Loading users...</p></div></td></tr></tbody>
+                </table>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mt-2">
+                <button class="pagination-btn" onclick="prevPage()">&larr; Prev</button>
+                <span id="pageInfo" class="text-muted" style="font-size:11px;">Page 1</span>
+                <button class="pagination-btn" onclick="nextPage()">Next &rarr;</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Create User Modal -->
+<div class="modal fade" id="createUserModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus-fill me-2"></i>Create New User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <form id="createUserForm">
                     <div class="row">
-                        <div class="col-md-6 mb-3"><label for="empId" class="form-label">Employee ID *</label><input type="text" id="empId" class="form-control" placeholder="e.g., EMP002" required></div>
+                        <div class="col-md-6 mb-3"><label for="empId" class="form-label">Employee ID *</label><input type="text" id="empId" class="form-control" placeholder="e.g., EMP003" required></div>
                         <div class="col-md-6 mb-3"><label for="name" class="form-label">Full Name *</label><input type="text" id="name" class="form-control" placeholder="John Doe" required></div>
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3"><label for="email" class="form-label">Email *</label><input type="email" id="email" class="form-control" placeholder="john@company.com" required></div>
-                        <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option></select></div>
+                        <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
                     </div>
                     <div class="row">
-                        <div class="col-md-6 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
-                        <div class="col-md-6 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
+                        <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
+                        <div class="col-md-4 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
+                        <div class="col-md-4 mb-3"><label for="designation" class="form-label">Designation</label><input type="text" id="designation" class="form-control" placeholder="e.g., Developer"></div>
                     </div>
-                    <div class="row mb-4">
+                    <div class="row mb-3">
                         <div class="col-md-12">
-                            <label class="form-label d-block mb-3">Permissions</label>
+                            <label class="form-label d-block mb-2">Shift Timing</label>
+                            <div class="row align-items-end">
+                                <div class="col-md-3 mb-2"><label for="shiftType" class="form-label shift-label">Shift Type</label><select id="shiftType" class="form-select" onchange="toggleShiftTime()"><option value="">Select</option><option value="time">Fixed Time</option><option value="24x7">24 x 7</option></select></div>
+                                <div class="col-md-3 mb-2" id="shiftStartGroup"><label for="shiftStart" class="form-label shift-label">Start Time</label><input type="time" id="shiftStart" class="form-control" value="20:00" disabled></div>
+                                <div class="col-md-3 mb-2" id="shiftEndGroup"><label for="shiftEnd" class="form-label shift-label">End Time</label><input type="time" id="shiftEnd" class="form-control" value="05:00" disabled></div>
+                            </div>
+                        </div>
+                    </div>
+                    <script>function toggleShiftTime(){const v=document.getElementById('shiftType').value;const sg=document.getElementById('shiftStartGroup');const eg=document.getElementById('shiftEndGroup');const si=document.getElementById('shiftStart');const ei=document.getElementById('shiftEnd');if(v==='24x7'){sg.style.display='none';eg.style.display='none';}else{sg.style.display='';eg.style.display='';si.disabled=v!=='time';ei.disabled=v!=='time';if(v==='time'){if(!si.value)si.value='20:00';if(!ei.value)ei.value='05:00';}}}</script>
+                    <div class="row mb-3">
+                        <div class="col-md-12">
+                            <label class="form-label d-block mb-2">Permissions</label>
                             <div class="checkbox-group">
                                 <div class="checkbox-item"><input type="checkbox" id="allowLogin" checked><label for="allowLogin">Allow Login</label></div>
                                 <div class="checkbox-item"><input type="checkbox" id="allowBreaks" checked><label for="allowBreaks">Allow Breaks</label></div>
                             </div>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary btn-lg">Create User</button>
                 </form>
             </div>
-        </div>
-    </div>
-    <div class="tab-pane fade" id="manageTab">
-            <div class="form-section">
-                <div class="section-header">All Users<small>View, edit, and manage employee access from one place.</small></div>
-                <div class="section-body">
-                    <div class="card">
-                        <div class="card-header d-flex justify-content-between align-items-center">
-                            <h5 class="mb-0">All Users</h5>
-                            <span id="userCount" class="text-white-50"></span>
-                        </div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead>
-                            <tbody id="usersTableBody"><tr><td colspan="8" class="text-center text-muted">Loading...</td></tr></tbody>
-                        </table>
-                    </div>
-                    <div class="d-flex justify-content-between align-items-center mt-3">
-                        <button class="btn btn-outline-secondary btn-sm" onclick="prevPage()">&larr; Previous</button>
-                        <span id="pageInfo" class="text-muted">Page 1</span>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="nextPage()">Next &rarr;</button>
-                    </div>
-                </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" style="border-radius:var(--button-radius);font-size:12px;padding:7px 14px;font-weight:600;" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="submitCreateUser()"><i class="bi bi-person-plus me-1"></i> Create User</button>
             </div>
         </div>
     </div>
 </div>
-</div>
-</div>
+
+<!-- Edit User Modal -->
 <div class="modal fade" id="editUserModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
         <div class="modal-content">
-            <div class="modal-header" style="background: #1e293b; color: white;"><h5 class="modal-title">Edit User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
                 <form id="editUserForm">
                     <input type="hidden" id="editEmpId">
@@ -154,12 +222,18 @@
                         <div class="col-md-6 mb-3"><label class="form-label">Email</label><input type="email" id="editEmail" class="form-control" required></div>
                     </div>
                     <div class="row">
-                        <div class="col-md-6 mb-3"><label class="form-label">Department</label><select id="editDepartment" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option></select></div>
+                        <div class="col-md-6 mb-3"><label class="form-label">Department</label><select id="editDepartment" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
                         <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
                     </div>
                     <div class="row mb-3">
+                        <div class="col-md-4 mb-2"><label class="form-label">Shift Type</label><select id="editShiftType" class="form-select" onchange="toggleEditShiftTime()"><option value="">Select</option><option value="time">Fixed Time</option><option value="24x7">24 x 7</option></select></div>
+                        <div class="col-md-4 mb-2" id="editShiftStartGroup"><label class="form-label">Shift Start</label><input type="time" id="editShiftStart" class="form-control" disabled></div>
+                        <div class="col-md-4 mb-2" id="editShiftEndGroup"><label class="form-label">Shift End</label><input type="time" id="editShiftEnd" class="form-control" disabled></div>
+                    </div>
+                    <script>function toggleEditShiftTime(){const v=document.getElementById('editShiftType').value;const sg=document.getElementById('editShiftStartGroup');const eg=document.getElementById('editShiftEndGroup');const si=document.getElementById('editShiftStart');const ei=document.getElementById('editShiftEnd');if(v==='24x7'){sg.style.display='none';eg.style.display='none';}else{sg.style.display='';eg.style.display='';si.disabled=v!=='time';ei.disabled=v!=='time';}}</script>
+                    <div class="row mb-3">
                         <div class="col-md-12">
-                            <label class="form-label d-block mb-3">Permissions</label>
+                            <label class="form-label d-block mb-2">Permissions</label>
                             <div class="checkbox-group">
                                 <div class="checkbox-item"><input type="checkbox" id="editAllowLogin"><label for="editAllowLogin">Allow Login</label></div>
                                 <div class="checkbox-item"><input type="checkbox" id="editAllowBreaks"><label for="editAllowBreaks">Allow Breaks</label></div>
@@ -170,41 +244,122 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-primary" onclick="saveUserChanges()">Save Changes</button>
+                <button type="button" class="btn btn-outline-secondary" style="border-radius:var(--button-radius);font-size:12px;padding:7px 14px;font-weight:600;" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="saveUserChanges()"><i class="bi bi-check-lg me-1"></i> Save Changes</button>
             </div>
         </div>
     </div>
 </div>
+
 <script>
 let currentPage = 1;
 let totalUsers = 0;
 const PER_PAGE = 20;
-document.getElementById('manage-tab').addEventListener('click', () => loadUsers(1));
-document.getElementById('createUserForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const d = { emp_id: document.getElementById('empId').value.trim().toUpperCase(), name: document.getElementById('name').value.trim(), email: document.getElementById('email').value.trim(), department: document.getElementById('department').value || '', role: document.getElementById('role').value, password: document.getElementById('password').value || 'pass123', allow_login: document.getElementById('allowLogin').checked ? 1 : 0, allow_breaks: document.getElementById('allowBreaks').checked ? 1 : 0 };
-    if (!d.emp_id || !d.name || !d.email) { showMsg('Fill required fields', 'error'); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { showMsg('Invalid email', 'error'); return; }
-    const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
-    const res = await r.json();
-    if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
-    showMsg('User created!', 'success');
+let searchTimer = null;
+
+function getFilters() {
+    return {
+        search: (document.getElementById('searchInput').value || '').trim(),
+        role: document.getElementById('filterRole').value,
+        department: document.getElementById('filterDept').value,
+        status: document.getElementById('filterStatus').value
+    };
+}
+
+function debounceSearch() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => applyFilters(), 300);
+}
+
+function applyFilters() {
+    loadUsers(1);
+}
+
+function clearFilters() {
+    document.getElementById('searchInput').value = '';
+    document.getElementById('filterRole').value = '';
+    document.getElementById('filterDept').value = '';
+    document.getElementById('filterStatus').value = '';
+    loadUsers(1);
+}
+
+function openCreateModal() {
     document.getElementById('createUserForm').reset();
     document.getElementById('allowLogin').checked = true;
     document.getElementById('allowBreaks').checked = true;
-});
+    document.getElementById('shiftType').value = '';
+    document.getElementById('shiftStart').value = '20:00';
+    document.getElementById('shiftEnd').value = '05:00';
+    document.getElementById('shiftStart').disabled = true;
+    document.getElementById('shiftEnd').disabled = true;
+    document.getElementById('shiftStartGroup').style.display = '';
+    document.getElementById('shiftEndGroup').style.display = '';
+    new bootstrap.Modal(document.getElementById('createUserModal')).show();
+}
+
+async function submitCreateUser() {
+    const st = document.getElementById('shiftType').value;
+    const shiftStart = st === '24x7' ? '24x7' : (st === 'time' ? (document.getElementById('shiftStart').value || '') : '');
+    const shiftEnd = st === '24x7' ? '24x7' : (st === 'time' ? (document.getElementById('shiftEnd').value || '') : '');
+    const d = {
+        emp_id: document.getElementById('empId').value.trim().toUpperCase(),
+        name: document.getElementById('name').value.trim(),
+        email: document.getElementById('email').value.trim(),
+        department: document.getElementById('department').value || '',
+        designation: document.getElementById('designation').value.trim(),
+        role: document.getElementById('role').value,
+        password: document.getElementById('password').value || 'pass123',
+        allow_login: document.getElementById('allowLogin').checked ? 1 : 0,
+        allow_breaks: document.getElementById('allowBreaks').checked ? 1 : 0,
+        shift_start: shiftStart, shift_end: shiftEnd
+    };
+    if (!d.emp_id || !d.name || !d.email) { showMsg('Fill required fields', 'error'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { showMsg('Invalid email', 'error'); return; }
+    if (!d.role) { showMsg('Select a role', 'error'); return; }
+    const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
+    bootstrap.Modal.getInstance(document.getElementById('createUserModal')).hide();
+    showMsg('User created successfully! Credentials sent to ' + d.email, 'success');
+    loadUsers(1);
+}
+
 function loadUsers(page) {
     currentPage = page || 1;
-    fetch(`/api/users?page=${currentPage}&per_page=${PER_PAGE}`).then(r => r.json()).then(d => {
+    const f = getFilters();
+    const params = new URLSearchParams({ page: currentPage, per_page: PER_PAGE });
+    if (f.search) params.set('search', f.search);
+    if (f.role) params.set('role', f.role);
+    if (f.department) params.set('department', f.department);
+    if (f.status) params.set('status', f.status);
+    fetch(`/api/users?${params}`).then(r => r.json()).then(d => {
         totalUsers = d.total;
         const tbody = document.getElementById('usersTableBody');
         document.getElementById('userCount').textContent = `Total: ${d.total}`;
         document.getElementById('pageInfo').textContent = `Page ${d.page} of ${Math.ceil(d.total/PER_PAGE) || 1}`;
-        if (!d.data.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No users</td></tr>'; return; }
-        tbody.innerHTML = d.data.map(u => `<tr><td><strong>${esc(u.emp_id)}</strong></td><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.department||'N/A')}</td><td>${esc(u.role)}</td><td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td><td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td><td><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')">Edit</button> <button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button></td></tr>`).join('');
+        if (!d.data.length) {
+            const f = getFilters();
+            const hasFilters = f.search || f.role || f.department || f.status;
+            tbody.innerHTML = `<tr><td colspan="9"><div class="empty-state"><i class="bi bi-${hasFilters?'funnel':'people'}"></i><p>${hasFilters?'No users match your filters':'No users found'}</p></div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = d.data.map(u => {
+            const shiftTxt = u.shift_start === '24x7' ? '24 x 7' : (u.shift_start ? esc(u.shift_start)+' - '+esc(u.shift_end) : '<span class="text-muted">N/A</span>');
+            return `<tr>
+                <td><strong>${esc(u.emp_id)}</strong></td>
+                <td>${esc(u.name)}</td>
+                <td>${esc(u.email)}</td>
+                <td>${esc(u.department||'N/A')}</td>
+                <td><span class="role-badge role-${u.role.toLowerCase().replace(' ','-')}">${esc(u.role)}</span></td>
+                <td>${shiftTxt}</td>
+                <td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td>
+                <td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td>
+                <td><div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button> <button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button> <button class="btn btn-outline-danger btn-sm" onclick="deleteUser('${u.emp_id}','${esc(u.name)}')" title="Delete"><i class="bi bi-trash"></i></button></div></td>
+            </tr>`;
+        }).join('');
     }).catch(() => showMsg('Failed to load users', 'error'));
 }
+
 async function openEditModal(id) {
     const r = await fetch(`/api/users/${id}`);
     const u = await r.json();
@@ -216,35 +371,77 @@ async function openEditModal(id) {
     document.getElementById('editStatus').value = u.status;
     document.getElementById('editAllowLogin').checked = !!u.allow_login;
     document.getElementById('editAllowBreaks').checked = !!u.allow_breaks;
+    if (u.shift_start === '24x7') {
+        document.getElementById('editShiftType').value = '24x7';
+        document.getElementById('editShiftStartGroup').style.display = 'none';
+        document.getElementById('editShiftEndGroup').style.display = 'none';
+        document.getElementById('editShiftStart').value = '';
+        document.getElementById('editShiftEnd').value = '';
+    } else {
+        document.getElementById('editShiftType').value = 'time';
+        document.getElementById('editShiftStartGroup').style.display = '';
+        document.getElementById('editShiftEndGroup').style.display = '';
+        document.getElementById('editShiftStart').value = u.shift_start || '09:00';
+        document.getElementById('editShiftEnd').value = u.shift_end || '18:00';
+    }
     new bootstrap.Modal(document.getElementById('editUserModal')).show();
 }
+
 async function saveUserChanges() {
     const id = document.getElementById('editEmpId').value;
-    const d = { name: document.getElementById('editName').value.trim(), email: document.getElementById('editEmail').value.trim(), department: document.getElementById('editDepartment').value || '', role: document.getElementById('editRole').value, status: document.getElementById('editStatus').value, allow_login: document.getElementById('editAllowLogin').checked?1:0, allow_breaks: document.getElementById('editAllowBreaks').checked?1:0 };
+    const st = document.getElementById('editShiftType').value;
+    const editShiftStart = st === '24x7' ? '24x7' : (st === 'time' ? (document.getElementById('editShiftStart').value || '') : '');
+    const editShiftEnd = st === '24x7' ? '24x7' : (st === 'time' ? (document.getElementById('editShiftEnd').value || '') : '');
+    const d = {
+        name: document.getElementById('editName').value.trim(),
+        email: document.getElementById('editEmail').value.trim(),
+        department: document.getElementById('editDepartment').value || '',
+        role: document.getElementById('editRole').value,
+        status: document.getElementById('editStatus').value,
+        allow_login: document.getElementById('editAllowLogin').checked ? 1 : 0,
+        allow_breaks: document.getElementById('editAllowBreaks').checked ? 1 : 0,
+        shift_start: editShiftStart, shift_end: editShiftEnd
+    };
     const r = await fetch(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
     const res = await r.json();
-    if (!r.ok) { showMsg(res.error||'Failed', 'error'); return; }
+    if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     showMsg('User updated!', 'success');
     bootstrap.Modal.getInstance(document.getElementById('editUserModal')).hide();
     loadUsers(currentPage);
 }
+
 async function toggleStatus(id, status) {
-    if (!confirm(`Sure to ${status==='Active'?'block':'unblock'}?`)) return;
-    const ep = status==='Active' ? 'block' : 'unblock';
+    if (!confirm(`Sure to ${status==='Active'?'block':'unblock'} this user?`)) return;
+    const ep = status === 'Active' ? 'block' : 'unblock';
     const r = await fetch(`/api/users/${id}/${ep}`, { method: 'POST' });
     const res = await r.json();
-    if (!r.ok) { showMsg(res.error||'Failed', 'error'); return; }
+    if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     showMsg(res.message, 'success');
     loadUsers(currentPage);
 }
+
+async function deleteUser(id, name) {
+    if (!confirm(`Delete user "${name}" (${id})? This action cannot be undone.`)) return;
+    const r = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error || 'Failed to delete', 'error'); return; }
+    showMsg(res.message, 'success');
+    loadUsers(currentPage);
+}
+
 function nextPage() { if (currentPage * PER_PAGE < totalUsers) loadUsers(currentPage + 1); }
 function prevPage() { if (currentPage > 1) loadUsers(currentPage - 1); }
+
 function showMsg(text, type) {
     const s = document.getElementById('successMsg'), e = document.getElementById('errorMsg');
-    if (type==='success') { s.textContent=text; s.classList.add('success'); setTimeout(()=>s.classList.remove('success'),3000); }
-    else { e.textContent=text; e.classList.add('error'); setTimeout(()=>e.classList.remove('error'),3000); }
+    s.classList.remove('success'); e.classList.remove('error');
+    if (type === 'success') { s.textContent = text; s.classList.add('success'); setTimeout(() => s.classList.remove('success'), 5000); }
+    else { e.textContent = text; e.classList.add('error'); setTimeout(() => e.classList.remove('error'), 5000); }
 }
+
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+
+document.addEventListener('DOMContentLoaded', () => loadUsers(1));
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

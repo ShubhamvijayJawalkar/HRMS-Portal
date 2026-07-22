@@ -12,40 +12,58 @@
             --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
-            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
+            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+            --transition-fast: 150ms ease; --transition-base: 250ms ease;
         }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
-        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
-        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
-        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
-        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 24px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
-        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        *, *::before, *::after { box-sizing: border-box; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+        body { background: var(--background); color: var(--text); }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 12px; box-shadow: var(--shadow-sm); transition: transform var(--transition-base), box-shadow var(--transition-base); height: 100%; }
+        .stat-card:hover { transform: translateY(-2px) scale(1.01); box-shadow: var(--shadow); }
+        .stat-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-bottom: 6px; }
+        .stat-value { font-size: 16px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
+        .stat-label { color: var(--text-muted); font-size: 10px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 10px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 8px 12px; font-weight: 700; font-size: 12px; border: none; }
+        .card-header i { margin-right: 5px; color: #60A5FA; font-size: 12px; }
+        .card-body { padding: 12px; }
+        .page-title { font-size: 18px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 12px; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--background); transition: all var(--transition-fast); }
         .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
-        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 16px; font-size: 13px; transition: all var(--transition-fast); }
         .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
-        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
-        .table tbody tr:hover { background: #FAFBFC; }
-        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
-        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
-        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .alert { border-radius: 10px; border: none; }
-        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
-        .holiday-national { background: #d4edda; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; color: #155724; }
-        .holiday-optional { background: #fff3cd; padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; color: #856404; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; transition: all var(--transition-fast); }
+        .btn-danger:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(220,38,38,0.3); }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 7px 10px; background: #F8FAFC; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
+        .table tbody tr { transition: background var(--transition-fast); }
+        .table tbody tr:nth-child(even) { background: #FAFBFD; }
+        .table tbody tr:hover { background: #F1F5F9 !important; }
+        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
+        .badge-type { padding: 3px 8px; border-radius: 16px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; gap: 3px; }
+        .badge-national { background: var(--success-light); color: #166534; }
+        .badge-optional { background: var(--warning-light); color: #92400E; }
+        .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; display: inline-block; }
+        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Approved { background: #F0FDF4; color: #166534; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; }
+        #leaveTabs .btn { border: 1px solid var(--border); font-size: 11px; padding: 3px 10px; font-weight: 600; border-radius: 6px; }
+        #leaveTabs .btn.active { background: var(--primary); color: white; border-color: var(--primary); }
+        .next-holiday { display: flex; align-items: center; gap: 10px; padding: 10px; background: var(--accent-light); border-radius: 8px; margin-top: 10px; }
+        .next-holiday-icon { width: 32px; height: 32px; border-radius: 8px; background: var(--accent); color: white; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+        .next-holiday-info { flex: 1; min-width: 0; }
+        .next-holiday-name { font-size: 12px; font-weight: 700; color: var(--text); }
+        .next-holiday-date { font-size: 10px; color: var(--text-muted); font-weight: 500; }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
+        .toast-msg { padding: 12px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; margin-bottom: 8px; box-shadow: var(--shadow-lg); animation: slideIn 0.25s ease; }
+        .toast-msg.success { background: var(--success-light); color: #166534; border: 1px solid #BBF7D0; }
+        .toast-msg.error { background: #FEF2F2; color: #991B1B; border: 1px solid #FECACA; }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
     </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -54,77 +72,338 @@
 <body>
 {% include "_navbar.html" %}
 
-<div class="container-fluid p-4">
-    <h2 class="page-title mb-4">Holiday Calendar</h2>
-    <div class="row">
-        <div class="col-lg-4">
+<div class="container-fluid px-3 py-2">
+    <h2 class="page-title">Holiday Calendar</h2>
+
+    <div class="row g-2 mb-2">
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:rgba(3,105,161,0.1);color:var(--accent);"><i class="bi bi-calendar-event-fill"></i></div>
+                <div class="stat-value" id="statTotal">0</div>
+                <div class="stat-label">Total Holidays</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:var(--success-light);color:var(--success);"><i class="bi bi-flag-fill"></i></div>
+                <div class="stat-value" id="statNational">0</div>
+                <div class="stat-label">National</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:var(--warning-light);color:var(--warning);"><i class="bi bi-star-fill"></i></div>
+                <div class="stat-value" id="statOptional">0</div>
+                <div class="stat-label">Optional</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:rgba(124,58,237,0.1);color:#7C3AED;"><i class="bi bi-clock-fill"></i></div>
+                <div class="stat-value" id="statRemaining">0</div>
+                <div class="stat-label">Remaining This Year</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#FEF3C7;color:#D97706;"><i class="bi bi-hourglass-split"></i></div>
+                <div class="stat-value" id="statPendingLeaves">0</div>
+                <div class="stat-label">Pending Leaves</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:var(--success-light);color:var(--success);"><i class="bi bi-check-circle-fill"></i></div>
+                <div class="stat-value" id="statApprovedLeaves">0</div>
+                <div class="stat-label">Approved Leaves</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-x-circle-fill"></i></div>
+                <div class="stat-value" id="statRejectedLeaves">0</div>
+                <div class="stat-label">Rejected Leaves</div>
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#DBEAFE;color:#2563EB;"><i class="bi bi-calendar-check"></i></div>
+                <div class="stat-value" id="statTotalLeaves">0</div>
+                <div class="stat-label">Total Leave Requests</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row g-2">
+        <div class="col-lg-6">
             <div class="card">
-                <div class="card-header"><h5 class="mb-0">Add Holiday</h5></div>
-                <div class="card-body">
-                    <form id="holidayForm">
-                        <div class="mb-3"><label class="form-label">Holiday Name</label><input type="text" id="holidayName" class="form-control" required></div>
-                        <div class="mb-3"><label class="form-label">Date</label><input type="date" id="holidayDate" class="form-control" required></div>
-                        <div class="mb-3"><label class="form-label">Type</label><select id="holidayType" class="form-select"><option>National</option><option>Optional</option></select></div>
-                        <button type="submit" class="btn btn-primary">Add Holiday</button>
-                    </form>
-                    <div id="holidayMsg" style="margin-top:15px;display:none;"></div>
+                <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-1">
+                    <span><i class="bi bi-calendar-check"></i>Leave Requests</span>
+                    <div class="d-flex align-items-center gap-1 flex-wrap">
+                        <select id="leaveMonthSelect" class="form-select form-select-sm w-auto" style="font-size:11px;padding:3px 24px 3px 8px;border-radius:6px;" onchange="loadLeaves(currentLeaveFilter)"></select>
+                        <select id="leaveYearSelect" class="form-select form-select-sm w-auto" style="font-size:11px;padding:3px 24px 3px 8px;border-radius:6px;" onchange="loadLeaves(currentLeaveFilter)"></select>
+                        <div class="d-flex gap-1" id="leaveTabs">
+                            <button class="btn btn-sm btn-light active" data-filter="Pending" onclick="loadLeaves('Pending')">Pending</button>
+                            <button class="btn btn-sm btn-light" data-filter="Approved" onclick="loadLeaves('Approved')">Approved</button>
+                            <button class="btn btn-sm btn-light" data-filter="Rejected" onclick="loadLeaves('Rejected')">Rejected</button>
+                            <button class="btn btn-sm btn-light" data-filter="" onclick="loadLeaves('')">All</button>
+                        </div>
+                        <button class="btn btn-sm btn-outline-success" onclick="exportLeaves()" title="Download Excel"><i class="bi bi-file-earmark-excel me-1"></i>Excel</button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead><tr><th>Employee</th><th>Name</th><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+                            <tbody id="leavesTable"><tr><td colspan="8" class="text-center text-muted py-3">Loading...</td></tr></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
         </div>
-        <div class="col-lg-8">
+
+        <div class="col-lg-6">
             <div class="card">
-                <div class="card-header"><h5 class="mb-0">Holidays</h5></div>
-                <div class="card-body">
-                    <div class="mb-3"><label class="form-label">Year</label><select id="yearSelect" class="form-select w-auto" onchange="loadHolidays()"></select></div>
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <span><i class="bi bi-calendar3"></i>Holidays</span>
+                    <div class="d-flex align-items-center gap-2">
+                        <select id="yearSelect" class="form-select form-select-sm w-auto" style="font-size:12px;padding:4px 28px 4px 10px;border-radius:8px;" onchange="loadHolidays()"></select>
+                        <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#addHolidayModal" title="Add Holiday"><i class="bi bi-plus-lg"></i></button>
+                    </div>
+                </div>
+                <div class="card-body p-0">
                     <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead><tr><th>Name</th><th>Date</th><th>Type</th><th>Actions</th></tr></thead>
-                            <tbody id="holidaysTable"><tr><td colspan="4" class="text-center text-muted">Loading...</td></tr></tbody>
+                        <table class="table table-hover mb-0">
+                            <thead><tr><th>Name</th><th>Date</th><th>Type</th><th class="text-end">Actions</th></tr></thead>
+                            <tbody id="holidaysTable"><tr><td colspan="4" class="text-center text-muted py-4">Loading...</td></tr></tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+
+            <div id="nextHolidayCard" class="d-none">
+                <div class="next-holiday">
+                    <div class="next-holiday-icon"><i class="bi bi-arrow-right-circle"></i></div>
+                    <div class="next-holiday-info">
+                        <div class="next-holiday-name" id="nextName">-</div>
+                        <div class="next-holiday-date" id="nextDate">-</div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 </div>
+
+<div class="toast-container" id="toastBox"></div>
+
+<div class="modal fade" id="addHolidayModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-sm">
+        <div class="modal-content" style="border-radius:var(--card-radius);border:none;">
+            <div class="modal-header" style="background:var(--primary);color:white;border-radius:var(--card-radius) var(--card-radius) 0 0;padding:10px 16px;">
+                <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-1" style="color:#60A5FA;"></i>Add Holiday</h6>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" style="padding:16px;">
+                <form id="holidayForm">
+                    <div class="mb-2"><label class="form-label">Holiday Name</label><input type="text" id="holidayName" class="form-control" placeholder="e.g. Independence Day" required></div>
+                    <div class="mb-2"><label class="form-label">Date</label><input type="date" id="holidayDate" class="form-control" required></div>
+                    <div class="mb-3"><label class="form-label">Type</label><select id="holidayType" class="form-select"><option>National</option><option>Optional</option></select></div>
+                    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-plus-lg me-1"></i>Add Holiday</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
+const DAY_NAMES = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+let allHolidays = [];
+let allLeaves = [];
+let currentLeaveFilter = 'Pending';
+
 document.addEventListener('DOMContentLoaded', () => {
     const y = new Date().getFullYear();
     const sel = document.getElementById('yearSelect');
-    for (let i = y - 1; i <= y + 2; i++) { const o = document.createElement('option'); o.value = i; o.text = i; if (i === y) o.selected = true; sel.appendChild(o); }
+    for (let i = y - 1; i <= y + 2; i++) {
+        const o = document.createElement('option');
+        o.value = i; o.text = i;
+        if (i === y) o.selected = true;
+        sel.appendChild(o);
+    }
+    const mSel = document.getElementById('leaveMonthSelect');
+    const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    months.forEach((name, i) => {
+        const o = document.createElement('option');
+        o.value = i + 1; o.text = name;
+        if (i + 1 === new Date().getMonth() + 1) o.selected = true;
+        mSel.appendChild(o);
+    });
+    const ySel = document.getElementById('leaveYearSelect');
+    for (let i = y - 1; i <= y + 1; i++) {
+        const o = document.createElement('option');
+        o.value = i; o.text = i;
+        if (i === y) o.selected = true;
+        ySel.appendChild(o);
+    }
     loadHolidays();
+    loadLeaves('Pending');
     document.getElementById('holidayForm').addEventListener('submit', addHoliday);
+    document.querySelectorAll('#leaveTabs .btn').forEach(el => el.addEventListener('click', function() {
+        document.querySelectorAll('#leaveTabs .btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+    }));
 });
+
 async function loadHolidays() {
     const year = document.getElementById('yearSelect').value;
     const r = await fetch(`/api/holidays?year=${year}`);
-    const data = await r.json();
-    const tbody = document.getElementById('holidaysTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No holidays</td></tr>'; return; }
-    tbody.innerHTML = data.map(h => `
-        <tr>
-            <td><strong>${esc(h.name)}</strong></td>
-            <td>${h.date}</td>
-            <td><span class="${h.type === 'National' ? 'holiday-national' : 'holiday-optional'}">${h.type}</span></td>
-            <td><button class="btn btn-danger btn-sm" onclick="deleteHoliday(${h.id})">Delete</button></td>
-        </tr>
-    `).join('');
+    allHolidays = await r.json();
+    renderStats();
+    renderTable();
+    renderNextHoliday();
 }
+
+function renderStats() {
+    const now = new Date();
+    const national = allHolidays.filter(h => h.type === 'National').length;
+    const optional = allHolidays.filter(h => h.type === 'Optional').length;
+    const remaining = allHolidays.filter(h => new Date(h.date) >= now).length;
+    document.getElementById('statTotal').textContent = allHolidays.length;
+    document.getElementById('statNational').textContent = national;
+    document.getElementById('statOptional').textContent = optional;
+    document.getElementById('statRemaining').textContent = remaining;
+}
+
+function renderTable() {
+    const tbody = document.getElementById('holidaysTable');
+    if (!allHolidays.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4"><i class="bi bi-calendar-x" style="font-size:24px;display:block;margin-bottom:8px;"></i>No holidays this year</td></tr>';
+        return;
+    }
+    tbody.innerHTML = allHolidays.map(h => {
+        const badgeClass = h.type === 'National' ? 'badge-national' : 'badge-optional';
+        const icon = h.type === 'National' ? 'bi-flag' : 'bi-star';
+        return `<tr>
+            <td><strong>${esc(h.name)}</strong></td>
+            <td>${esc(h.date)}</td>
+            <td><span class="badge-type ${badgeClass}"><i class="bi ${icon}"></i>${h.type}</span></td>
+            <td class="text-end"><button class="btn btn-danger btn-sm" onclick="deleteHoliday(${h.id})" title="Delete"><i class="bi bi-trash3"></i></button></td>
+        </tr>`;
+    }).join('');
+}
+
+function renderNextHoliday() {
+    const now = new Date();
+    const card = document.getElementById('nextHolidayCard');
+    const upcoming = allHolidays.filter(h => new Date(h.date) >= now).sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (!upcoming.length) { card.classList.add('d-none'); return; }
+    const next = upcoming[0];
+    const d = new Date(next.date);
+    const diff = Math.ceil((d - now) / (1000 * 60 * 60 * 24));
+    document.getElementById('nextName').textContent = next.name;
+    document.getElementById('nextDate').textContent = `${next.date} (${DAY_NAMES[d.getDay()]}) — ${diff === 0 ? 'Today!' : diff + ' day' + (diff > 1 ? 's' : '') + ' away'}`;
+    card.classList.remove('d-none');
+}
+
 async function addHoliday(e) {
     e.preventDefault();
-    const r = await fetch('/api/holidays', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: document.getElementById('holidayName').value, date: document.getElementById('holidayDate').value, type: document.getElementById('holidayType').value }) });
+    const r = await fetch('/api/holidays', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: document.getElementById('holidayName').value,
+            date: document.getElementById('holidayDate').value,
+            type: document.getElementById('holidayType').value
+        })
+    });
     const d = await r.json();
-    const msg = document.getElementById('holidayMsg');
-    msg.style.display = 'block';
-    msg.className = r.ok ? 'text-success' : 'text-danger';
-    msg.textContent = d.message || d.error;
-    if (r.ok) { document.getElementById('holidayForm').reset(); loadHolidays(); }
+    showToast(r.ok ? 'success' : 'error', d.message || d.error);
+    if (r.ok) {
+        document.getElementById('holidayForm').reset();
+        bootstrap.Modal.getInstance(document.getElementById('addHolidayModal')).hide();
+        loadHolidays();
+    }
 }
+
 async function deleteHoliday(id) {
     if (!confirm('Delete this holiday?')) return;
-    await fetch(`/api/holidays/${id}`, { method: 'DELETE' });
+    const res = await fetch(`/api/holidays/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+        showToast('success', 'Holiday deleted');
+    } else {
+        const data = await res.json();
+        showToast('error', data.error || 'Failed to delete');
+    }
     loadHolidays();
 }
+
+async function loadLeaves(status) {
+    currentLeaveFilter = status;
+    const month = document.getElementById('leaveMonthSelect').value;
+    const year = document.getElementById('leaveYearSelect').value;
+    let url = `/api/leaves?month=${month}&year=${year}`;
+    if (status) url += `&status=${status}`;
+    const r = await fetch(url);
+    allLeaves = await r.json();
+    const tbody = document.getElementById('leavesTable');
+    if (!allLeaves.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted py-3">No leave requests</td></tr>'; return; }
+    tbody.innerHTML = allLeaves.map(l => {
+        const sd = new Date(l.start_date), ed = new Date(l.end_date);
+        const days = Math.ceil((ed - sd) / (1000*60*60*24)) + 1;
+        const actions = l.status === 'Pending' ? `
+            <button class="btn btn-sm btn-outline-success" onclick="approveLeave(${l.leave_id})"><i class="bi bi-check-lg"></i></button>
+            <button class="btn btn-sm btn-outline-danger" onclick="rejectLeave(${l.leave_id})"><i class="bi bi-x-lg"></i></button>
+        ` : '<span class="text-muted">-</span>';
+        return `<tr>
+            <td><strong>${esc(l.emp_id)}</strong></td>
+            <td>${esc(l.emp_name)}</td>
+            <td>${esc(l.leave_type)}</td>
+            <td>${l.start_date}</td>
+            <td>${l.end_date}</td>
+            <td>${days}</td>
+            <td><span class="status-badge status-${l.status}">${l.status}</span></td>
+            <td class="text-end">${actions}</td>
+        </tr>`;
+    }).join('');
+    renderLeaveStats();
+}
+
+function renderLeaveStats() {
+    fetch('/api/leaves').then(r => r.json()).then(data => {
+        document.getElementById('statPendingLeaves').textContent = data.filter(l => l.status === 'Pending').length;
+        document.getElementById('statApprovedLeaves').textContent = data.filter(l => l.status === 'Approved').length;
+        document.getElementById('statRejectedLeaves').textContent = data.filter(l => l.status === 'Rejected').length;
+        document.getElementById('statTotalLeaves').textContent = data.length;
+    });
+}
+
+async function approveLeave(id) {
+    await fetch(`/api/leaves/${id}/approve`, { method: 'POST' });
+    showToast('success', 'Leave approved');
+    loadLeaves(currentLeaveFilter);
+}
+
+async function rejectLeave(id) {
+    await fetch(`/api/leaves/${id}/reject`, { method: 'POST' });
+    showToast('success', 'Leave rejected');
+    loadLeaves(currentLeaveFilter);
+}
+
+function exportLeaves() {
+    const month = document.getElementById('leaveMonthSelect').value;
+    const year = document.getElementById('leaveYearSelect').value;
+    window.location.href = `/api/leaves/export?month=${month}&year=${year}&status=${currentLeaveFilter || ''}`;
+}
+
+function showToast(type, msg) {
+    const box = document.getElementById('toastBox');
+    const t = document.createElement('div');
+    t.className = `toast-msg ${type}`;
+    t.innerHTML = `<i class="bi ${type === 'success' ? 'bi-check-circle-fill' : 'bi-exclamation-circle-fill'} me-1"></i>${esc(msg)}`;
+    box.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity 0.3s'; setTimeout(() => t.remove(), 300); }, 3000);
+}
+
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

@@ -15,39 +15,46 @@
             --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
-            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
+            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+            --transition-fast: 150ms ease; --transition-base: 250ms ease;
         }
+        *, *::before, *::after { box-sizing: border-box; }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: var(--background); }
-        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 22px 20px; box-shadow: var(--shadow-sm); transition: all 0.25s; height: 100%; }
+        .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 16px; box-shadow: var(--shadow-sm); transition: all 0.2s; height: 100%; }
         .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
-        .stat-icon { width: 44px; height: 44px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 10px; }
-        .stat-value { font-size: 26px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
-        .stat-label { color: var(--text-muted); font-size: 13px; font-weight: 500; }
-        .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .stat-icon { width: 38px; height: 38px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 8px; }
+        .stat-value { font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
+        .stat-label { color: var(--text-muted); font-size: 11px; font-weight: 500; }
+        .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; }
         .live-dot.green { background: var(--success); }
         .live-dot.yellow { background: var(--warning); }
         .live-dot.red { background: var(--destructive); }
-        .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 10px 20px; border-radius: 10px; transition: all 0.2s; font-size: 14px; }
+        .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 8px 14px; border-radius: 8px; transition: all 0.2s; font-size: 12px; }
         .nav-pills .nav-link:hover { background: #E2E8F0; color: var(--text); }
         .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(15,23,42,0.25); }
-        .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 24px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
-        .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 22px 18px; box-shadow: var(--shadow-sm); transition: all 0.3s; cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
-        .module-card:hover { transform: translateY(-4px); box-shadow: var(--shadow-lg); }
-        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px; }
-        .module-icon { width: 46px; height: 46px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 10px; }
-        .module-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
-        .module-desc { font-size: 11px; color: var(--text-muted); line-height: 1.3; }
-        .card-header-custom { background: var(--primary); color: white; padding: 14px 20px; border-radius: 12px 12px 0 0; font-weight: 700; font-size: 14px; }
-        .card-header-custom i { margin-right: 8px; color: #60A5FA; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
-        .table tbody tr:hover { background: #FAFBFC; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; }
-        .badge { font-weight: 600; font-size: 11px; padding: 4px 10px; border-radius: 20px; }
+        .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 14px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
+        .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 14px 12px; box-shadow: var(--shadow-sm); transition: all 0.25s; cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
+        .module-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+        .module-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 8px; }
+        .module-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+        .module-desc { font-size: 10px; color: var(--text-muted); line-height: 1.3; }
+        .card-header-custom { background: var(--primary); color: white; padding: 10px 14px; border-radius: 8px 8px 0 0; font-weight: 700; font-size: 13px; }
+        .card-header-custom i { margin-right: 6px; color: #60A5FA; font-size: 13px; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
+        .table tbody tr { transition: background 0.15s ease; }
+        .table tbody tr:nth-child(even) { background: #FAFBFD; }
+        .table tbody tr:hover { background: #F1F5F9 !important; }
+        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .badge { font-weight: 600; font-size: 10px; padding: 3px 8px; border-radius: 16px; }
         .bg-soft-success { background: #F0FDF4; color: #166534; }
         .bg-soft-warning { background: #FEFCE8; color: #92400E; }
         .bg-soft-danger { background: #FEF2F2; color: #991B1B; }
@@ -60,17 +67,17 @@
 {% include "_navbar.html" %}
 
 
-<div class="container-fluid p-4">
+<div class="container-fluid px-4 py-3">
     <!-- Stats -->
-    <div class="row g-3 mb-4">
+    <div class="row g-2 mb-3">
         <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#EFF6FF;color:var(--accent);"><i class="bi bi-people-fill"></i></div><div class="stat-value" id="totalEmployees">-</div><div class="stat-label"><span class="live-dot green"></span>Total Employees</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="onlineCount">-</div><div class="stat-label"><span class="live-dot green pulse"></span>Online Now</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="loggedInToday">-</div><div class="stat-label"><span class="live-dot green pulse"></span>Logged In Today</div></div></div>
         <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="onBreakCount">-</div><div class="stat-label"><span class="live-dot yellow"></span>On Break</div></div></div>
         <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEF2F2;color:var(--destructive);"><i class="bi bi-shield-exclamation"></i></div><div class="stat-value" id="blockedCount">-</div><div class="stat-label"><span class="live-dot red"></span>Blocked</div></div></div>
     </div>
 
     <!-- Tabs -->
-    <ul class="nav nav-pills mb-0" id="dashTabs" role="tablist">
+    <ul class="nav nav-pills mb-0" id="dashTabs" role="tablist" style="gap:4px;">
         <li class="nav-item"><button class="nav-link active" id="modules-tab" data-bs-toggle="pill" data-bs-target="#modules" type="button"><i class="bi bi-grid-3x3-gap-fill me-2"></i>Modules</button></li>
         <li class="nav-item"><button class="nav-link" id="productivity-tab" data-bs-toggle="pill" data-bs-target="#productivity" type="button"><i class="bi bi-activity me-2"></i>Agent Productivity</button></li>
     </ul>
@@ -78,45 +85,46 @@
     <div class="tab-content" id="dashTabContent">
         <!-- Modules -->
         <div class="tab-pane fade show active" id="modules" role="tabpanel">
-            <div class="row g-3">
+            <div class="row g-2">
                 {% if session.get('role') == 'Admin' %}
-                <div class="col-md-4"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
+                <div class="col-md-3"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
                 {% endif %}
-                <div class="col-md-4"><a href="/admin/org-chart" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-diagram-3-fill"></i></div><div class="module-title">Org Chart</div><div class="module-desc">Hierarchical organisation structure</div></a></div>
-                <div class="col-md-4"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday Calendar</div><div class="module-desc">Company holidays & events</div></a></div>
-                <div class="col-md-4"><a href="/leaves" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-calendar-check-fill"></i></div><div class="module-title">Leave Management</div><div class="module-desc">Approve/reject leave requests</div></a></div>
-                <div class="col-md-4"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
-                <div class="col-md-4"><a href="/admin/assets" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-laptop-fill"></i></div><div class="module-title">Asset Management</div><div class="module-desc">Issue & track company assets</div></a></div>
-                <div class="col-md-4"><a href="/admin/jobs" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-briefcase-fill"></i></div><div class="module-title">Job Postings</div><div class="module-desc">Create & manage job openings</div></a></div>
+                <div class="col-md-3"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday Calendar</div><div class="module-desc">Company holidays & events</div></a></div>
+                <div class="col-md-3"><a href="/admin/holidays" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-calendar-check-fill"></i></div><div class="module-title">Leave Management</div><div class="module-desc">Approve/reject leave requests</div></a></div>
+                <div class="col-md-3"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
+                <div class="col-md-3"><a href="/admin/assets" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-laptop-fill"></i></div><div class="module-title">Asset Management</div><div class="module-desc">Issue & track company assets</div></a></div>
+                <div class="col-md-3"><a href="/admin/jobs" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-briefcase-fill"></i></div><div class="module-title">Job Postings</div><div class="module-desc">Create & manage job openings</div></a></div>
                 {% if session.get('role') == 'Admin' or session.get('department') == 'HR' %}
-                <div class="col-md-4"><a href="/admin/candidates" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-person-lines-fill"></i></div><div class="module-title">Candidates</div><div class="module-desc">Hiring pipeline management</div></a></div>
-                <div class="col-md-4"><a href="/admin/payroll" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-cash-stack"></i></div><div class="module-title">Payroll</div><div class="module-desc">Monthly payroll with auto-deductions</div></a></div>
-                <div class="col-md-4"><a href="/admin/salary-structures" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-wallet-fill"></i></div><div class="module-title">Salary Structures</div><div class="module-desc">Configure CTC components</div></a></div>
-                <div class="col-md-4"><a href="/admin/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Employee document manager</div></a></div>
+                <div class="col-md-3"><a href="/admin/candidates" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-person-lines-fill"></i></div><div class="module-title">Candidates</div><div class="module-desc">Hiring pipeline management</div></a></div>
+                <div class="col-md-3"><a href="/admin/payroll" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-cash-stack"></i></div><div class="module-title">Payroll</div><div class="module-desc">Monthly payroll with auto-deductions</div></a></div>
+                <div class="col-md-3"><a href="/admin/salary-structures" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-wallet-fill"></i></div><div class="module-title">Salary Structures</div><div class="module-desc">Configure CTC components</div></a></div>
+                <div class="col-md-3"><a href="/admin/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Employee document manager</div></a></div>
                 {% endif %}
-                <div class="col-md-4"><a href="/admin/goals" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-bullseye"></i></div><div class="module-title">Performance Goals</div><div class="module-desc">Set & rate employee goals</div></a></div>
-                <div class="col-md-4"><a href="/admin/reviews" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-star-fill"></i></div><div class="module-title">Performance Reviews</div><div class="module-desc">Review cycles & feedback</div></a></div>
-                <div class="col-md-4"><a href="/admin/expenses" class="module-card" style="--accent:#D9770C;"><div class="module-icon" style="background:#FFFBEB;color:#D9770C;"><i class="bi bi-receipt"></i></div><div class="module-title">Expense Management</div><div class="module-desc">Approve/reject claims</div></a></div>
-                <div class="col-md-4"><a href="/admin/tickets" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-ticket-fill"></i></div><div class="module-title">Help Desk</div><div class="module-desc">Support ticket management</div></a></div>
-                <div class="col-md-4"><a href="/admin/analytics" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-graph-up"></i></div><div class="module-title">Analytics</div><div class="module-desc">Charts & attrition insights</div></a></div>
-                <div class="col-md-4"><a href="/admin/audit" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-journal-text"></i></div><div class="module-title">Audit Log</div><div class="module-desc">User action history</div></a></div>
-                <div class="col-md-4"><a href="/admin/reports" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-file-spreadsheet-fill"></i></div><div class="module-title">Reports</div><div class="module-desc">Export data & efficiency metrics</div></a></div>
+                <div class="col-md-3"><a href="/admin/goals" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-bullseye"></i></div><div class="module-title">Performance Goals</div><div class="module-desc">Set & rate employee goals</div></a></div>
+                <div class="col-md-3"><a href="/admin/reviews" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-star-fill"></i></div><div class="module-title">Performance Reviews</div><div class="module-desc">Review cycles & feedback</div></a></div>
+                <div class="col-md-3"><a href="/admin/expenses" class="module-card" style="--accent:#D9770C;"><div class="module-icon" style="background:#FFFBEB;color:#D9770C;"><i class="bi bi-receipt"></i></div><div class="module-title">Expense Management</div><div class="module-desc">Approve/reject claims</div></a></div>
+                <div class="col-md-3"><a href="/admin/tickets" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-ticket-fill"></i></div><div class="module-title">Help Desk</div><div class="module-desc">Support ticket management</div></a></div>
+                <div class="col-md-3"><a href="/admin/analytics" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-graph-up"></i></div><div class="module-title">Analytics</div><div class="module-desc">Charts & attrition insights</div></a></div>
+                <div class="col-md-3"><a href="/admin/audit" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-journal-text"></i></div><div class="module-title">Audit Log</div><div class="module-desc">User action history</div></a></div>
+                <div class="col-md-3"><a href="/admin/reports" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-file-spreadsheet-fill"></i></div><div class="module-title">Reports</div><div class="module-desc">Export data & efficiency metrics</div></a></div>
+                <div class="col-md-3"><a href="/onboarding" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-rocket-takeoff-fill"></i></div><div class="module-title">Onboarding</div><div class="module-desc">Track employee onboarding</div></a></div>
+                <div class="col-md-3"><a href="/offboarding" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-box-arrow-right"></i></div><div class="module-title">Offboarding</div><div class="module-desc">Manage exit process</div></a></div>
             </div>
         </div>
 
         <!-- Productivity -->
         <div class="tab-pane fade" id="productivity" role="tabpanel">
-            <div class="row g-3 mb-3">
-                <div class="col-md-4"><div class="stat-card p-3"><small class="text-muted">Active Breaks</small><div class="stat-value" id="activeBreakCount" style="font-size:20px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-3"><small class="text-muted">Today's Disposed</small><div class="stat-value" id="disposedCount" style="font-size:20px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-3"><small class="text-muted">Avg Break Duration</small><div class="stat-value" id="avgDuration" style="font-size:20px;">0 min</div></div></div>
+            <div class="row g-2 mb-3">
+                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Active Breaks</small><div class="stat-value" id="activeBreakCount" style="font-size:16px;">0</div></div></div>
+                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Today's Disposed</small><div class="stat-value" id="disposedCount" style="font-size:16px;">0</div></div></div>
+                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Avg Break Duration</small><div class="stat-value" id="avgDuration" style="font-size:16px;">0 min</div></div></div>
             </div>
-            <div class="d-flex justify-content-end mb-3"><button class="btn btn-sm" style="background:var(--primary);color:white;" onclick="refreshData()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
-            <div class="row g-3">
+            <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm" style="background:var(--primary);color:white;" onclick="refreshData()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
+            <div class="row g-2">
                 <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody id="liveBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr></tbody></table></div></div></div></div>
                 <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-check-circle-fill"></i>Today's Disposed Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>End Time</th></tr></thead><tbody id="disposedBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No disposed breaks</td></tr></tbody></table></div></div></div></div>
             </div>
-            <div class="row g-3 mt-2">
+            <div class="row g-2 mt-2">
                 <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-bar-chart-fill"></i>Break Summary by Type</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Type</th><th>Total</th><th>Avg Duration</th><th>Max Duration</th><th>Employees</th></tr></thead><tbody id="breakSummaryBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
             </div>
         </div>
@@ -132,13 +140,9 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 function loadUserInfo() {
     fetch('/api/profile').then(r => r.json()).then(d => {
-        document.getElementById('userName').textContent = d.name;
-        document.getElementById('userInitial').textContent = d.name.charAt(0).toUpperCase();
         localStorage.setItem('userName', d.name);
     }).catch(() => {
-        const n = localStorage.getItem('userName') || 'Admin';
-        document.getElementById('userName').textContent = n;
-        document.getElementById('userInitial').textContent = n.charAt(0).toUpperCase();
+        localStorage.setItem('userName', localStorage.getItem('userName') || 'Admin');
     });
 }
 async function loadStats() {
@@ -146,9 +150,9 @@ async function loadStats() {
         const r = await fetch('/api/dashboard-stats');
         const d = await r.json();
         document.getElementById('totalEmployees').textContent = d.total_employees || 0;
-        document.getElementById('onlineCount').textContent = d.online_count || 0;
-        document.getElementById('onBreakCount').textContent = d.on_break_count || 0;
-        document.getElementById('blockedCount').textContent = d.blocked_count || 0;
+        document.getElementById('loggedInToday').textContent = d.logged_in_today || 0;
+        document.getElementById('onBreakCount').textContent = d.on_break || 0;
+        document.getElementById('blockedCount').textContent = d.blocked_users || 0;
     } catch(e) {}
 }
 async function refreshData() {

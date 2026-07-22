@@ -13,10 +13,15 @@
             --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --warning: #EAB308; --card-radius: 16px;
-            --button-radius: 10px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 4px 24px rgba(0,0,0,0.1);
+            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
+            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
+            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
+            --transition-fast: 150ms ease; --transition-base: 250ms ease;
         }
+        *, *::before, *::after { box-sizing: border-box; }
+        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: var(--background); }
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
@@ -24,13 +29,13 @@
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
         .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 16px 20px; font-weight: 700; border: none; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; display: flex; justify-content: space-between; align-items: center; }
         .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 24px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .card-header .btn { font-size: 12px; padding: 4px 12px; }
+        .card-body { padding: 16px; }
         .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
         .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
-        .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; }
+        .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; font-weight: 800; letter-spacing: -0.3px; }
         .page-header-badge { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
         .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
@@ -40,24 +45,61 @@
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .btn-outline-secondary { border-radius: var(--button-radius); font-weight: 600; }
+        .btn-outline-primary { border-color: var(--accent); color: var(--accent); border-radius: var(--button-radius); font-weight: 600; }
+        .btn-outline-primary:hover { background: var(--accent); color: white; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; user-select: none; white-space: nowrap; }
+        .table th:hover { background: #E8ECF1; }
+        .table th .sort-icon { margin-left: 4px; font-size: 10px; opacity: 0.5; }
+        .table th.sorted .sort-icon { opacity: 1; color: var(--accent); }
         .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
         .table tbody tr:hover { background: #FAFBFC; }
-        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
-        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
-        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .alert { border-radius: 10px; border: none; }
-        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
-        .metric-card { text-align: center; padding: 24px; }
+        .metric-card { text-align: center; padding: 24px; transition: transform 0.2s, box-shadow 0.2s; }
+        .metric-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
         .metric-value { font-size: 32px; font-weight: 800; color: var(--success); }
         .metric-label { color: var(--text-muted); margin-top: 10px; font-size: 14px; font-weight: 500; }
         .badge-status { padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .badge-active { background: var(--warning); color: #1E293B; }
         .badge-completed { background: var(--success); color: white; }
         .report-form { background: var(--surface); padding: 24px; border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; border: 1px solid var(--border); }
-        .btn-outline-secondary { border-radius: var(--button-radius); font-weight: 600; }
         .chart-container { position: relative; height: 300px; width: 100%; }
+        .preset-btn { border-radius: 8px; font-weight: 600; font-size: 12px; padding: 6px 14px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); transition: all 0.2s; }
+        .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .preset-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+        .search-box { border-radius: 10px; border: 1.5px solid var(--border); padding: 8px 14px 8px 36px; font-size: 13px; background: var(--background); }
+        .search-box:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); outline: none; }
+        .search-wrapper { position: relative; }
+        .search-wrapper i { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--text-muted); font-size: 14px; }
+        .pagination { margin-bottom: 0; }
+        .pagination .page-link { border-radius: 8px; margin: 0 2px; font-size: 13px; font-weight: 600; color: var(--text); border: 1px solid var(--border); }
+        .pagination .page-item.active .page-link { background: var(--accent); border-color: var(--accent); color: white; }
+        .loading-overlay { position: absolute; inset: 0; background: rgba(255,255,255,0.85); display: flex; align-items: center; justify-content: center; border-radius: var(--card-radius); z-index: 10; }
+        .loading-overlay .spinner-border { width: 2rem; height: 2rem; color: var(--accent); }
+        .tab-pills { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; padding-bottom: 4px; }
+        .tab-pills::-webkit-scrollbar { height: 4px; }
+        .tab-pills::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        .tab-pills .nav-link { border-radius: 10px; font-weight: 600; font-size: 13px; padding: 8px 20px; color: var(--text-muted); border: 1.5px solid transparent; white-space: nowrap; flex-shrink: 0; }
+        .tab-pills .nav-link.active { background: var(--primary); color: white; }
+        .tab-pills .nav-link:not(.active):hover { background: var(--muted); color: var(--text); }
+        .dept-card { border-left: 4px solid var(--accent); }
+        .dept-card .dept-name { font-weight: 700; font-size: 15px; color: var(--text); }
+        .dept-card .dept-stat { font-size: 12px; color: var(--text-muted); }
+        .dept-card .dept-value { font-size: 20px; font-weight: 800; color: var(--accent); }
+        .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+        .cal-header { background: var(--primary); color: white; font-weight: 700; font-size: 12px; padding: 10px 6px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+        .cal-day { background: var(--surface); min-height: 110px; padding: 6px 8px; cursor: pointer; transition: background 0.15s; position: relative; }
+        .cal-day:hover { background: var(--accent-light); }
+        .cal-day.today { background: #EFF6FF; box-shadow: inset 0 0 0 2px var(--accent); }
+        .cal-day.selected { background: #DBEAFE; box-shadow: inset 0 0 0 2px #2563EB; }
+        .cal-day.other-month { background: #F8FAFC; }
+        .cal-day.other-month .cal-date { color: #CBD5E1; }
+        .cal-date { font-weight: 700; font-size: 13px; color: var(--text); margin-bottom: 4px; }
+        .cal-event { font-size: 10px; padding: 2px 4px; border-radius: 4px; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
+        .cal-event.login { background: #DCFCE7; color: #166534; }
+        .cal-event.break { background: #FEF3C7; color: #92400E; }
+        .cal-event.hours { background: #E0F2FE; color: #075985; font-weight: 600; }
+        .cal-overflow { font-size: 10px; color: var(--text-muted); font-weight: 600; margin-top: 2px; cursor: pointer; }
     </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -72,149 +114,604 @@
             <div class="eyebrow">Admin workspace</div>
             <div class="page-title">Detailed Reports & Efficiency Monitoring</div>
         </div>
-        <div class="page-header-badge">Actionable insights</div>
+        <div class="page-header-badge" id="reportPeriodBadge">Today</div>
     </div>
+
+    <!-- Filters -->
     <div class="report-form mb-4">
-        <div class="row g-3 align-items-end">
-            <div class="col-md-3"><label class="form-label">Start Date</label><input type="date" id="startDate" class="form-control"></div>
-            <div class="col-md-3"><label class="form-label">End Date</label><input type="date" id="endDate" class="form-control"></div>
-            <div class="col-md-2"><button id="loadReportBtn" class="btn btn-primary w-100">Load Report</button></div>
-            <div class="col-md-2"><button class="btn btn-outline-secondary w-100" onclick="exportReport('csv')">Export CSV</button></div>
-            <div class="col-md-2"><button class="btn btn-outline-secondary w-100" onclick="exportReport('xlsx')">Export Excel</button></div>
-        </div>
-    </div>
-    <div class="row mb-4">
-        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportEmployeeCount">0</div><div class="metric-label">Employees</div></div></div>
-        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportSessions">0</div><div class="metric-label">Sessions</div></div></div>
-        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportBreakMinutes">0</div><div class="metric-label">Break Minutes</div></div></div>
-        <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportAverageEfficiency">0%</div><div class="metric-label">Avg Efficiency</div></div></div>
-    </div>
-    <div class="row mb-4">
-        <div class="col-lg-6">
-            <div class="card">
-                <div class="card-header"><h5 class="mb-0">Efficiency by Employee</h5></div>
-                <div class="card-body"><div class="chart-container"><canvas id="efficiencyChart"></canvas></div></div>
+        <div class="row g-3 align-items-end mb-3">
+            <div class="col-md-2">
+                <label class="form-label">Department</label>
+                <select id="filterDepartment" class="form-select">
+                    <option value="">All Departments</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Employee</label>
+                <select id="filterEmployee" class="form-select">
+                    <option value="">All Employees</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">Start Date</label>
+                <input type="date" id="startDate" class="form-control">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">End Date</label>
+                <input type="date" id="endDate" class="form-control">
+            </div>
+            <div class="col-md-2"><button id="loadReportBtn" class="btn btn-primary w-100"><i class="bi bi-search me-1"></i> Load Report</button></div>
+            <div class="col-md-2">
+                <button class="btn btn-primary w-100" onclick="exportReport('xlsx')"><i class="bi bi-file-earmark-excel me-1"></i>Download Excel</button>
             </div>
         </div>
-        <div class="col-lg-6">
-            <div class="card">
-                <div class="card-header"><h5 class="mb-0">Break Distribution</h5></div>
-                <div class="card-body"><div class="chart-container"><canvas id="breakChart"></canvas></div></div>
-            </div>
+        <div class="d-flex gap-2 flex-wrap">
+            <button class="preset-btn active" data-preset="today">Today</button>
+            <button class="preset-btn" data-preset="yesterday">Yesterday</button>
+            <button class="preset-btn" data-preset="this_week">This Week</button>
+            <button class="preset-btn" data-preset="last_week">Last Week</button>
+            <button class="preset-btn" data-preset="this_month">This Month</button>
+            <button class="preset-btn" data-preset="last_month">Last Month</button>
+            <button class="preset-btn" data-preset="this_quarter">This Quarter</button>
+            <button class="preset-btn" data-preset="custom">Custom</button>
         </div>
     </div>
-    <div class="card mb-4">
-        <div class="card-header"><h5 class="mb-0">Employee Efficiency Summary</h5></div>
-        <div class="card-body">
-            <div class="table-responsive">
-                <table class="table table-hover">
-                    <thead><tr><th>Employee</th><th>ID</th><th>Department</th><th>First Login</th><th>Last Logout</th><th>Sessions</th><th>Work Hrs</th><th>Break Min</th><th>Efficiency</th></tr></thead>
-                    <tbody id="reportSummaryTable"><tr><td colspan="9" class="text-center text-muted">Select a date range and click Load Report.</td></tr></tbody>
-                </table>
-            </div>
+
+    <!-- Tabs -->
+    <ul class="nav nav-pills tab-pills mb-4" id="reportTabs">
+        <li class="nav-item"><a class="nav-link active" data-tab="overview" href="#"><i class="bi bi-grid me-1"></i>Overview</a></li>
+        <li class="nav-item"><a class="nav-link" data-tab="calendar" href="#"><i class="bi bi-calendar3 me-1"></i>Calendar</a></li>
+        <li class="nav-item"><a class="nav-link" data-tab="departments" href="#"><i class="bi bi-building me-1"></i>Departments</a></li>
+        <li class="nav-item"><a class="nav-link" data-tab="breaks" href="#"><i class="bi bi-cup me-1"></i>Breaks</a></li>
+        <li class="nav-item"><a class="nav-link" data-tab="sessions" href="#"><i class="bi bi-clock-history me-1"></i>Sessions</a></li>
+    </ul>
+
+    <!-- Loading Overlay -->
+    <div id="loadingOverlay" class="loading-overlay d-none" style="position:fixed;inset:0;z-index:9999;">
+        <div class="text-center">
+            <div class="spinner-border mb-2"></div>
+            <div class="fw-semibold text-muted">Loading report data...</div>
         </div>
     </div>
-    <div class="row">
-        <div class="col-lg-6">
-            <div class="card mb-4">
-                <div class="card-header"><h5 class="mb-0">Break Details</h5></div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead><tr><th>Date</th><th>Employee</th><th>Type</th><th>Start</th><th>End</th><th>Dur</th><th>Status</th></tr></thead>
-                            <tbody id="reportBreaksTable"><tr><td colspan="7" class="text-center text-muted">No data</td></tr></tbody>
-                        </table>
-                    </div>
+
+    <!-- Tab: Overview -->
+    <div class="tab-pane-content" id="tabOverview">
+        <div class="row mb-4">
+            <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportEmployeeCount">0</div><div class="metric-label">Employees</div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportSessions">0</div><div class="metric-label">Sessions</div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportBreakMinutes">0</div><div class="metric-label">Break Minutes</div></div></div>
+            <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="reportAverageEfficiency">0%</div><div class="metric-label">Avg Efficiency</div></div></div>
+        </div>
+        <div class="row mb-4">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header"><h5 class="mb-0"><i class="bi bi-bar-chart"></i> Efficiency by Employee</h5></div>
+                    <div class="card-body"><div class="chart-container"><canvas id="efficiencyChart"></canvas></div></div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header"><h5 class="mb-0"><i class="bi bi-pie-chart"></i> Break Distribution</h5></div>
+                    <div class="card-body"><div class="chart-container"><canvas id="breakChart"></canvas></div></div>
                 </div>
             </div>
         </div>
-        <div class="col-lg-6">
-            <div class="card mb-4">
-                <div class="card-header"><h5 class="mb-0">Login Session Details</h5></div>
-                <div class="card-body">
-                    <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead><tr><th>Date</th><th>Employee</th><th>Login</th><th>Logout</th><th>Hours</th></tr></thead>
-                            <tbody id="reportSessionsTable"><tr><td colspan="5" class="text-center text-muted">No data</td></tr></tbody>
-                        </table>
+        <div class="row mb-4">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header"><h5 class="mb-0"><i class="bi bi-graph-up"></i> Efficiency Trend</h5></div>
+                    <div class="card-body"><div class="chart-container"><canvas id="trendChart"></canvas></div></div>
+                </div>
+            </div>
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header"><h5 class="mb-0"><i class="bi bi-building"></i> Department Comparison</h5></div>
+                    <div class="card-body"><div class="chart-container"><canvas id="deptChart"></canvas></div></div>
+                </div>
+            </div>
+        </div>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-table"></i> Employee Efficiency Summary</h5>
+                <div class="search-wrapper">
+                    <i class="bi bi-search"></i>
+                    <input type="text" class="search-box" id="summarySearch" placeholder="Search employees...">
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="summaryTable">
+                        <thead>
+                            <tr>
+                                <th data-sort="employee_name">Employee <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="emp_id">ID <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="department">Department <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="first_login">First Login <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="last_logout">Last Logout <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="session_count">Sessions <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="total_session_hours">Work Hrs <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="total_break_minutes">Break Min <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="efficiency_percent">Efficiency <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                            </tr>
+                        </thead>
+                        <tbody id="reportSummaryTable"><tr><td colspan="9" class="text-center text-muted">Select a date range and click Load Report.</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <div class="text-muted" style="font-size:13px" id="summaryInfo">Showing 0 of 0</div>
+                    <nav><ul class="pagination pagination-sm mb-0" id="summaryPagination"></ul></nav>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab: Calendar -->
+    <div class="tab-pane-content d-none" id="tabCalendar">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-calendar3"></i> Attendance Calendar</h5>
+                <div class="d-flex align-items-center gap-3">
+                    <select id="calEmployeeFilter" class="form-select form-select-sm" style="width:auto;">
+                        <option value="">All Employees</option>
+                    </select>
+                    <div class="btn-group btn-group-sm">
+                        <button class="btn btn-outline-light" id="calPrev"><i class="bi bi-chevron-left"></i></button>
+                        <button class="btn btn-outline-light" id="calToday">Today</button>
+                        <button class="btn btn-outline-light" id="calNext"><i class="bi bi-chevron-right"></i></button>
                     </div>
+                    <span class="fw-bold" id="calMonthLabel"></span>
+                </div>
+            </div>
+            <div class="card-body p-2">
+                <div class="calendar-grid" id="calendarGrid"></div>
+            </div>
+        </div>
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-list-ul"></i> Daily Detail</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead><tr><th>Employee</th><th>Department</th><th>Login</th><th>Logout</th><th>Hours</th><th>Breaks</th><th>Break Min</th></tr></thead>
+                        <tbody id="calDetailTable"><tr><td colspan="7" class="text-center text-muted">Click a calendar day to view details</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab: Departments -->
+    <div class="tab-pane-content d-none" id="tabDepartments">
+        <div class="row mb-4" id="deptCards"></div>
+        <div class="card mb-4">
+            <div class="card-header"><h5 class="mb-0"><i class="bi bi-bar-chart-line"></i> Department Efficiency Comparison</h5></div>
+            <div class="card-body"><div class="chart-container"><canvas id="deptCompareChart"></canvas></div></div>
+        </div>
+        <div class="card mb-4">
+            <div class="card-header"><h5 class="mb-0"><i class="bi bi-table"></i> Department Summary Table</h5></div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead><tr><th>Department</th><th>Employees</th><th>Total Hours</th><th>Break Min</th><th>Breaks</th><th>Productive Hrs</th><th>Efficiency</th></tr></thead>
+                        <tbody id="deptTable"><tr><td colspan="7" class="text-center text-muted">No data</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab: Breaks -->
+    <div class="tab-pane-content d-none" id="tabBreaks">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-cup"></i> Break Details</h5>
+                <div class="search-wrapper">
+                    <i class="bi bi-search"></i>
+                    <input type="text" class="search-box" id="breakSearch" placeholder="Search breaks...">
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="breakTable">
+                        <thead>
+                            <tr>
+                                <th data-sort="break_date">Date <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="employee_name">Employee <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="break_type">Type <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="start_time">Start <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="end_time">End <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="duration_minutes">Duration <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="status">Status <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                            </tr>
+                        </thead>
+                        <tbody id="reportBreaksTable"><tr><td colspan="7" class="text-center text-muted">No data</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <div class="text-muted" style="font-size:13px" id="breakInfo">Showing 0 of 0</div>
+                    <nav><ul class="pagination pagination-sm mb-0" id="breakPagination"></ul></nav>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab: Sessions -->
+    <div class="tab-pane-content d-none" id="tabSessions">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0"><i class="bi bi-clock-history"></i> Login Session Details</h5>
+                <div class="search-wrapper">
+                    <i class="bi bi-search"></i>
+                    <input type="text" class="search-box" id="sessionSearch" placeholder="Search sessions...">
+                </div>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="sessionTable">
+                        <thead>
+                            <tr>
+                                <th data-sort="session_date">Date <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="employee_name">Employee <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="login_time">Login <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="logout_time">Logout <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                                <th data-sort="total_hours">Hours <i class="bi bi-arrow-down-up sort-icon"></i></th>
+                            </tr>
+                        </thead>
+                        <tbody id="reportSessionsTable"><tr><td colspan="5" class="text-center text-muted">No data</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="d-flex justify-content-between align-items-center mt-3">
+                    <div class="text-muted" style="font-size:13px" id="sessionInfo">Showing 0 of 0</div>
+                    <nav><ul class="pagination pagination-sm mb-0" id="sessionPagination"></ul></nav>
                 </div>
             </div>
         </div>
     </div>
 </div>
+
 <script>
-let effChart = null, breakChart = null;
-const today = new Date().toISOString().split('T')[0];
-document.addEventListener('DOMContentLoaded', () => {
-    document.getElementById('startDate').value = today;
-    document.getElementById('endDate').value = today;
-    document.getElementById('loadReportBtn').addEventListener('click', loadReport);
+let effChart=null, breakChart=null, trendChart=null, deptChart=null, deptCompareChart=null;
+let reportData={summary:[],breaks:[],sessions:[]};
+let deptSummaryData=[];
+const PAGE_SIZE=10;
+let sortState={};
+let paginationState={summary:1,breaks:1,sessions:1};
+let calMonth=new Date().getMonth(), calYear=new Date().getFullYear(), calSelectedDate=null;
+
+const presets={
+    today:()=>{const d=new Date();return{start:fmt(d),end:fmt(d)}},
+    yesterday:()=>{const d=new Date();d.setDate(d.getDate()-1);return{start:fmt(d),end:fmt(d)}},
+    this_week:()=>{const d=new Date(),day=d.getDay(),start=new Date(d);start.setDate(d.getDate()-day+1);return{start:fmt(start),end:fmt(d)}},
+    last_week:()=>{const d=new Date(),day=d.getDay(),end=new Date(d);end.setDate(d.getDate()-day);const start=new Date(end);start.setDate(end.getDate()-6);return{start:fmt(start),end:fmt(end)}},
+    this_month:()=>{const d=new Date();return{start:fmt(new Date(d.getFullYear(),d.getMonth(),1)),end:fmt(d)}},
+    last_month:()=>{const d=new Date(),start=new Date(d.getFullYear(),d.getMonth()-1,1),end=new Date(d.getFullYear(),d.getMonth(),0);return{start:fmt(start),end:fmt(end)}},
+    this_quarter:()=>{const d=new Date(),q=Math.floor(d.getMonth()/3),start=new Date(d.getFullYear(),q*3,1);return{start:fmt(start),end:fmt(d)}},
+    custom:()=>null
+};
+function fmt(d){return d.toISOString().split('T')[0]}
+
+document.addEventListener('DOMContentLoaded',()=>{
+    document.getElementById('startDate').value=fmt(new Date());
+    document.getElementById('endDate').value=fmt(new Date());
+    document.getElementById('loadReportBtn').addEventListener('click',loadReport);
+
+    document.querySelectorAll('.preset-btn').forEach(btn=>{
+        btn.addEventListener('click',()=>{
+            document.querySelectorAll('.preset-btn').forEach(b=>b.classList.remove('active'));
+            btn.classList.add('active');
+            const p=presets[btn.dataset.preset]();
+            if(p){
+                document.getElementById('startDate').value=p.start;
+                document.getElementById('endDate').value=p.end;
+                document.getElementById('reportPeriodBadge').textContent=btn.textContent;
+            }
+        });
+    });
+
+    document.querySelectorAll('#reportTabs .nav-link').forEach(tab=>{
+        tab.addEventListener('click',e=>{
+            e.preventDefault();
+            document.querySelectorAll('#reportTabs .nav-link').forEach(t=>t.classList.remove('active'));
+            tab.classList.add('active');
+            document.querySelectorAll('.tab-pane-content').forEach(p=>p.classList.add('d-none'));
+            const target=document.getElementById('tab'+tab.dataset.tab.charAt(0).toUpperCase()+tab.dataset.tab.slice(1));
+            if(target)target.classList.remove('d-none');
+        });
+    });
+
+    document.querySelectorAll('th[data-sort]').forEach(th=>{
+        th.addEventListener('click',()=>{
+            const table=th.closest('table');
+            const tbodyId=table.querySelector('tbody').id;
+            const key=th.dataset.sort;
+            const dir=sortState[tbodyId]?.key===key&&sortState[tbodyId]?.dir==='asc'?'desc':'asc';
+            sortState[tbodyId]={key,dir};
+            table.querySelectorAll('th').forEach(t=>t.classList.remove('sorted'));
+            th.classList.add('sorted');
+            th.querySelector('.sort-icon').className=dir==='asc'?'bi bi-sort-up sort-icon':'bi bi-sort-down sort-icon';
+            renderAllTables();
+        });
+    });
+
+    ['summarySearch','breakSearch','sessionSearch'].forEach(id=>{
+        document.getElementById(id).addEventListener('input',()=>{renderAllTables()});
+    });
+
+    document.getElementById('calPrev').addEventListener('click',()=>{calMonth--;if(calMonth<0){calMonth=11;calYear--;}renderCalendar()});
+    document.getElementById('calNext').addEventListener('click',()=>{calMonth++;if(calMonth>11){calMonth=0;calYear++;}renderCalendar()});
+    document.getElementById('calToday').addEventListener('click',()=>{const n=new Date();calMonth=n.getMonth();calYear=n.getFullYear();calSelectedDate=null;renderCalendar()});
+    document.getElementById('calEmployeeFilter').addEventListener('change',()=>{renderCalendar()});
+
     loadReport();
 });
-async function loadReport() {
-    const sd = document.getElementById('startDate').value;
-    const ed = document.getElementById('endDate').value || sd;
-    const r = await fetch(`/api/reports?start_date=${encodeURIComponent(sd)}&end_date=${encodeURIComponent(ed)}`);
-    const d = await r.json();
-    const summary = d.summary || [];
-    const breaks = d.break_details || [];
-    const sessions = d.session_details || [];
-    document.getElementById('reportEmployeeCount').textContent = summary.length;
-    document.getElementById('reportSessions').textContent = sessions.length;
-    document.getElementById('reportBreakMinutes').textContent = summary.reduce((s,i)=>s+i.total_break_minutes,0);
-    const avgEff = summary.length ? (summary.reduce((s,i)=>s+i.efficiency_percent,0)/summary.length).toFixed(1) : 0;
-    document.getElementById('reportAverageEfficiency').textContent = `${avgEff}%`;
 
-    const tbody = document.getElementById('reportSummaryTable');
-    if (!summary.length) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No data</td></tr>'; }
-    else { tbody.innerHTML = summary.map(i => `<tr><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.emp_id)}</td><td>${esc(i.department)}</td><td>${esc(i.first_login)}</td><td>${esc(i.last_logout)}</td><td>${i.session_count}</td><td>${i.total_session_hours.toFixed(2)}</td><td>${i.total_break_minutes}</td><td><strong>${i.efficiency_percent}%</strong></td></tr>`).join(''); }
-    renderBreakTable(breaks);
-    renderSessionTable(sessions);
-    renderCharts(summary);
-}
-function renderBreakTable(breaks) {
-    const tbody = document.getElementById('reportBreaksTable');
-    if (!breaks.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No data</td></tr>'; return; }
-    tbody.innerHTML = breaks.map(i => `<tr><td>${esc(i.break_date)}</td><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.break_type)}</td><td>${esc(i.start_time)}</td><td>${esc(i.end_time)}</td><td>${i.duration_minutes} min</td><td><span class="badge ${i.status==='Completed'?'badge-completed':'badge-active'}">${i.status}</span></td></tr>`).join('');
-}
-function renderSessionTable(sessions) {
-    const tbody = document.getElementById('reportSessionsTable');
-    if (!sessions.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No data</td></tr>'; return; }
-    tbody.innerHTML = sessions.map(i => `<tr><td>${esc(i.session_date)}</td><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.login_time)}</td><td>${esc(i.logout_time)}</td><td>${i.total_hours.toFixed(2)}</td></tr>`).join('');
-}
-function renderCharts(summary) {
-    if (effChart) effChart.destroy();
-    if (breakChart) breakChart.destroy();
-    if (!summary.length) return;
+async function loadReport(){
+    const overlay=document.getElementById('loadingOverlay');
+    overlay.classList.remove('d-none');
+    try{
+        const sd=document.getElementById('startDate').value;
+        const ed=document.getElementById('endDate').value||sd;
+        const dept=document.getElementById('filterDepartment').value;
+        const emp=document.getElementById('filterEmployee').value;
+        let url=`/api/reports?start_date=${encodeURIComponent(sd)}&end_date=${encodeURIComponent(ed)}`;
+        if(dept)url+=`&department=${encodeURIComponent(dept)}`;
+        if(emp)url+=`&emp_id=${encodeURIComponent(emp)}`;
+        const r=await fetch(url);
+        const d=await r.json();
 
-    const names = summary.map(i => i.employee_name.length > 12 ? i.employee_name.substring(0,12)+'..' : i.employee_name);
-    const efficiencies = summary.map(i => i.efficiency_percent);
-    const breaks = summary.map(i => i.total_break_minutes);
-    const gridColor = '#e0e0e0';
-    const textColor = '#333';
+        if(d.departments){
+            const sel=document.getElementById('filterDepartment');
+            const cur=sel.value;
+            sel.innerHTML='<option value="">All Departments</option>'+d.departments.map(dep=>`<option value="${esc(dep)}"${dep===cur?' selected':''}>${esc(dep)}</option>`).join('');
+        }
+        if(d.employees){
+            const sel=document.getElementById('filterEmployee');
+            const cur=sel.value;
+            sel.innerHTML='<option value="">All Employees</option>'+d.employees.map(e=>`<option value="${esc(e.emp_id)}"${e.emp_id==cur?' selected':''}>${esc(e.name)}</option>`).join('');
+        }
 
-    effChart = new Chart(document.getElementById('efficiencyChart'), {
-        type: 'bar',
-        data: { labels: names, datasets: [{ label: 'Efficiency %', data: efficiencies, backgroundColor: '#198754', borderRadius: 6 }] },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { labels: { color: textColor } } }, scales: { y: { beginAtZero: true, max: 100, grid: { color: gridColor }, ticks: { color: textColor } }, x: { grid: { color: gridColor }, ticks: { color: textColor } } } }
+        reportData.summary=d.summary||[];
+        reportData.breaks=d.break_details||[];
+        reportData.sessions=d.session_details||[];
+
+        document.getElementById('reportEmployeeCount').textContent=reportData.summary.length;
+        document.getElementById('reportSessions').textContent=reportData.sessions.length;
+        document.getElementById('reportBreakMinutes').textContent=reportData.summary.reduce((s,i)=>s+i.total_break_minutes,0);
+        const avgEff=reportData.summary.length?(reportData.summary.reduce((s,i)=>s+i.efficiency_percent,0)/reportData.summary.length).toFixed(1):0;
+        document.getElementById('reportAverageEfficiency').textContent=`${avgEff}%`;
+
+        paginationState={summary:1,breaks:1,sessions:1};
+        sortState={};
+        renderAllTables();
+        renderCharts(reportData.summary);
+        updateCalEmpFilter();
+        renderCalendar();
+
+        const deptR=await fetch(`/api/reports/department-summary?start_date=${encodeURIComponent(sd)}&end_date=${encodeURIComponent(ed)}`);
+        const deptD=await deptR.json();
+        deptSummaryData=deptD.departments||[];
+        renderDeptTab(deptSummaryData);
+    }finally{overlay.classList.add('d-none')}
+}
+
+function renderAllTables(){
+    renderPaginatedTable('reportSummaryTable','summary',filterData(reportData.summary,document.getElementById('summarySearch').value),['employee_name','emp_id','department','first_login','last_logout','session_count','total_session_hours','total_break_minutes','efficiency_percent'],renderSummaryRow,'summaryInfo','summaryPagination');
+    renderPaginatedTable('reportBreaksTable','breaks',filterData(reportData.breaks,document.getElementById('breakSearch').value),['break_date','employee_name','break_type','start_time','end_time','duration_minutes','status'],renderBreakRow,'breakInfo','breakPagination');
+    renderPaginatedTable('reportSessionsTable','sessions',filterData(reportData.sessions,document.getElementById('sessionSearch').value),['session_date','employee_name','login_time','logout_time','total_hours'],renderSessionRow,'sessionInfo','sessionPagination');
+}
+
+function filterData(data,q){
+    if(!q)return data;
+    const lq=q.toLowerCase();
+    return data.filter(r=>Object.values(r).some(v=>String(v).toLowerCase().includes(lq)));
+}
+
+function sortData(data,tbodyId,keys){
+    const s=sortState[tbodyId];
+    if(!s)return data;
+    return[...data].sort((a,b)=>{
+        let va=a[s.key],vb=b[s.key];
+        if(typeof va==='number'&&typeof vb==='number')return s.dir==='asc'?va-vb:vb-va;
+        return s.dir==='asc'?String(va).localeCompare(String(vb)):String(vb).localeCompare(String(va));
+    });
+}
+
+function renderPaginatedTable(tbodyId,ctxId,data,keys,rowFn,infoId,pagId){
+    const tbody=document.getElementById(tbodyId);
+    const sorted=sortData(data,tbodyId,keys);
+    const page=paginationState[ctxId]||1;
+    const totalPages=Math.max(1,Math.ceil(sorted.length/PAGE_SIZE));
+    const start=(page-1)*PAGE_SIZE;
+    const pageData=sorted.slice(start,start+PAGE_SIZE);
+
+    if(!pageData.length){tbody.innerHTML=`<tr><td colspan="${keys.length}" class="text-center text-muted">No data</td></tr>`;}
+    else{tbody.innerHTML=pageData.map(rowFn).join('');}
+
+    document.getElementById(infoId).textContent=`Showing ${sorted.length?start+1:0}-${Math.min(start+PAGE_SIZE,sorted.length)} of ${sorted.length}`;
+
+    const pag=document.getElementById(pagId);
+    let ph='';
+    ph+=`<li class="page-item${page<=1?' disabled':''}"><a class="page-link" data-ctx="${ctxId}" data-page="${page-1}">&laquo;</a></li>`;
+    for(let i=1;i<=totalPages;i++){
+        if(totalPages>7&&i>2&&i<totalPages-1&&Math.abs(i-page)>1){if(ph.slice(-3)!=='...')ph+=`<li class="page-item disabled"><span class="page-link">...</span></li>`;continue;}
+        ph+=`<li class="page-item${i===page?' active':''}"><a class="page-link" data-ctx="${ctxId}" data-page="${i}">${i}</a></li>`;
+    }
+    ph+=`<li class="page-item${page>=totalPages?' disabled':''}"><a class="page-link" data-ctx="${ctxId}" data-page="${page+1}">&raquo;</a></li>`;
+    pag.innerHTML=ph;
+    pag.querySelectorAll('a[data-page]').forEach(a=>{
+        a.addEventListener('click',e=>{
+            e.preventDefault();
+            paginationState[a.dataset.ctx]=parseInt(a.dataset.page);
+            renderAllTables();
+        });
+    });
+}
+
+function renderSummaryRow(i){return `<tr><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.emp_id)}</td><td>${esc(i.department)}</td><td>${esc(i.first_login)}</td><td>${esc(i.last_logout)}</td><td>${i.session_count}</td><td>${i.total_session_hours.toFixed(2)}</td><td>${i.total_break_minutes}</td><td><strong>${i.efficiency_percent}%</strong></td></tr>`;}
+function renderBreakRow(i){return `<tr><td>${esc(i.break_date)}</td><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.break_type)}</td><td>${esc(i.start_time)}</td><td>${esc(i.end_time)}</td><td>${i.duration_minutes} min</td><td><span class="badge ${i.status==='Completed'?'badge-completed':'badge-active'}">${i.status}</span></td></tr>`;}
+function renderSessionRow(i){return `<tr><td>${esc(i.session_date)}</td><td><strong>${esc(i.employee_name)}</strong></td><td>${esc(i.login_time)}</td><td>${esc(i.logout_time)}</td><td>${i.total_hours.toFixed(2)}</td></tr>`;}
+
+function renderCharts(summary){
+    [effChart,breakChart,trendChart,deptChart].forEach(c=>{if(c)c.destroy()});
+    if(!summary.length)return;
+    const names=summary.map(i=>i.employee_name.length>12?i.employee_name.substring(0,12)+'..':i.employee_name);
+    const efficiencies=summary.map(i=>i.efficiency_percent);
+    const breaks=summary.map(i=>i.total_break_minutes);
+    const gridColor='#e0e0e0',textColor='#333';
+    const palette=['#0369A1','#22C55E','#EAB308','#DC2626','#8B5CF6','#EC4899','#14B8A6','#F97316','#6366F1','#06B6D4'];
+
+    effChart=new Chart(document.getElementById('efficiencyChart'),{type:'bar',data:{labels:names,datasets:[{label:'Efficiency %',data:efficiencies,backgroundColor:palette[1],borderRadius:6}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,max:100,grid:{color:gridColor},ticks:{color:textColor}},x:{grid:{display:false},ticks:{color:textColor,font:{size:10}}}}}});
+
+    breakChart=new Chart(document.getElementById('breakChart'),{type:'doughnut',data:{labels:names,datasets:[{data:breaks,backgroundColor:palette}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{color:textColor,boxWidth:12,padding:8,font:{size:10}}}}}});
+
+    trendChart=new Chart(document.getElementById('trendChart'),{type:'line',data:{labels:names,datasets:[{label:'Efficiency %',data:efficiencies,borderColor:palette[0],backgroundColor:'rgba(3,105,161,0.1)',fill:true,tension:0.4,pointRadius:4,pointBackgroundColor:palette[0]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,max:100,grid:{color:gridColor},ticks:{color:textColor}},x:{grid:{display:false},ticks:{color:textColor,font:{size:10}}}}}});
+}
+
+function renderDeptTab(depts){
+    if(!depts.length){document.getElementById('deptCards').innerHTML='<div class="col-12 text-center text-muted py-4">No department data</div>';document.getElementById('deptTable').innerHTML='<tr><td colspan="7" class="text-center text-muted">No data</td></tr>';return;}
+
+    document.getElementById('deptCards').innerHTML=depts.map(d=>`<div class="col-md-3"><div class="card dept-card"><div class="card-body"><div class="dept-name">${esc(d.department)}</div><div class="dept-stat">${d.employee_count} employees</div><div class="dept-value mt-2">${d.efficiency_percent}%</div><div class="dept-stat">efficiency</div></div></div></div>`).join('');
+
+    document.getElementById('deptTable').innerHTML=depts.map(d=>`<tr><td><strong>${esc(d.department)}</strong></td><td>${d.employee_count}</td><td>${d.total_hours.toFixed(1)}</td><td>${d.total_break_minutes}</td><td>${d.total_breaks}</td><td>${d.productive_hours.toFixed(1)}</td><td><strong>${d.efficiency_percent}%</strong></td></tr>`).join('');
+
+    if(deptCompareChart)deptCompareChart.destroy();
+    const palette=['#0369A1','#22C55E','#EAB308','#DC2626','#8B5CF6','#EC4899','#14B8A6','#F97316'];
+    deptCompareChart=new Chart(document.getElementById('deptCompareChart'),{type:'bar',data:{labels:depts.map(d=>d.department),datasets:[{label:'Efficiency %',data:depts.map(d=>d.efficiency_percent),backgroundColor:palette.slice(0,depts.length),borderRadius:6},{label:'Total Hours',data:depts.map(d=>d.total_hours),backgroundColor:palette.slice(0,depts.length).map(c=>c+'88'),borderRadius:6}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#333'}}},scales:{y:{beginAtZero:true,grid:{color:'#e0e0e0'},ticks:{color:'#333'}},x:{grid:{display:false},ticks:{color:'#333'}}}}});
+}
+
+function renderCalendar(){
+    const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    document.getElementById('calMonthLabel').textContent=`${months[calMonth]} ${calYear}`;
+
+    const filterEmp=document.getElementById('calEmployeeFilter').value;
+    const sessions=reportData.sessions.filter(s=>!filterEmp||s.emp_id==filterEmp);
+    const breaks=reportData.breaks.filter(b=>!filterEmp||b.emp_id==filterEmp);
+
+    const sessByDate={},brkByDate={};
+    sessions.forEach(s=>{
+        const d=s.session_date;
+        if(!sessByDate[d])sessByDate[d]=[];
+        sessByDate[d].push(s);
+    });
+    breaks.forEach(b=>{
+        const d=b.break_date;
+        if(!brkByDate[d])brkByDate[d]=[];
+        brkByDate[d].push(b);
     });
 
-    breakChart = new Chart(document.getElementById('breakChart'), {
-        type: 'doughnut',
-        data: {
-            labels: names,
-            datasets: [{ data: breaks, backgroundColor: ['#198754','#ffc107','#dc3545','#0dcaf0','#6f42c1','#fd7e14','#20c997','#e83e8c','#6610f2','#17a2b8'] }]
-        },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { color: textColor, boxWidth: 12, padding: 8, font: { size: 10 } } } } }
+    const firstDay=new Date(calYear,calMonth,1).getDay();
+    const daysInMonth=new Date(calYear,calMonth+1,0).getDate();
+    const daysInPrev=new Date(calYear,calMonth,0).getDate();
+    const today=new Date();
+    const todayStr=fmt(today);
+
+    let html='';
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].forEach(d=>{html+=`<div class="cal-header">${d}</div>`;});
+
+    for(let i=0;i<firstDay;i++){
+        const day=daysInPrev-firstDay+i+1;
+        const m=calMonth===0?11:calMonth-1;
+        const y=calMonth===0?calYear-1:calYear;
+        const dateStr=fmt(new Date(y,m,day));
+        html+=renderCalDay(day,dateStr,true,sessByDate[dateStr]||[],brkByDate[dateStr]||[],todayStr);
+    }
+
+    for(let d=1;d<=daysInMonth;d++){
+        const dateStr=fmt(new Date(calYear,calMonth,d));
+        html+=renderCalDay(d,dateStr,false,sessByDate[dateStr]||[],brkByDate[dateStr]||[],todayStr);
+    }
+
+    const totalCells=firstDay+daysInMonth;
+    const remaining=totalCells%7===0?0:7-(totalCells%7);
+    for(let d=1;d<=remaining;d++){
+        const m=calMonth===11?0:calMonth+1;
+        const y=calMonth===11?calYear+1:calYear;
+        const dateStr=fmt(new Date(y,m,d));
+        html+=renderCalDay(d,dateStr,true,sessByDate[dateStr]||[],brkByDate[dateStr]||[],todayStr);
+    }
+
+    document.getElementById('calendarGrid').innerHTML=html;
+
+    document.querySelectorAll('.cal-day').forEach(el=>{
+        el.addEventListener('click',()=>{
+            document.querySelectorAll('.cal-day').forEach(c=>c.classList.remove('selected'));
+            el.classList.add('selected');
+            renderCalDetail(el.dataset.date);
+        });
     });
 }
-async function exportReport(fmt) {
-    const sd = document.getElementById('startDate').value;
-    const ed = document.getElementById('endDate').value || sd;
-    window.open(`/api/reports/export?start_date=${encodeURIComponent(sd)}&end_date=${encodeURIComponent(ed)}&format=${fmt}`, '_blank');
+
+function renderCalDay(day,dateStr,isOther,sessArr,brkArr,todayStr){
+    const isToday=dateStr===todayStr;
+    let cls='cal-day';
+    if(isOther)cls+=' other-month';
+    if(isToday)cls+=' today';
+    if(dateStr===calSelectedDate)cls+=' selected';
+
+    let events='';
+    if(!isOther&&sessArr.length){
+        const totalHrs=sessArr.reduce((s,r)=>s+r.total_hours,0).toFixed(1);
+        const empNames=[...new Set(sessArr.map(s=>s.employee_name))];
+        const login=sessArr.map(s=>s.login_time).sort()[0];
+        const logout=sessArr.map(s=>s.logout_time).filter(t=>t!=='Active').sort().pop()||'Active';
+
+        events+=`<div class="cal-event login" title="${empNames.join(', ')}">${empNames.length>1?empNames.length+' users':empNames[0]?.substring(0,10)}</div>`;
+        events+=`<div class="cal-event hours" title="Login: ${login} - Logout: ${logout}">${login?.substring(0,5)} - ${logout?.substring(0,5)}</div>`;
+        events+=`<div class="cal-event hours" title="Total: ${totalHrs}h">${totalHrs}h</div>`;
+    }
+    if(!isOther&&brkArr.length){
+        const brkTypes=[...new Set(brkArr.map(b=>b.break_type))];
+        const brkMin=brkArr.reduce((s,b)=>s+b.duration_minutes,0);
+        events+=`<div class="cal-event break" title="Breaks: ${brkTypes.join(', ')} (${brkMin}m)">${brkArr.length} break${brkArr.length>1?'s':''} (${brkMin}m)</div>`;
+    }
+    if(!isOther&&sessArr.length>2){
+        events+=`<div class="cal-overflow" title="Click for details">+${sessArr.length-1} more</div>`;
+    }
+
+    return `<div class="${cls}" data-date="${dateStr}"><div class="cal-date">${day}</div>${events}</div>`;
 }
-function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return String(t||'').replace(/[&<>"']/g,c=>m[c]); }
+
+function renderCalDetail(dateStr){
+    calSelectedDate=dateStr;
+    const filterEmp=document.getElementById('calEmployeeFilter').value;
+    const sess=reportData.sessions.filter(s=>s.session_date===dateStr&&(!filterEmp||s.emp_id==filterEmp));
+    const brks=reportData.breaks.filter(b=>b.break_date===dateStr&&(!filterEmp||b.emp_id==filterEmp));
+
+    const empMap={};
+    sess.forEach(s=>{
+        if(!empMap[s.emp_id])empMap[s.emp_id]={name:s.employee_name,department:s.department,login:s.login_time,logout:s.logout_time,hours:s.total_hours};
+        else{empMap[s.emp_id].login=Math.min(empMap[s.emp_id].login,s.login_time);empMap[s.emp_id].logout=s.logout_time==='Active'?'Active':Math.max(empMap[s.emp_id].logout,s.logout_time);empMap[s.emp_id].hours+=s.total_hours;}
+    });
+
+    const tbody=document.getElementById('calDetailTable');
+    const ids=Object.keys(empMap);
+    if(!ids.length){tbody.innerHTML='<tr><td colspan="7" class="text-center text-muted">No data for this date</td></tr>';return;}
+
+    tbody.innerHTML=ids.map(id=>{
+        const e=empMap[id];
+        const empBreaks=brks.filter(b=>b.emp_id==id);
+        const brkMin=empBreaks.reduce((s,b)=>s+b.duration_minutes,0);
+        const brkTypes=[...new Set(empBreaks.map(b=>b.break_type))].join(', ')||'None';
+        return `<tr><td><strong>${esc(e.name)}</strong></td><td>${esc(e.department)}</td><td>${esc(e.login)}</td><td>${esc(e.logout)}</td><td>${e.hours.toFixed(2)}</td><td>${esc(brkTypes)}</td><td>${brkMin} min</td></tr>`;
+    }).join('');
+}
+
+function updateCalEmpFilter(){
+    const sel=document.getElementById('calEmployeeFilter');
+    const cur=sel.value;
+    const emps=reportData.sessions.map(s=>({id:s.emp_id,name:s.employee_name}));
+    const unique=[...new Map(emps.map(e=>[e.id,e])).values()];
+    sel.innerHTML='<option value="">All Employees</option>'+unique.sort((a,b)=>a.name.localeCompare(b.name)).map(e=>`<option value="${e.id}"${e.id==cur?' selected':''}>${esc(e.name)}</option>`).join('');
+}
+
+async function exportReport(){
+    const sd=document.getElementById('startDate').value;
+    const ed=document.getElementById('endDate').value||sd;
+    window.open(`/api/reports/export?start_date=${encodeURIComponent(sd)}&end_date=${encodeURIComponent(ed)}&format=xlsx`,'_blank');
+}
+
+function esc(t){const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'};return String(t||'').replace(/[&<>"']/g,c=>m[c]);}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

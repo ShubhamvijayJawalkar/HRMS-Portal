@@ -97,15 +97,6 @@ def test_apispec(client):
     assert resp.status_code in (200, 302)
 
 
-# ── Rate Limiting ───────────────────────────────────────────────
-
-def test_rate_limit_headers(client):
-    for _ in range(5):
-        client.post('/login', json={'emp_id': 'x', 'password': 'x'})
-    resp = client.post('/login', json={'emp_id': 'x', 'password': 'x'})
-    assert resp.status_code in (401, 429)
-
-
 # ── Database Tests ──────────────────────────────────────────────
 
 def test_audit_log_table_exists(client):
@@ -212,22 +203,6 @@ def test_active_users_endpoint_filters_inactive_employees(client):
     data = resp.get_json()
     assert all(item['status'] == 'Active' for item in data['data'])
 
-
-def test_org_chart_only_returns_active_employees(client):
-    conn = get_db()
-    conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = ?", ['EMP003'])
-    conn.commit()
-    conn.close()
-    with client.session_transaction() as sess:
-        sess['emp_id'] = 'EMP001'
-        sess['name'] = 'Admin'
-        sess['role'] = 'Admin'
-        sess['session_id'] = 99997
-    resp = client.get('/api/org-chart')
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert all(item['status'] == 'Active' for item in data)
-    assert not any(item['id'] == 'EMP003' for item in data)
 
 
 def test_break_types_api(client):
