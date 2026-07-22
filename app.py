@@ -76,7 +76,6 @@ STARTED = False
 
 def get_db():
     conn = duckdb.connect(DB_FILE)
-    conn.execute("SET TimeZone = 'UTC'")
     return conn
 
 

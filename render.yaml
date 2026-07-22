@@ -2,14 +2,18 @@ services:
   - type: web
     name: hrms-portal
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
     envVars:
       - key: FLASK_DEBUG
         value: "0"
       - key: DB_FILE
-        value: /tmp/hrms.duckdb
+        value: /data/hrms.duckdb
       - key: PYTHON_VERSION
-        value: "3.13.7"
-    healthCheckPath: /
+        value: "3.12"
+    healthCheckPath: /login
     autoDeploy: true
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
