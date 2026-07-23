@@ -33,10 +33,10 @@ app = Flask(__name__)
 _secret = os.getenv('SECRET_KEY', '')
 if not _secret or _secret in ('change-me-to-random-string', 'hrms_secret_key_2024', 'change-me-in-production'):
     if os.getenv('FLASK_ENV') == 'production':
-        logger.critical("SECRET_KEY is not set or is insecure. Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\"")
-        raise RuntimeError("SECRET_KEY must be set to a secure random value in production")
+        logger.warning("SECRET_KEY is not set or is insecure — auto-generating for this session. Set a persistent SECRET_KEY in your environment.")
+    else:
+        logger.warning("Using auto-generated SECRET_KEY (sessions will not persist across restarts)")
     _secret = secrets.token_hex(32)
-    logger.warning("Using auto-generated SECRET_KEY (sessions will not persist across restarts)")
 app.secret_key = _secret
 
 app.config['SESSION_COOKIE_HTTPONLY'] = True
