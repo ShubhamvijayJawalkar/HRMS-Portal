@@ -7,13 +7,13 @@ services:
       - "5000:10000"
     volumes:
       - hrms-data:/data
-      - hrms-uploads:/app/uploads
     environment:
       - SECRET_KEY=${SECRET_KEY}
       - FLASK_DEBUG=0
       - FLASK_ENV=production
       - LOG_LEVEL=WARNING
       - DB_FILE=/data/hrms.duckdb
+      - UPLOAD_FOLDER=/data/uploads
       - PORT=10000
     restart: unless-stopped
     healthcheck:
@@ -25,4 +25,3 @@ services:
 
 volumes:
   hrms-data:
-  hrms-uploads:
