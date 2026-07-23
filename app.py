@@ -5,6 +5,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO, TextIOWrapper
+from zoneinfo import ZoneInfo
 
 import duckdb
 import bcrypt
@@ -49,6 +50,15 @@ if os.getenv('FLASK_ENV') == 'production':
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
+
+# ── Timezone ──────────────────────────────────────────────────────────
+IST = ZoneInfo('Asia/Kolkata')
+
+
+def now_ist():
+    """Return current time as a naive datetime in IST (Asia/Kolkata)."""
+    return datetime.now(IST).replace(tzinfo=None)
+
 
 # ── Rate Limiter ──────────────────────────────────────────────────────
 limiter = Limiter(
@@ -640,19 +650,19 @@ def init_db():
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ['EMP001', 'Shubham Jawalkar', 'shubham@company.com', pwd_hash,
-             'Admin', 'MIS', 'Tech Lead', '9876543210', datetime.now().date(),
-             'Active', 1, 1, datetime.now(), datetime.now()]
+             'Admin', 'MIS', 'Tech Lead', '9876543210', now_ist().date(),
+             'Active', 1, 1, now_ist(), now_ist()]
         )
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ['EMP002', 'Sachin Bhakte', 'sachinbhakte@gmail.com', pwd_hash,
-             'Employee', 'Operations', 'Jr Developer', '9876543211', datetime.now().date(),
-             'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
+             'Employee', 'Operations', 'Jr Developer', '9876543211', now_ist().date(),
+             'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
         )
 
         # Seed some holidays
-        year = datetime.now().year
-        base = 9000000 + (datetime.now().microsecond % 100000)
+        year = now_ist().year
+        base = 9000000 + (now_ist().microsecond % 100000)
         holidays_data = [
             [base + 1, 'New Year', f'{year}-01-01', year, 'National'],
             [base + 2, 'Republic Day', f'{year}-01-26', year, 'National'],
@@ -700,8 +710,8 @@ def init_db():
     # ── Seed Leave Balance ─────────────────────────────────────────
     result = _scalar("SELECT COUNT(*) FROM leave_balance")
     if result == 0:
-        year = datetime.now().year
-        bid = int(datetime.now().timestamp() * 1000) % 1000000
+        year = now_ist().year
+        bid = int(now_ist().timestamp() * 1000) % 1000000
         for emp in conn.execute("SELECT emp_id FROM users").fetchall():
             bid += 1
             conn.execute("INSERT INTO leave_balance VALUES (?, ?, ?, ?, ?, ?)", [bid, emp[0], 'Casual', 12, 0, year])
@@ -711,7 +721,7 @@ def init_db():
             conn.execute("INSERT INTO leave_balance VALUES (?, ?, ?, ?, ?, ?)", [bid, emp[0], 'Annual', 20, 0, year])
 
     # ── Seed sample rows for all major modules ────────────────────
-    now = datetime.now()
+    now = now_ist()
     base_id = int(now.timestamp() * 1000) % 1000000
 
     if _scalar("SELECT COUNT(*) FROM user_sessions") < 2:
@@ -1012,10 +1022,10 @@ def audit_log(emp_id, action, details=None):
     conn = None
     try:
         conn = get_db()
-        log_id = int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
+        log_id = int(now_ist().timestamp() * 1_000_000) % 2_147_483_647
         conn.execute(
             "INSERT INTO audit_log (log_id, emp_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [log_id, emp_id, action, details, request.remote_addr, datetime.now()]
+            [log_id, emp_id, action, details, request.remote_addr, now_ist()]
         )
     except Exception as e:
         logger.warning("audit_log failed: %s", e)
@@ -1034,11 +1044,11 @@ def parse_date(date_string, default=None):
 
 
 def gen_id():
-    return int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
+    return int(now_ist().timestamp() * 1_000_000) % 2_147_483_647
 
 
 def _get_shift_start_dt(emp_id, conn=None, target_date=None):
-    now = datetime.now()
+    now = now_ist()
     if conn is None:
         conn = get_db()
         close = True
@@ -1262,7 +1272,7 @@ def login():
     session['department'] = row[6] or ''
     session['session_id'] = session_id
 
-    now = datetime.now()
+    now = now_ist()
     conn = get_db()
     shift_date = _get_shift_date_for_dt(row[0], now, conn)
     conn.execute(
@@ -1296,7 +1306,7 @@ def logout():
                 login_time, curr_sid = sess[0], session_id
             else:
                 curr_sid, login_time = sess[0], sess[1]
-            logout_time = datetime.now()
+            logout_time = now_ist()
             hours = round((logout_time - login_time).total_seconds() / 3600, 2)
             conn.execute(
                 "UPDATE user_sessions SET logout_time = ?, total_hours = ? WHERE session_id = ?",
@@ -1458,7 +1468,7 @@ def forgot_password():
     token = secrets.token_urlsafe(32)
     conn.execute(
         "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) VALUES (?, ?, ?, ?)",
-        [gen_id(), emp_id, token, datetime.now() + timedelta(hours=1)]
+        [gen_id(), emp_id, token, now_ist() + timedelta(hours=1)]
     )
     conn.close()
 
@@ -1498,7 +1508,7 @@ def reset_password():
     conn = get_db()
     row = conn.execute(
         "SELECT token_id, emp_id FROM password_reset_tokens WHERE token = ? AND used = 0 AND expires_at > ?",
-        [token, datetime.now()]
+        [token, now_ist()]
     ).fetchone()
     if not row:
         conn.close()
@@ -1562,7 +1572,7 @@ def documents_api():
     did = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO employee_documents VALUES (?, ?, ?, ?, ?)",
-                 [did, emp_id, data['doc_type'], data.get('file_name', ''), datetime.now()])
+                 [did, emp_id, data['doc_type'], data.get('file_name', ''), now_ist()])
     conn.close()
     return jsonify({'message': 'Document recorded', 'id': did}), 201
 
@@ -1575,7 +1585,7 @@ def documents_api():
 @app.route('/api/holidays', methods=['GET'])
 @login_required
 def get_holidays():
-    year = request.args.get('year', datetime.now().year, type=int)
+    year = request.args.get('year', now_ist().year, type=int)
     conn = get_db()
     try:
         rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
@@ -1639,7 +1649,7 @@ def add_notification(emp_id, ntype, message, link=None):
         conn = get_db()
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [gen_id(), emp_id, ntype, message, link, datetime.now()]
+            [gen_id(), emp_id, ntype, message, link, now_ist()]
         )
     except Exception as e:
         logger.warning("Notification failed: %s", e)
@@ -1730,7 +1740,7 @@ def approve_regularization(rid):
     conn = get_db()
     conn.execute(
         "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE request_id = ? AND status = 'Pending'",
-        [session['emp_id'], datetime.now(), rid]
+        [session['emp_id'], now_ist(), rid]
     )
     conn.close()
     return jsonify({'message': 'Approved'}), 200
@@ -1743,7 +1753,7 @@ def reject_regularization(rid):
     conn = get_db()
     conn.execute(
         "UPDATE regularization_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE request_id = ? AND status = 'Pending'",
-        [session['emp_id'], datetime.now(), rid]
+        [session['emp_id'], now_ist(), rid]
     )
     conn.close()
     return jsonify({'message': 'Rejected'}), 200
@@ -1780,7 +1790,7 @@ def import_users_csv():
                 "INSERT INTO users (emp_id, name, email, password, role, department, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, 'Active', ?, ?, 1, 1)",
                 [eid, str(row.get('name', '')), str(row.get('email', '')), pwd,
                  str(row.get('role', 'Employee')), str(row.get('department', '')),
-                 datetime.now(), datetime.now()]
+                 now_ist(), now_ist()]
             )
             count += 1
         return jsonify({'message': f'{count} users imported'}), 201
@@ -1835,7 +1845,7 @@ def assets_api():
         return jsonify({'error': 'Employee not found or inactive'}), 400
     conn.execute("INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [aid, data['emp_id'], data['asset_type'], data.get('asset_tag'), data.get('brand'), data.get('model'), data.get('serial_number'),
-                  parse_date(data.get('issued_date'), datetime.now().date()), None, 'Issued', data.get('notes')])
+                  parse_date(data.get('issued_date'), now_ist().date()), None, 'Issued', data.get('notes')])
     conn.close()
     return jsonify({'message': 'Asset issued', 'id': aid}), 201
 
@@ -1845,7 +1855,7 @@ def assets_api():
 @admin_required
 def return_asset(aid):
     conn = get_db()
-    conn.execute("UPDATE assets SET return_date = ?, status = 'Returned' WHERE asset_id = ?", [datetime.now().date(), aid])
+    conn.execute("UPDATE assets SET return_date = ?, status = 'Returned' WHERE asset_id = ?", [now_ist().date(), aid])
     conn.close()
     return jsonify({'message': 'Asset returned'}), 200
 
@@ -1883,7 +1893,7 @@ def jobs_api():
     jid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO job_postings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                 [jid, data['title'], data.get('department'), data.get('location'), data.get('description'), data.get('requirements'), 'Open', datetime.now()])
+                 [jid, data['title'], data.get('department'), data.get('location'), data.get('description'), data.get('requirements'), 'Open', now_ist()])
     conn.close()
     return jsonify({'message': 'Job created', 'id': jid}), 201
 
@@ -1919,7 +1929,7 @@ def candidates_api():
     cid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) VALUES (?, ?, ?, ?, ?, ?, 'Applied', ?)",
-                 [cid, data.get('job_id'), data['name'], data['email'], data.get('phone'), data.get('resume_text', ''), datetime.now()])
+                 [cid, data.get('job_id'), data['name'], data['email'], data.get('phone'), data.get('resume_text', ''), now_ist()])
     conn.close()
     return jsonify({'message': 'Candidate added', 'id': cid}), 201
 
@@ -1992,7 +2002,7 @@ def offers_api():
     oid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO offer_letters VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [oid, data['candidate_id'], float(data['offered_salary']), datetime.now().date(), 'Pending', None, data.get('notes')])
+                 [oid, data['candidate_id'], float(data['offered_salary']), now_ist().date(), 'Pending', None, data.get('notes')])
     conn.close()
     return jsonify({'message': 'Offer sent', 'id': oid}), 201
 
@@ -2002,7 +2012,7 @@ def offers_api():
 @hr_or_admin_required
 def accept_offer(oid):
     conn = get_db()
-    conn.execute("UPDATE offer_letters SET status = 'Accepted', accepted_at = ? WHERE offer_id = ?", [datetime.now(), oid])
+    conn.execute("UPDATE offer_letters SET status = 'Accepted', accepted_at = ? WHERE offer_id = ?", [now_ist(), oid])
     row = conn.execute("SELECT candidate_id FROM offer_letters WHERE offer_id = ?", [oid]).fetchone()
     if row:
         conn.execute("UPDATE candidates SET status = 'Hired' WHERE candidate_id = ?", [row[0]])
@@ -2048,7 +2058,7 @@ def onboarding_api():
 @admin_required
 def complete_onboarding_task(tid):
     conn = get_db()
-    conn.execute("UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
+    conn.execute("UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [now_ist(), tid])
     conn.close()
     return jsonify({'message': 'Task completed'}), 200
 
@@ -2087,7 +2097,7 @@ def offboarding_api():
 @admin_required
 def complete_offboarding_task(tid):
     conn = get_db()
-    conn.execute("UPDATE offboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
+    conn.execute("UPDATE offboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [now_ist(), tid])
     conn.close()
     return jsonify({'message': 'Task completed'}), 200
 
@@ -2107,7 +2117,7 @@ def exit_interviews_api():
     eid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO exit_interviews VALUES (?, ?, ?, ?, ?, ?)",
-                 [eid, data['emp_id'], data['reason'], data.get('feedback'), parse_date(data['exit_date']), datetime.now()])
+                 [eid, data['emp_id'], data['reason'], data.get('feedback'), parse_date(data['exit_date']), now_ist()])
     conn.close()
     return jsonify({'message': 'Exit interview recorded'}), 201
 
@@ -2146,7 +2156,7 @@ def salary_api():
     conn = get_db()
     conn.execute("INSERT INTO salary_structures VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  [sid, data['emp_id'], float(data['basic']), float(data.get('hra', 0)), float(data.get('allowances', 0)), float(data.get('deductions', 0)),
-                  parse_date(data.get('effective_from'), datetime.now().date())])
+                  parse_date(data.get('effective_from'), now_ist().date())])
     conn.close()
     return jsonify({'message': 'Salary structure saved', 'id': sid}), 201
 
@@ -2181,8 +2191,8 @@ def payroll_runs_api():
         conn.close()
         return jsonify({'error': 'Payroll already processed for this period'}), 409
     rid = gen_id()
-    conn.execute("INSERT INTO payroll_runs VALUES (?, ?, ?, ?, ?)", [rid, month, year, datetime.now(), 'Draft'])
-    employees = conn.execute("SELECT u.emp_id, COALESCE(s.basic,0), COALESCE(s.hra,0), COALESCE(s.allowances,0), COALESCE(s.deductions,0) FROM users u LEFT JOIN salary_structures s ON u.emp_id = s.emp_id AND s.effective_from <= ? WHERE u.role = 'Employee'", [datetime.now().date()]).fetchall()
+    conn.execute("INSERT INTO payroll_runs VALUES (?, ?, ?, ?, ?)", [rid, month, year, now_ist(), 'Draft'])
+    employees = conn.execute("SELECT u.emp_id, COALESCE(s.basic,0), COALESCE(s.hra,0), COALESCE(s.allowances,0), COALESCE(s.deductions,0) FROM users u LEFT JOIN salary_structures s ON u.emp_id = s.emp_id AND s.effective_from <= ? WHERE u.role = 'Employee'", [now_ist().date()]).fetchall()
     for e in employees:
         gross, total_ded, net, pf, esi, pt = calc_payroll_item(e[0], float(e[1]), float(e[2]), float(e[3]), float(e[4]))
         conn.execute("INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2291,7 +2301,7 @@ def goals_api():
     conn = get_db()
     conn.execute("INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [gid, data.get('emp_id', session['emp_id']), data['title'], data.get('description'),
-                  parse_date(data.get('target_date')), data.get('weight', 1), None, 'Active', datetime.now()])
+                  parse_date(data.get('target_date')), data.get('weight', 1), None, 'Active', now_ist()])
     conn.close()
     return jsonify({'message': 'Goal created', 'id': gid}), 201
 
@@ -2342,7 +2352,7 @@ def reviews_api():
     rid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO performance_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [rid, data['emp_id'], data['reviewer_id'], data['review_period'], None, None, 'Draft', datetime.now(), None])
+                 [rid, data['emp_id'], data['reviewer_id'], data['review_period'], None, None, 'Draft', now_ist(), None])
     conn.close()
     return jsonify({'message': 'Review created', 'id': rid}), 201
 
@@ -2354,7 +2364,7 @@ def submit_review(rid):
     data = request.get_json(silent=True) or {}
     conn = get_db()
     conn.execute("UPDATE performance_reviews SET overall_rating = ?, comments = ?, status = 'Submitted', submitted_at = ? WHERE review_id = ?",
-                 [data.get('rating'), data.get('comments'), datetime.now(), rid])
+                 [data.get('rating'), data.get('comments'), now_ist(), rid])
     conn.close()
     return jsonify({'message': 'Review submitted'}), 200
 
@@ -2379,7 +2389,7 @@ def feedback_api():
     fid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO feedback_360 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [fid, data['emp_id'], session['emp_id'], data.get('category'), data['rating'], data.get('comment'), datetime.now()])
+                 [fid, data['emp_id'], session['emp_id'], data.get('category'), data['rating'], data.get('comment'), now_ist()])
     conn.close()
     return jsonify({'message': 'Feedback submitted'}), 201
 
@@ -2428,7 +2438,7 @@ def expenses_api():
     cid = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO expense_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [cid, data.get('emp_id', session['emp_id']), data['cat_id'], float(data['amount']), data.get('description'), data.get('receipt_path'), 'Pending', None, datetime.now()])
+                 [cid, data.get('emp_id', session['emp_id']), data['cat_id'], float(data['amount']), data.get('description'), data.get('receipt_path'), 'Pending', None, now_ist()])
     conn.close()
     return jsonify({'message': 'Expense claimed', 'id': cid}), 201
 
@@ -2482,7 +2492,7 @@ def tickets_api():
     conn = get_db()
     conn.execute("INSERT INTO tickets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [tid, session['emp_id'], data['subject'], data.get('description'), data.get('category'), data.get('priority', 'Medium'),
-                  'Open', None, datetime.now(), None, None])
+                  'Open', None, now_ist(), None, None])
     conn.close()
     return jsonify({'message': 'Ticket created', 'id': tid}), 201
 
@@ -2524,8 +2534,8 @@ def add_ticket_comment(tid):
         conn.close()
         return jsonify({'error': 'Ticket not found'}), 404
     cid = gen_id()
-    conn.execute("INSERT INTO ticket_comments VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], datetime.now()])
-    conn.execute("UPDATE tickets SET updated_at = ? WHERE ticket_id = ?", [datetime.now(), tid])
+    conn.execute("INSERT INTO ticket_comments VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], now_ist()])
+    conn.execute("UPDATE tickets SET updated_at = ? WHERE ticket_id = ?", [now_ist(), tid])
     conn.close()
     return jsonify({'message': 'Comment added', 'id': cid}), 201
 
@@ -2539,7 +2549,7 @@ def update_ticket_status(tid):
     if status not in ('Open', 'In Progress', 'Resolved', 'Closed'):
         return jsonify({'error': 'Invalid status'}), 400
     conn = get_db()
-    now = datetime.now()
+    now = now_ist()
     resolved_at = now if status == 'Resolved' else None
     conn.execute("UPDATE tickets SET status = ?, updated_at = ?, resolved_at = ? WHERE ticket_id = ?", [status, now, resolved_at, tid])
     conn.close()
@@ -2552,7 +2562,7 @@ def update_ticket_status(tid):
 def assign_ticket(tid):
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    conn.execute("UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE ticket_id = ?", [data.get('assigned_to'), datetime.now(), tid])
+    conn.execute("UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE ticket_id = ?", [data.get('assigned_to'), now_ist(), tid])
     conn.close()
     return jsonify({'message': 'Ticket assigned'}), 200
 
@@ -2603,14 +2613,14 @@ def upload_document():
         return jsonify({'error': 'No file selected'}), 400
     emp_id = request.form.get('emp_id', session['emp_id'])
     category = request.form.get('category', 'Other')
-    filename = f"{int(datetime.now().timestamp())}_{f.filename}"
+    filename = f"{int(now_ist().timestamp())}_{f.filename}"
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     f.save(filepath)
     fsize = os.path.getsize(filepath)
     did = gen_id()
     conn = get_db()
     conn.execute("INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [did, emp_id, f.filename, category, filename, fsize, datetime.now()])
+                 [did, emp_id, f.filename, category, filename, fsize, now_ist()])
     conn.close()
     return jsonify({'message': 'File uploaded', 'id': did, 'path': filename}), 201
 
@@ -3034,7 +3044,7 @@ def leaves_api():
 
     balance = conn.execute(
         "SELECT balance_id, total_days, used_days FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",
-        [emp_id, lt, datetime.now().year]
+        [emp_id, lt, now_ist().year]
     ).fetchone()
     if balance:
         requested = (ed - sd).days + 1
@@ -3065,8 +3075,8 @@ def leaves_api():
 @app.route('/api/leaves/export', methods=['GET'])
 @admin_required
 def export_leaves():
-    month = request.args.get('month', datetime.now().month, type=int)
-    year = request.args.get('year', datetime.now().year, type=int)
+    month = request.args.get('month', now_ist().month, type=int)
+    year = request.args.get('year', now_ist().year, type=int)
     status_filter = request.args.get('status')
     conn = get_db()
     try:
@@ -3131,7 +3141,7 @@ def approve_leave(leave_id):
     days = (row[3] - row[2]).days + 1
     conn.execute(
         "UPDATE leave_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE leave_id = ?",
-        [session['emp_id'], datetime.now(), leave_id]
+        [session['emp_id'], now_ist(), leave_id]
     )
     conn.execute(
         "UPDATE leave_balance SET used_days = used_days + ? WHERE emp_id = ? AND leave_type = ? AND year = ?",
@@ -3158,7 +3168,7 @@ def reject_leave(leave_id):
         return jsonify({'error': 'Leave is not pending'}), 400
     conn.execute(
         "UPDATE leave_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE leave_id = ?",
-        [session['emp_id'], datetime.now(), leave_id]
+        [session['emp_id'], now_ist(), leave_id]
     )
     conn.close()
     audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected')
@@ -3172,7 +3182,7 @@ def reject_leave(leave_id):
 def leave_balance_api():
     """Get leave balance for current user"""
     emp_id = session['emp_id']
-    year = datetime.now().year
+    year = now_ist().year
     conn = get_db()
     rows = conn.execute(
         "SELECT leave_type, total_days, used_days FROM leave_balance WHERE emp_id = ? AND year = ?",
@@ -3246,7 +3256,7 @@ def export_report():
         200:
           description: File download
     """
-    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    start_date = parse_date(request.args.get('start_date'), now_ist().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
     fmt = request.args.get('format', 'xlsx')
 
@@ -3347,7 +3357,7 @@ def export_report_pdf():
         200:
           description: PDF file download
     """
-    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    start_date = parse_date(request.args.get('start_date'), now_ist().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
     if end_date and end_date < start_date:
         start_date, end_date = end_date, start_date
@@ -3449,11 +3459,11 @@ def start_break():
     if active:
         conn.execute(
             "UPDATE breaks SET end_time = ?, status = 'Completed' WHERE break_id = ?",
-            [datetime.now(), active[0]]
+            [now_ist(), active[0]]
         )
         conn.commit()
     break_id = gen_id()
-    now = datetime.now()
+    now = now_ist()
     shift_date = _get_shift_date_for_dt(emp_id, now, conn)
     conn.execute(
         "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) VALUES (?, ?, ?, ?, ?, 'Active')",
@@ -3475,7 +3485,7 @@ def end_break(break_id):
     if not info:
         conn.close()
         return jsonify({'error': 'Break not found'}), 404
-    end_time = datetime.now()
+    end_time = now_ist()
     duration = int((end_time - info[0]).total_seconds() / 60)
     conn.execute(
         "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
@@ -3535,12 +3545,12 @@ def break_approvals_api():
     conn = get_db()
     if conn.execute(
         "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND break_date = ? AND status = 'Pending'",
-        [emp_id, bt, _get_shift_date_for_dt(emp_id, datetime.now(), conn)]
+        [emp_id, bt, _get_shift_date_for_dt(emp_id, now_ist(), conn)]
     ).fetchone():
         conn.close()
         return jsonify({'error': 'Pending approval already exists for today'}), 409
     aid = gen_id()
-    shift_date = _get_shift_date_for_dt(emp_id, datetime.now(), conn)
+    shift_date = _get_shift_date_for_dt(emp_id, now_ist(), conn)
     conn.execute(
         "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) VALUES (?, ?, ?, ?, ?, 'Pending')",
         [aid, emp_id, bt, shift_date, data.get('reason', '')]
@@ -3601,9 +3611,9 @@ def get_login_hours():
         try:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            target_date = datetime.now().date()
+            target_date = now_ist().date()
     else:
-        target_date = datetime.now().date()
+        target_date = now_ist().date()
     sessions = conn.execute(
         "SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC",
         [emp_id, target_date]
@@ -3627,9 +3637,9 @@ def get_shift_summary():
         try:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            target_date = datetime.now().date()
+            target_date = now_ist().date()
     else:
-        target_date = datetime.now().date()
+        target_date = now_ist().date()
 
     shift_start_dt = _get_shift_start_dt(emp_id, conn, target_date)
     shift_end_dt = _get_shift_end_dt(emp_id, shift_start_dt, conn)
@@ -3661,7 +3671,7 @@ def get_shift_summary():
     if first_login and last_logout:
         shift_hours = round((last_logout - first_login).total_seconds() / 3600, 2)
     elif first_login and not last_logout:
-        shift_hours = round((datetime.now() - first_login).total_seconds() / 3600, 2)
+        shift_hours = round((now_ist() - first_login).total_seconds() / 3600, 2)
 
     productive_hours = max(0, shift_hours - total_break_minutes / 60)
     efficiency = round((productive_hours / shift_hours) * 100, 1) if shift_hours > 0 else 0
@@ -3686,8 +3696,8 @@ def get_shift_summary():
 @login_required
 def get_user_calendar():
     emp_id = session['emp_id']
-    month = int(request.args.get('month', datetime.now().month))
-    year = int(request.args.get('year', datetime.now().year))
+    month = int(request.args.get('month', now_ist().month))
+    year = int(request.args.get('year', now_ist().year))
 
     start_date = datetime(year, month, 1).date()
     if month == 12:
@@ -3787,7 +3797,7 @@ def get_user_calendar():
 @admin_required
 def live_monitoring():
     conn = get_db()
-    now = datetime.now()
+    now = now_ist()
     all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
     shift_starts = []
     for (eid,) in all_employees:
@@ -3810,7 +3820,7 @@ def live_monitoring():
 @admin_required
 def get_break_summary():
     conn = get_db()
-    now = datetime.now()
+    now = now_ist()
     all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
     shift_starts = []
     for (eid,) in all_employees:
@@ -3835,13 +3845,13 @@ def get_break_summary():
 @app.route('/api/disposed-breaks')
 @admin_required
 def get_disposed_breaks():
-    one_hour_ago = datetime.now() - timedelta(hours=1)
+    one_hour_ago = now_ist() - timedelta(hours=1)
     conn = get_db()
     all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
     shift_starts = []
     for (eid,) in all_employees:
         shift_starts.append(_get_shift_start_dt(eid, conn))
-    earliest_shift = min(shift_starts) if shift_starts else datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    earliest_shift = min(shift_starts) if shift_starts else now_ist().replace(hour=0, minute=0, second=0, microsecond=0)
     current_shift_date = earliest_shift.date()
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department, b.break_type, b.start_time, b.end_time, b.duration_minutes, b.status
@@ -3862,7 +3872,7 @@ def get_disposed_breaks():
 
 def get_dashboard_stats():
     conn = get_db()
-    now = datetime.now()
+    now = now_ist()
     total = _scalar("SELECT COUNT(*) FROM users WHERE role = 'Employee'")
     all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
     shift_starts = []
@@ -3890,7 +3900,7 @@ def admin_breaks():
     shift_starts = []
     for (eid,) in all_employees:
         shift_starts.append(_get_shift_start_dt(eid, conn))
-    shift_date = min(shift_starts).date() if shift_starts else datetime.now().date()
+    shift_date = min(shift_starts).date() if shift_starts else now_ist().date()
     active = conn.execute("""
         SELECT b.break_id, u.name, b.break_type, b.start_time
         FROM breaks b JOIN users u ON b.emp_id = u.emp_id
@@ -3913,7 +3923,7 @@ def admin_breaks():
     return jsonify({
         'active_breaks': [{
             'break_id': r[0], 'emp_name': r[1], 'break_type': r[2],
-            'duration': int((datetime.now() - r[3]).total_seconds() / 60) if r[3] else 0
+            'duration': int((now_ist() - r[3]).total_seconds() / 60) if r[3] else 0
         } for r in active],
         'disposed_breaks': [{
             'emp_name': r[0], 'break_type': r[1],
@@ -3939,7 +3949,7 @@ def admin_dispose_break(break_id):
     if not info:
         conn.close()
         return jsonify({'error': 'Break not found or already ended'}), 404
-    end_time = datetime.now()
+    end_time = now_ist()
     duration = int((end_time - info[0]).total_seconds() / 60)
     conn.execute(
         "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
@@ -4027,7 +4037,7 @@ def add_user():
         [data['emp_id'], data['name'], data['email'], hash_password(pwd),
          data.get('role', 'Employee'), data.get('department', ''),
          data.get('designation', ''),
-         datetime.now(), datetime.now(),
+         now_ist(), now_ist(),
          int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1)),
          data.get('shift_start', ''), data.get('shift_end', '')]
     )
@@ -4172,7 +4182,7 @@ def import_users_page():
 @app.route('/api/reports')
 @admin_required
 def get_reports():
-    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    start_date = parse_date(request.args.get('start_date'), now_ist().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
     if end_date and end_date < start_date:
         start_date, end_date = end_date, start_date
@@ -4278,7 +4288,7 @@ def get_reports():
 @app.route('/api/reports/department-summary')
 @admin_required
 def get_department_summary():
-    start_date = parse_date(request.args.get('start_date'), datetime.now().date())
+    start_date = parse_date(request.args.get('start_date'), now_ist().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
     if end_date and end_date < start_date:
         start_date, end_date = end_date, start_date
@@ -4386,7 +4396,7 @@ def csrf_required(f):
 def cleanup_expired_tokens():
     try:
         conn = get_db()
-        conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < ?", [datetime.now()])
+        conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < ?", [now_ist()])
         conn.close()
         logger.info("Cleaned up expired password reset tokens")
     except Exception as e:
