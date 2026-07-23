@@ -60,6 +60,20 @@ def now_ist():
     return datetime.now(IST).replace(tzinfo=None)
 
 
+def iso_ist(dt):
+    """Format a naive IST datetime as ISO 8601 with +05:30 offset."""
+    if dt is None:
+        return None
+    return dt.strftime('%Y-%m-%dT%H:%M:%S+05:30')
+
+
+def fmt_time_ist(dt):
+    """Format a naive IST datetime as HH:MM:SS with IST suffix."""
+    if dt is None:
+        return None
+    return dt.strftime('%H:%M:%S IST')
+
+
 # ── Rate Limiter ──────────────────────────────────────────────────────
 limiter = Limiter(
     key_func=get_remote_address,
@@ -1368,8 +1382,8 @@ def profile_api():
             'allow_login': u[6], 'allow_breaks': u[7],
             'designation': u[8], 'manager_emp_id': u[9],
             'phone': u[10],
-            'date_of_birth': u[11].isoformat() if u[11] else None,
-            'date_of_joining': u[12].isoformat() if u[12] else None,
+            'date_of_birth': u[11].isoformat() + '+05:30' if u[11] else None,
+            'date_of_joining': u[12].isoformat() + '+05:30' if u[12] else None,
             'address': u[13], 'emergency_contact_name': u[14],
             'emergency_contact_phone': u[15]
         }), 200
@@ -1534,7 +1548,7 @@ def dependents_api():
         conn = get_db()
         rows = conn.execute("SELECT dependent_id, name, relationship, date_of_birth FROM dependents WHERE emp_id = ?", [emp_id]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'name': r[1], 'relationship': r[2], 'date_of_birth': r[3].isoformat() if r[3] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'name': r[1], 'relationship': r[2], 'date_of_birth': r[3].isoformat() + '+05:30' if r[3] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('relationship'):
         return jsonify({'error': 'name and relationship required'}), 400
@@ -1565,7 +1579,7 @@ def documents_api():
         conn = get_db()
         rows = conn.execute("SELECT doc_id, doc_type, file_name, uploaded_at FROM employee_documents WHERE emp_id = ?", [emp_id]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'doc_type': r[1], 'file_name': r[2], 'uploaded_at': r[3].isoformat() if r[3] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'doc_type': r[1], 'file_name': r[2], 'uploaded_at': r[3].isoformat() + '+05:30' if r[3] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('doc_type'):
         return jsonify({'error': 'doc_type required'}), 400
@@ -1589,7 +1603,7 @@ def get_holidays():
     conn = get_db()
     try:
         rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
-        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat(), 'type': r[3]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat() + '+05:30', 'type': r[3]} for r in rows]), 200
     finally:
         conn.close()
 
@@ -1672,7 +1686,7 @@ def get_notifications():
     conn.close()
     return jsonify({
         'unread': unread,
-        'data': [{'id': r[0], 'type': r[1], 'message': r[2], 'link': r[3], 'is_read': bool(r[4]), 'created_at': r[5].isoformat() if r[5] else None} for r in rows]
+        'data': [{'id': r[0], 'type': r[1], 'message': r[2], 'link': r[3], 'is_read': bool(r[4]), 'created_at': r[5].isoformat() + '+05:30' if r[5] else None} for r in rows]
     }), 200
 
 
@@ -1708,9 +1722,9 @@ def regularization_api():
             ).fetchall()
         conn.close()
         return jsonify([{
-            'id': r[0], 'emp_id': r[1], 'date': r[2].isoformat(),
+            'id': r[0], 'emp_id': r[1], 'date': r[2].isoformat() + '+05:30',
             'reason': r[3], 'status': r[4], 'approved_by': r[5],
-            'created_at': r[6].isoformat() if r[6] else None
+            'created_at': r[6].isoformat() + '+05:30' if r[6] else None
         } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
@@ -1818,7 +1832,7 @@ def my_assets():
     conn = get_db()
     rows = conn.execute("SELECT asset_id, asset_type, asset_tag, brand, model, serial_number, issued_date, return_date, status, notes FROM assets WHERE emp_id = ? ORDER BY issued_date DESC", [session['emp_id']]).fetchall()
     conn.close()
-    return jsonify([{'id': r[0], 'type': r[1], 'tag': r[2], 'brand': r[3], 'model': r[4], 'serial': r[5], 'issued': r[6].isoformat() if r[6] else None, 'returned': r[7].isoformat() if r[7] else None, 'status': r[8], 'notes': r[9]} for r in rows]), 200
+    return jsonify([{'id': r[0], 'type': r[1], 'tag': r[2], 'brand': r[3], 'model': r[4], 'serial': r[5], 'issued': r[6].isoformat() + '+05:30' if r[6] else None, 'returned': r[7].isoformat() + '+05:30' if r[7] else None, 'status': r[8], 'notes': r[9]} for r in rows]), 200
 
 
 @app.route('/api/v1/assets', methods=['GET', 'POST'])
@@ -1833,7 +1847,7 @@ def assets_api():
         else:
             rows = conn.execute("SELECT a.asset_id, a.emp_id, u.name, a.asset_type, a.asset_tag, a.brand, a.model, a.serial_number, a.issued_date, a.return_date, a.status, a.notes FROM assets a JOIN users u ON a.emp_id = u.emp_id ORDER BY a.issued_date DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'type': r[3], 'tag': r[4], 'brand': r[5], 'model': r[6], 'serial': r[7], 'issued': r[8].isoformat() if r[8] else None, 'returned': r[9].isoformat() if r[9] else None, 'status': r[10], 'notes': r[11]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'type': r[3], 'tag': r[4], 'brand': r[5], 'model': r[6], 'serial': r[7], 'issued': r[8].isoformat() + '+05:30' if r[8] else None, 'returned': r[9].isoformat() + '+05:30' if r[9] else None, 'status': r[10], 'notes': r[11]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('asset_type'):
         return jsonify({'error': 'emp_id and asset_type required'}), 400
@@ -1886,7 +1900,7 @@ def jobs_api():
         conn = get_db()
         rows = conn.execute("SELECT job_id, title, department, location, description, requirements, status, created_at FROM job_postings ORDER BY created_at DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'title': r[1], 'department': r[2], 'location': r[3], 'description': r[4], 'requirements': r[5], 'status': r[6], 'created_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'title': r[1], 'department': r[2], 'location': r[3], 'description': r[4], 'requirements': r[5], 'status': r[6], 'created_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('title'):
         return jsonify({'error': 'title required'}), 400
@@ -1922,7 +1936,7 @@ def candidates_api():
         else:
             rows = conn.execute("SELECT c.candidate_id, c.job_id, j.title, c.name, c.email, c.phone, c.status, c.applied_at FROM candidates c LEFT JOIN job_postings j ON c.job_id = j.job_id ORDER BY c.applied_at DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'job_id': r[1], 'job_title': r[2] or 'N/A', 'name': r[3], 'email': r[4], 'phone': r[5], 'status': r[6], 'applied_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'job_id': r[1], 'job_title': r[2] or 'N/A', 'name': r[3], 'email': r[4], 'phone': r[5], 'status': r[6], 'applied_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('email'):
         return jsonify({'error': 'name and email required'}), 400
@@ -1962,7 +1976,7 @@ def interviews_api():
         else:
             rows = conn.execute("SELECT i.interview_id, i.candidate_id, c.name, i.scheduled_at, i.interviewer, i.mode, i.feedback, i.status FROM interviews i JOIN candidates c ON i.candidate_id = c.candidate_id ORDER BY i.scheduled_at DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'scheduled_at': r[3].isoformat() if r[3] else None, 'interviewer': r[4], 'mode': r[5], 'feedback': r[6], 'status': r[7]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'scheduled_at': r[3].isoformat() + '+05:30' if r[3] else None, 'interviewer': r[4], 'mode': r[5], 'feedback': r[6], 'status': r[7]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('candidate_id') or not data.get('scheduled_at'):
         return jsonify({'error': 'candidate_id and scheduled_at required'}), 400
@@ -1995,7 +2009,7 @@ def offers_api():
         conn = get_db()
         rows = conn.execute("SELECT o.offer_id, o.candidate_id, c.name, c.email, o.offered_salary, o.offer_date, o.status, o.accepted_at, o.notes FROM offer_letters o JOIN candidates c ON o.candidate_id = c.candidate_id ORDER BY o.offer_date DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3], 'salary': float(r[4]) if r[4] else 0, 'offer_date': r[5].isoformat() if r[5] else None, 'status': r[6], 'accepted_at': r[7].isoformat() if r[7] else None, 'notes': r[8]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3], 'salary': float(r[4]) if r[4] else 0, 'offer_date': r[5].isoformat() + '+05:30' if r[5] else None, 'status': r[6], 'accepted_at': r[7].isoformat() + '+05:30' if r[7] else None, 'notes': r[8]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('candidate_id') or not data.get('offered_salary'):
         return jsonify({'error': 'candidate_id and offered_salary required'}), 400
@@ -2041,7 +2055,7 @@ def onboarding_api():
         else:
             rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() if r[6] else None, 'completed_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() + '+05:30' if r[6] else None, 'completed_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
@@ -2080,7 +2094,7 @@ def offboarding_api():
         else:
             rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() if r[6] else None, 'completed_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() + '+05:30' if r[6] else None, 'completed_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
@@ -2110,7 +2124,7 @@ def exit_interviews_api():
         conn = get_db()
         rows = conn.execute("SELECT ei.interview_id, ei.emp_id, u.name, ei.reason, ei.feedback, ei.exit_date, ei.created_at FROM exit_interviews ei JOIN users u ON ei.emp_id = u.emp_id ORDER BY ei.created_at DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4], 'exit_date': r[5].isoformat() if r[5] else None, 'created_at': r[6].isoformat() if r[6] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4], 'exit_date': r[5].isoformat() + '+05:30' if r[5] else None, 'created_at': r[6].isoformat() + '+05:30' if r[6] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('reason') or not data.get('exit_date'):
         return jsonify({'error': 'emp_id, reason, exit_date required'}), 400
@@ -2148,7 +2162,7 @@ def salary_api():
         conn = get_db()
         rows = conn.execute("SELECT s.struct_id, s.emp_id, u.name, s.basic, s.hra, s.allowances, s.deductions, s.effective_from FROM salary_structures s JOIN users u ON s.emp_id = u.emp_id ORDER BY s.effective_from DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('basic'):
         return jsonify({'error': 'emp_id and basic required'}), 400
@@ -2181,7 +2195,7 @@ def payroll_runs_api():
         conn = get_db()
         rows = conn.execute("SELECT run_id, month, year, processed_at, status FROM payroll_runs ORDER BY year DESC, month DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'month': r[1], 'year': r[2], 'processed_at': r[3].isoformat() if r[3] else None, 'status': r[4]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'month': r[1], 'year': r[2], 'processed_at': r[3].isoformat() + '+05:30' if r[3] else None, 'status': r[4]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     month, year = data.get('month'), data.get('year')
     if not month or not year:
@@ -2293,7 +2307,7 @@ def goals_api():
         else:
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id WHERE g.emp_id = ? ORDER BY g.created_at DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'title': r[3], 'description': r[4], 'target_date': r[5].isoformat() if r[5] else None, 'weight': r[6], 'rating': r[7], 'status': r[8], 'created_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'title': r[3], 'description': r[4], 'target_date': r[5].isoformat() + '+05:30' if r[5] else None, 'weight': r[6], 'rating': r[7], 'status': r[8], 'created_at': r[9].isoformat() + '+05:30' if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('title'):
         return jsonify({'error': 'title required'}), 400
@@ -2345,7 +2359,7 @@ def reviews_api():
             "SELECT r.review_id, r.emp_id, u.name, r.reviewer_id, rev.name, r.review_period, r.overall_rating, r.comments, r.status, r.submitted_at FROM performance_reviews r JOIN users u ON r.emp_id = u.emp_id JOIN users rev ON r.reviewer_id = rev.emp_id ORDER BY r.created_at DESC"
         ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reviewer_id': r[3], 'reviewer': r[4], 'period': r[5], 'rating': float(r[6]) if r[6] else None, 'comments': r[7], 'status': r[8], 'submitted_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reviewer_id': r[3], 'reviewer': r[4], 'period': r[5], 'rating': float(r[6]) if r[6] else None, 'comments': r[7], 'status': r[8], 'submitted_at': r[9].isoformat() + '+05:30' if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('reviewer_id') or not data.get('review_period'):
         return jsonify({'error': 'emp_id, reviewer_id, review_period required'}), 400
@@ -2382,7 +2396,7 @@ def feedback_api():
         else:
             rows = conn.execute("SELECT f.feedback_id, f.emp_id, u.name, f.reviewer_id, rev.name, f.category, f.rating, f.comment, f.submitted_at FROM feedback_360 f JOIN users u ON f.emp_id = u.emp_id JOIN users rev ON f.reviewer_id = rev.emp_id WHERE f.emp_id = ? ORDER BY f.submitted_at DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reviewer_id': r[3], 'reviewer': r[4], 'category': r[5], 'rating': r[6], 'comment': r[7], 'submitted_at': r[8].isoformat() if r[8] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reviewer_id': r[3], 'reviewer': r[4], 'category': r[5], 'rating': r[6], 'comment': r[7], 'submitted_at': r[8].isoformat() + '+05:30' if r[8] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('rating'):
         return jsonify({'error': 'emp_id and rating required'}), 400
@@ -2431,7 +2445,7 @@ def expenses_api():
         else:
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.emp_id = ? ORDER BY c.created_at DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'cat_id': r[3], 'category': r[4], 'amount': float(r[5]), 'description': r[6], 'status': r[7], 'created_at': r[8].isoformat() if r[8] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'cat_id': r[3], 'category': r[4], 'amount': float(r[5]), 'description': r[6], 'status': r[7], 'created_at': r[8].isoformat() + '+05:30' if r[8] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('cat_id') or not data.get('amount'):
         return jsonify({'error': 'cat_id and amount required'}), 400
@@ -2484,7 +2498,7 @@ def tickets_api():
         else:
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.created_at DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'subject': r[3], 'category': r[4], 'priority': r[5], 'status': r[6], 'assigned_to': r[7], 'created_at': r[8].isoformat() if r[8] else None, 'updated_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'subject': r[3], 'category': r[4], 'priority': r[5], 'status': r[6], 'assigned_to': r[7], 'created_at': r[8].isoformat() + '+05:30' if r[8] else None, 'updated_at': r[9].isoformat() + '+05:30' if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('subject'):
         return jsonify({'error': 'subject required'}), 400
@@ -2514,10 +2528,10 @@ def ticket_detail(tid):
     return jsonify({
         'id': row[0], 'emp_id': row[1], 'employee': row[2], 'subject': row[3], 'description': row[4],
         'category': row[5], 'priority': row[6], 'status': row[7], 'assigned_to': row[8],
-        'created_at': row[9].isoformat() if row[9] else None,
-        'updated_at': row[10].isoformat() if row[10] else None,
-        'resolved_at': row[11].isoformat() if row[11] else None,
-        'comments': [{'id': c[0], 'emp_id': c[1], 'name': c[2], 'comment': c[3], 'created_at': c[4].isoformat() if c[4] else None} for c in comments]
+        'created_at': row[9].isoformat() + '+05:30' if row[9] else None,
+        'updated_at': row[10].isoformat() + '+05:30' if row[10] else None,
+        'resolved_at': row[11].isoformat() + '+05:30' if row[11] else None,
+        'comments': [{'id': c[0], 'emp_id': c[1], 'name': c[2], 'comment': c[3], 'created_at': c[4].isoformat() + '+05:30' if c[4] else None} for c in comments]
     }), 200
 
 
@@ -2599,7 +2613,7 @@ def documents_list():
     else:
         rows = conn.execute("SELECT d.doc_id, d.emp_id, u.name, d.name, d.category, d.file_path, d.file_size, d.uploaded_at FROM documents d JOIN users u ON d.emp_id = u.emp_id WHERE d.emp_id = ? ORDER BY d.uploaded_at DESC", [session['emp_id']]).fetchall()
     conn.close()
-    return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'name': r[3], 'category': r[4], 'file_path': r[5], 'file_size': r[6], 'uploaded_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+    return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'name': r[3], 'category': r[4], 'file_path': r[5], 'file_size': r[6], 'uploaded_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
 
 
 @app.route('/api/v1/upload', methods=['POST'])
@@ -3027,9 +3041,9 @@ def leaves_api():
         conn.close()
         return jsonify([{
             'leave_id': r[0], 'emp_id': r[1], 'emp_name': r[2] or r[1], 'leave_type': r[3],
-            'start_date': r[4].isoformat(), 'end_date': r[5].isoformat(),
+            'start_date': r[4].isoformat() + '+05:30', 'end_date': r[5].isoformat() + '+05:30',
             'reason': r[6], 'status': r[7], 'approved_by': r[8],
-            'created_at': r[9].isoformat() if r[9] else None
+            'created_at': r[9].isoformat() + '+05:30' if r[9] else None
         } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
@@ -3096,7 +3110,7 @@ def export_leaves():
     import io, pandas as pd
     data = [{
         'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
-        'From': r[3].isoformat(), 'To': r[4].isoformat(), 'Days': (r[4] - r[3]).days + 1,
+        'From': r[3].isoformat() + '+05:30', 'To': r[4].isoformat() + '+05:30', 'Days': (r[4] - r[3]).days + 1,
         'Reason': r[5] or '', 'Status': r[6], 'Approved By': r[7] or ''
     } for r in rows]
 
@@ -3224,7 +3238,7 @@ def get_audit_log():
         'data': [{
             'log_id': r[0], 'emp_id': r[1], 'action': r[2],
             'details': r[3], 'ip_address': r[4],
-            'created_at': r[5].isoformat() if r[5] else None
+            'created_at': r[5].isoformat() + '+05:30' if r[5] else None
         } for r in rows]
     }), 200
 
@@ -3509,8 +3523,8 @@ def get_user_breaks():
     conn.close()
     return jsonify([{
         'break_id': b[0], 'break_type': b[1],
-        'start_time': b[2].isoformat() + 'Z' if b[2] else None,
-        'end_time': b[3].isoformat() + 'Z' if b[3] else None,
+        'start_time': b[2].isoformat() + '+05:30' if b[2] else None,
+        'end_time': b[3].isoformat() + '+05:30' if b[3] else None,
         'duration_minutes': b[4] or 0, 'status': b[5]
     } for b in breaks]), 200
 
@@ -3533,9 +3547,9 @@ def break_approvals_api():
         conn.close()
         return jsonify([{
             'approval_id': r[0], 'emp_id': r[1], 'emp_name': r[2],
-            'break_type': r[3], 'break_date': r[4].isoformat(),
+            'break_type': r[3], 'break_date': r[4].isoformat() + '+05:30',
             'reason': r[5], 'status': r[6], 'approved_by': r[7],
-            'created_at': r[8].isoformat() if r[8] else None
+            'created_at': r[8].isoformat() + '+05:30' if r[8] else None
         } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
@@ -3623,7 +3637,7 @@ def get_login_hours():
         'login_time': s[0].strftime('%H:%M:%S') if s[0] else 'N/A',
         'logout_time': s[1].strftime('%H:%M:%S') if s[1] else 'Active',
         'total_hours': float(s[2]) if s[2] else 0,
-        'session_date': s[3].isoformat() if s[3] else None
+        'session_date': s[3].isoformat() + '+05:30' if s[3] else None
     } for s in sessions]), 200
 
 
@@ -3677,7 +3691,7 @@ def get_shift_summary():
     efficiency = round((productive_hours / shift_hours) * 100, 1) if shift_hours > 0 else 0
 
     return jsonify({
-        'date': target_date.isoformat(),
+        'date': target_date.isoformat() + '+05:30',
         'shift_start': shift_start_dt.strftime('%H:%M'),
         'shift_end': shift_end_dt.strftime('%H:%M'),
         'first_login': first_login.strftime('%H:%M:%S') if first_login else None,
@@ -3735,7 +3749,7 @@ def get_user_calendar():
 
     sess_map = {}
     for s in sessions:
-        d = s[0].isoformat() if s[0] else None
+        d = s[0].isoformat() + '+05:30' if s[0] else None
         if not d: continue
         if d not in sess_map: sess_map[d] = []
         sess_map[d].append({
@@ -3746,7 +3760,7 @@ def get_user_calendar():
 
     brk_map = {}
     for b in breaks:
-        d = b[0].isoformat() if b[0] else None
+        d = b[0].isoformat() + '+05:30' if b[0] else None
         if not d: continue
         if d not in brk_map: brk_map[d] = []
         brk_map[d].append({
@@ -3765,13 +3779,13 @@ def get_user_calendar():
         leave_status = l[3]
         current = ld_start
         while current <= ld_end:
-            d = current.isoformat()
+            d = current.isoformat() + '+05:30'
             leave_map[d] = {'type': leave_type, 'status': leave_status}
             current += timedelta(days=1)
 
     holiday_map = {}
     for h in holidays:
-        d = h[0].isoformat() if h[0] else None
+        d = h[0].isoformat() + '+05:30' if h[0] else None
         if d: holiday_map[d] = h[1]
 
     shift_start = user_row[0] if user_row and user_row[0] else None
@@ -4266,7 +4280,7 @@ def get_reports():
         'break_type': r[4], 'start_time': r[5].strftime('%H:%M:%S') if r[5] else 'N/A',
         'end_time': r[6].strftime('%H:%M:%S') if r[6] else 'Ongoing',
         'duration_minutes': int(r[7]) if r[7] else 0,
-        'break_date': r[8].isoformat() if r[8] else 'N/A', 'status': r[9]
+        'break_date': r[8].isoformat() + '+05:30' if r[8] else 'N/A', 'status': r[9]
     } for r in break_details]
 
     session_list = [{
@@ -4274,11 +4288,11 @@ def get_reports():
         'login_time': r[4].strftime('%H:%M:%S') if r[4] else 'N/A',
         'logout_time': r[5].strftime('%H:%M:%S') if r[5] else 'Active',
         'total_hours': float(r[6]) if r[6] else 0,
-        'session_date': r[7].isoformat() if r[7] else 'N/A'
+        'session_date': r[7].isoformat() + '+05:30' if r[7] else 'N/A'
     } for r in session_details]
 
     return jsonify({
-        'report_range': {'start_date': start_date.isoformat(), 'end_date': end_date.isoformat()},
+        'report_range': {'start_date': start_date.isoformat() + '+05:30', 'end_date': end_date.isoformat() + '+05:30'},
         'departments': departments,
         'employees': [{'emp_id': e[0], 'name': e[1]} for e in employees],
         'summary': summary_list, 'break_details': break_list, 'session_details': session_list
