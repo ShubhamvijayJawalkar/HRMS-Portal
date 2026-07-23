@@ -130,14 +130,17 @@ def get_db():
     return conn
 
 
-def _scalar(sql, params=None):
+def _scalar(sql, params=None, conn=None):
     """Execute a SELECT that returns a single value and return it (0 if empty)."""
-    conn = get_db()
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db()
     try:
         row = conn.execute(sql, params or []).fetchone()
         return row[0] if row else 0
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
 
 
 def _get_shift_date_for_dt(emp_id, dt, conn):
@@ -659,7 +662,7 @@ def init_db():
 
     # ── Seed Data ──────────────────────────────────────────────────
     pwd_hash = bcrypt.hashpw(b'pass123', bcrypt.gensalt()).decode()
-    result = _scalar("SELECT COUNT(*) FROM users")
+    result = _scalar("SELECT COUNT(*) FROM users", conn=conn)
     if result == 0:
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -687,7 +690,7 @@ def init_db():
         conn.executemany("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)", holidays_data)
 
     # ── Seed Expense Categories ───────────────────────────────────
-    result = _scalar("SELECT COUNT(*) FROM expense_categories")
+    result = _scalar("SELECT COUNT(*) FROM expense_categories", conn=conn)
     if result == 0:
         conn.executemany(
             "INSERT INTO expense_categories VALUES (?, ?, ?)",
@@ -712,7 +715,7 @@ def init_db():
         except Exception:
             pass
 
-    result = _scalar("SELECT COUNT(*) FROM break_types")
+    result = _scalar("SELECT COUNT(*) FROM break_types", conn=conn)
     if result == 0:
         conn.executemany(
             "INSERT INTO break_types VALUES (?, ?, ?)",
@@ -722,7 +725,7 @@ def init_db():
         )
 
     # ── Seed Leave Balance ─────────────────────────────────────────
-    result = _scalar("SELECT COUNT(*) FROM leave_balance")
+    result = _scalar("SELECT COUNT(*) FROM leave_balance", conn=conn)
     if result == 0:
         year = now_ist().year
         bid = int(now_ist().timestamp() * 1000) % 1000000
@@ -738,7 +741,7 @@ def init_db():
     now = now_ist()
     base_id = int(now.timestamp() * 1000) % 1000000
 
-    if _scalar("SELECT COUNT(*) FROM user_sessions") < 2:
+    if _scalar("SELECT COUNT(*) FROM user_sessions", conn=conn) < 2:
         conn.execute(
             "INSERT INTO user_sessions (session_id, emp_id, login_time, logout_time, total_hours, session_date) VALUES (?, ?, ?, ?, ?, ?)",
             [base_id + 1, 'EMP001', now - timedelta(hours=8), now, 8.0, now.date()]
@@ -748,7 +751,7 @@ def init_db():
             [base_id + 2, 'EMP002', now - timedelta(hours=6), now - timedelta(hours=1), 5.0, now.date()]
         )
 
-    if _scalar("SELECT COUNT(*) FROM breaks") < 2:
+    if _scalar("SELECT COUNT(*) FROM breaks", conn=conn) < 2:
         conn.execute(
             "INSERT INTO breaks (break_id, emp_id, break_type, start_time, end_time, duration_minutes, break_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 3, 'EMP001', 'Tea', now - timedelta(minutes=30), now - timedelta(minutes=15), 15, now.date(), 'Completed']
@@ -758,7 +761,7 @@ def init_db():
             [base_id + 4, 'EMP002', 'Lunch', now - timedelta(hours=1), now - timedelta(minutes=30), 30, now.date(), 'Completed']
         )
 
-    if _scalar("SELECT COUNT(*) FROM audit_log") < 2:
+    if _scalar("SELECT COUNT(*) FROM audit_log", conn=conn) < 2:
         conn.execute(
             "INSERT INTO audit_log (log_id, emp_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [base_id + 5, 'EMP001', 'LOGIN', 'User signed in', '127.0.0.1', now]
@@ -768,7 +771,7 @@ def init_db():
             [base_id + 6, 'EMP002', 'PROFILE_UPDATE', 'Updated profile', '127.0.0.1', now - timedelta(hours=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM leave_requests") < 2:
+    if _scalar("SELECT COUNT(*) FROM leave_requests", conn=conn) < 2:
         conn.execute(
             "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 7, 'EMP002', 'Casual', (now + timedelta(days=3)).date(), (now + timedelta(days=4)).date(), (now + timedelta(days=3)).year, 'Personal work', 'Pending', None, now, now]
@@ -778,7 +781,7 @@ def init_db():
             [base_id + 8, 'EMP002', 'Sick', (now + timedelta(days=10)).date(), (now + timedelta(days=12)).date(), (now + timedelta(days=10)).year, 'Medical appointment', 'Approved', 'EMP001', now, now]
         )
 
-    if _scalar("SELECT COUNT(*) FROM password_reset_tokens") < 2:
+    if _scalar("SELECT COUNT(*) FROM password_reset_tokens", conn=conn) < 2:
         conn.execute(
             "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at, used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [base_id + 9, 'EMP002', 'reset-token-001', now + timedelta(hours=2), 0, now]
@@ -788,7 +791,7 @@ def init_db():
             [base_id + 10, 'EMP002', 'reset-token-002', now + timedelta(hours=4), 0, now]
         )
 
-    if _scalar("SELECT COUNT(*) FROM employee_documents") < 2:
+    if _scalar("SELECT COUNT(*) FROM employee_documents", conn=conn) < 2:
         conn.execute(
             "INSERT INTO employee_documents (doc_id, emp_id, doc_type, file_name, uploaded_at) VALUES (?, ?, ?, ?, ?)",
             [base_id + 11, 'EMP001', 'Offer Letter', 'offer-letter.pdf', now]
@@ -798,7 +801,7 @@ def init_db():
             [base_id + 12, 'EMP002', 'ID Proof', 'aadhaar.pdf', now - timedelta(days=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM dependents") < 2:
+    if _scalar("SELECT COUNT(*) FROM dependents", conn=conn) < 2:
         conn.execute(
             "INSERT INTO dependents (dependent_id, emp_id, name, relationship, date_of_birth) VALUES (?, ?, ?, ?, ?)",
             [base_id + 13, 'EMP001', 'Ananya', 'Spouse', (now - timedelta(days=365*30)).date()]
@@ -808,7 +811,7 @@ def init_db():
             [base_id + 14, 'EMP002', 'Riya', 'Child', (now - timedelta(days=365*7)).date()]
         )
 
-    if _scalar("SELECT COUNT(*) FROM notifications") < 2:
+    if _scalar("SELECT COUNT(*) FROM notifications", conn=conn) < 2:
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 15, 'EMP001', 'Leave', 'Your leave request is pending', '/leaves', 0, now]
@@ -818,7 +821,7 @@ def init_db():
             [base_id + 16, 'EMP002', 'Profile', 'Please update your profile', '/profile', 0, now - timedelta(hours=2)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM regularization_requests") < 2:
+    if _scalar("SELECT COUNT(*) FROM regularization_requests", conn=conn) < 2:
         conn.execute(
             "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, status, approved_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 17, 'EMP002', now.date(), 'Late arrival', 'Pending', None, now, now]
@@ -828,7 +831,7 @@ def init_db():
             [base_id + 18, 'EMP002', (now - timedelta(days=1)).date(), 'Forgot punch', 'Approved', 'EMP001', now - timedelta(days=1), now]
         )
 
-    if _scalar("SELECT COUNT(*) FROM assets") < 2:
+    if _scalar("SELECT COUNT(*) FROM assets", conn=conn) < 2:
         conn.execute(
             "INSERT INTO assets (asset_id, emp_id, asset_type, asset_tag, brand, model, serial_number, issued_date, return_date, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 19, 'EMP002', 'Laptop', 'LAP-001', 'Dell', 'Latitude 5430', 'SN-1001', (now - timedelta(days=30)).date(), None, 'Issued', 'Primary workstation']
@@ -838,7 +841,7 @@ def init_db():
             [base_id + 20, 'EMP002', 'Phone', 'PH-001', 'Samsung', 'Galaxy S24', 'SN-1002', (now - timedelta(days=10)).date(), None, 'Issued', 'Company phone']
         )
 
-    if _scalar("SELECT COUNT(*) FROM job_postings") < 2:
+    if _scalar("SELECT COUNT(*) FROM job_postings", conn=conn) < 2:
         conn.execute(
             "INSERT INTO job_postings (job_id, title, department, location, description, requirements, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 21, 'Software Engineer', 'Engineering', 'Pune', 'Build scalable apps', 'Python, Flask', 'Open', now]
@@ -848,7 +851,7 @@ def init_db():
             [base_id + 22, 'HR Specialist', 'HR', 'Remote', 'Support employee lifecycle', 'People operations', 'Open', now]
         )
 
-    if _scalar("SELECT COUNT(*) FROM candidates") < 2:
+    if _scalar("SELECT COUNT(*) FROM candidates", conn=conn) < 2:
         conn.execute(
             "INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 23, base_id + 21, 'Kavya Rao', 'kavya@example.com', '9999999001', 'Experienced backend engineer', 'Applied', now]
@@ -858,7 +861,7 @@ def init_db():
             [base_id + 24, base_id + 22, 'Mihir Shah', 'mihir@example.com', '9999999002', 'HR operations background', 'Screening', now - timedelta(days=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM interviews") < 2:
+    if _scalar("SELECT COUNT(*) FROM interviews", conn=conn) < 2:
         conn.execute(
             "INSERT INTO interviews (interview_id, candidate_id, scheduled_at, interviewer, mode, feedback, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 25, base_id + 23, now + timedelta(days=2), 'EMP001', 'Virtual', 'Strong technical skills', 'Scheduled']
@@ -868,7 +871,7 @@ def init_db():
             [base_id + 26, base_id + 24, now + timedelta(days=3), 'EMP002', 'In-person', 'Good fit', 'Scheduled']
         )
 
-    if _scalar("SELECT COUNT(*) FROM offer_letters") < 2:
+    if _scalar("SELECT COUNT(*) FROM offer_letters", conn=conn) < 2:
         conn.execute(
             "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 27, base_id + 23, 1800000.00, now.date(), 'Pending', None, 'Standard package']
@@ -878,7 +881,7 @@ def init_db():
             [base_id + 28, base_id + 24, 1200000.00, (now - timedelta(days=1)).date(), 'Accepted', now, 'Offer accepted']
         )
 
-    if _scalar("SELECT COUNT(*) FROM onboarding_tasks") < 2:
+    if _scalar("SELECT COUNT(*) FROM onboarding_tasks", conn=conn) < 2:
         conn.execute(
             "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 29, 'EMP002', 'Laptop setup', 'EMP001', 'Pending', (now + timedelta(days=2)).date(), None]
@@ -888,7 +891,7 @@ def init_db():
             [base_id + 30, 'EMP002', 'HR paperwork', 'EMP002', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(hours=3)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM offboarding_tasks") < 2:
+    if _scalar("SELECT COUNT(*) FROM offboarding_tasks", conn=conn) < 2:
         conn.execute(
             "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 31, 'EMP002', 'Collect company assets', 'EMP001', 'Pending', (now + timedelta(days=5)).date(), None]
@@ -898,7 +901,7 @@ def init_db():
             [base_id + 32, 'EMP002', 'Revoke access', 'EMP001', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(days=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM exit_interviews") < 2:
+    if _scalar("SELECT COUNT(*) FROM exit_interviews", conn=conn) < 2:
         conn.execute(
             "INSERT INTO exit_interviews (interview_id, emp_id, reason, feedback, exit_date, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             [base_id + 33, 'EMP002', 'Career change', 'Positive experience', (now - timedelta(days=2)).date(), now - timedelta(days=2)]
@@ -908,7 +911,7 @@ def init_db():
             [base_id + 34, 'EMP002', 'Relocation', 'Clear onboarding', (now - timedelta(days=5)).date(), now - timedelta(days=5)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM salary_structures") < 2:
+    if _scalar("SELECT COUNT(*) FROM salary_structures", conn=conn) < 2:
         conn.execute(
             "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 35, 'EMP002', 30000.00, 9000.00, 4000.00, 1500.00, (now - timedelta(days=30)).date()]
@@ -918,7 +921,7 @@ def init_db():
             [base_id + 36, 'EMP002', 28000.00, 8400.00, 3200.00, 1200.00, (now - timedelta(days=60)).date()]
         )
 
-    if _scalar("SELECT COUNT(*) FROM payroll_runs") < 2:
+    if _scalar("SELECT COUNT(*) FROM payroll_runs", conn=conn) < 2:
         conn.execute(
             "INSERT INTO payroll_runs (run_id, month, year, processed_at, status) VALUES (?, ?, ?, ?, ?)",
             [base_id + 37, now.month, now.year, now, 'Draft']
@@ -928,7 +931,7 @@ def init_db():
             [base_id + 38, now.month - 1 if now.month > 1 else 12, now.year if now.month > 1 else now.year - 1, now - timedelta(days=30), 'Finalized']
         )
 
-    if _scalar("SELECT COUNT(*) FROM payroll_items") < 2:
+    if _scalar("SELECT COUNT(*) FROM payroll_items", conn=conn) < 2:
         runs = conn.execute("SELECT run_id FROM payroll_runs ORDER BY run_id LIMIT 2").fetchall()
         if len(runs) >= 2:
             conn.execute(
@@ -940,7 +943,7 @@ def init_db():
                 [base_id + 40, runs[1][0], 'EMP002', 48000.00, 4800.00, 43200.00, 2400.00, 1400.00, 200.00, 1]
             )
 
-    if _scalar("SELECT COUNT(*) FROM goals") < 2:
+    if _scalar("SELECT COUNT(*) FROM goals", conn=conn) < 2:
         conn.execute(
             "INSERT INTO goals (goal_id, emp_id, title, description, target_date, weight, rating, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 41, 'EMP002', 'Improve delivery', 'Ship one feature per sprint', (now + timedelta(days=30)).date(), 5, 4, 'Active', now]
@@ -950,7 +953,7 @@ def init_db():
             [base_id + 42, 'EMP002', 'Customer support excellence', 'Maintain SLA', (now + timedelta(days=45)).date(), 4, 5, 'Active', now]
         )
 
-    if _scalar("SELECT COUNT(*) FROM performance_reviews") < 2:
+    if _scalar("SELECT COUNT(*) FROM performance_reviews", conn=conn) < 2:
         conn.execute(
             "INSERT INTO performance_reviews (review_id, emp_id, reviewer_id, review_period, overall_rating, comments, status, created_at, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 43, 'EMP002', 'EMP001', 'Q2 2026', 4.2, 'Strong execution', 'Submitted', now - timedelta(days=5), now - timedelta(days=3)]
@@ -960,7 +963,7 @@ def init_db():
             [base_id + 44, 'EMP002', 'EMP001', 'Q2 2026', 4.6, 'Excellent ownership', 'Draft', now - timedelta(days=2), None]
         )
 
-    if _scalar("SELECT COUNT(*) FROM feedback_360") < 2:
+    if _scalar("SELECT COUNT(*) FROM feedback_360", conn=conn) < 2:
         conn.execute(
             "INSERT INTO feedback_360 (feedback_id, emp_id, reviewer_id, category, rating, comment, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 45, 'EMP002', 'EMP002', 'Collaboration', 5, 'Great teammate', now - timedelta(days=1)]
@@ -970,7 +973,7 @@ def init_db():
             [base_id + 46, 'EMP002', 'EMP002', 'Communication', 4, 'Clear updates', now - timedelta(days=2)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM expense_claims") < 2:
+    if _scalar("SELECT COUNT(*) FROM expense_claims", conn=conn) < 2:
         conn.execute(
             "INSERT INTO expense_claims (claim_id, emp_id, cat_id, amount, description, receipt_path, status, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 47, 'EMP002', 1, 1250.00, 'Mumbai travel', 'travel.pdf', 'Pending', None, now]
@@ -980,7 +983,7 @@ def init_db():
             [base_id + 48, 'EMP002', 2, 850.00, 'Client lunch', 'food.pdf', 'Approved', 'EMP001', now - timedelta(days=2)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM tickets") < 2:
+    if _scalar("SELECT COUNT(*) FROM tickets", conn=conn) < 2:
         conn.execute(
             "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, status, assigned_to, created_at, updated_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [base_id + 49, 'EMP002', 'VPN access issue', 'Unable to connect to VPN', 'IT', 'High', 'Open', 'EMP001', now, now, None]
@@ -990,7 +993,7 @@ def init_db():
             [base_id + 50, 'EMP002', 'Payroll question', 'Need pay slip clarification', 'HR', 'Medium', 'Resolved', 'EMP002', now - timedelta(days=1), now - timedelta(hours=2), now - timedelta(hours=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM ticket_comments") < 2:
+    if _scalar("SELECT COUNT(*) FROM ticket_comments", conn=conn) < 2:
         conn.execute(
             "INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) VALUES (?, ?, ?, ?, ?)",
             [base_id + 51, base_id + 49, 'EMP001', 'We are looking into it', now]
@@ -1000,7 +1003,7 @@ def init_db():
             [base_id + 52, base_id + 50, 'EMP002', 'Shared the payslip details', now - timedelta(hours=1)]
         )
 
-    if _scalar("SELECT COUNT(*) FROM documents") < 2:
+    if _scalar("SELECT COUNT(*) FROM documents", conn=conn) < 2:
         conn.execute(
             "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 53, 'EMP001', 'Offer Letter', 'Offer Letter', '/uploads/offer.pdf', 204800, now]
