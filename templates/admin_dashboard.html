@@ -86,7 +86,7 @@
         <!-- Modules -->
         <div class="tab-pane fade show active" id="modules" role="tabpanel">
             <div class="row g-2">
-                {% if session.get('role') == 'Admin' %}
+                {% if session.get('role') in ('Admin', 'Super Admin') %}
                 <div class="col-md-3"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
                 {% endif %}
                 <div class="col-md-3"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday Calendar</div><div class="module-desc">Company holidays & events</div></a></div>
@@ -94,7 +94,7 @@
                 <div class="col-md-3"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
                 <div class="col-md-3"><a href="/admin/assets" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-laptop-fill"></i></div><div class="module-title">Asset Management</div><div class="module-desc">Issue & track company assets</div></a></div>
                 <div class="col-md-3"><a href="/admin/jobs" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-briefcase-fill"></i></div><div class="module-title">Job Postings</div><div class="module-desc">Create & manage job openings</div></a></div>
-                {% if session.get('role') == 'Admin' or session.get('department') == 'HR' %}
+                {% if session.get('role') in ('Admin', 'Super Admin') or session.get('department') == 'HR' %}
                 <div class="col-md-3"><a href="/admin/candidates" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-person-lines-fill"></i></div><div class="module-title">Candidates</div><div class="module-desc">Hiring pipeline management</div></a></div>
                 <div class="col-md-3"><a href="/admin/payroll" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-cash-stack"></i></div><div class="module-title">Payroll</div><div class="module-desc">Monthly payroll with auto-deductions</div></a></div>
                 <div class="col-md-3"><a href="/admin/salary-structures" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-wallet-fill"></i></div><div class="module-title">Salary Structures</div><div class="module-desc">Configure CTC components</div></a></div>

@@ -6,6 +6,9 @@
     <title>HRMS - Regularization</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
@@ -13,7 +16,7 @@
             --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
             --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
             --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
+            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
             --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
             --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
             --transition-fast: 150ms ease; --transition-base: 250ms ease;
@@ -23,69 +26,150 @@
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
         * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
         body { background: var(--background); }
-        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
-        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
-        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
-        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
-        .navbar-nav .nav-link i { margin-right: 6px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
         .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
         .card-header i { margin-right: 8px; color: #60A5FA; }
         .card-body { padding: 16px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
-        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; background: var(--background); }
         .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
-        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 14px; font-size: 12px; }
         .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .btn-outline-secondary { border-color: var(--border); color: var(--text-muted); font-weight: 600; font-size: 12px; border-radius: var(--button-radius); }
+        .btn-outline-secondary:hover { background: var(--muted); color: var(--text); border-color: var(--border); }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
         .table tbody tr:hover { background: #FAFBFC; }
-        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
-        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
-        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
-        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
+        .alert { border-radius: 8px; border: none; }
+        .status-badge { padding: 4px 10px; border-radius: 16px; font-size: 11px; font-weight: 600; display: inline-block; }
         .status-Pending { background: #FEFCE8; color: #92400E; }
         .status-Approved { background: #F0FDF4; color: #166534; }
         .status-Rejected { background: #FEF2F2; color: #991B1B; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .alert { border-radius: 10px; border: none; }
-        .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
+        .status-Cancelled { background: #F1F5F9; color: #475569; }
+        .stat-card { padding: 10px 12px; border-radius: var(--card-radius); border: 1px solid var(--border); background: var(--surface); transition: var(--transition-base); }
+        .stat-card:hover { box-shadow: var(--shadow); transform: translateY(-2px); }
+        .stat-icon { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-bottom: 6px; }
+        .stat-value { font-size: 17px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
+        .stat-label { color: var(--text-muted); font-size: 10px; font-weight: 500; }
+        .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+        .empty-state i { font-size: 36px; margin-bottom: 10px; display: block; }
+        .empty-state p { font-size: 13px; margin: 0; }
+        .filter-btn { border: 1.5px solid var(--border); background: var(--surface); color: var(--text-muted); border-radius: 20px; padding: 4px 12px; font-size: 11px; font-weight: 600; cursor: pointer; transition: var(--transition-fast); }
+        .filter-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .filter-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
     </style>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
 </head>
 <body>
 {% include "_navbar.html" %}
 
 <div class="container-fluid p-4">
-    <h2 class="page-title mb-4">Attendance Regularization</h2>
+    <div class="d-flex align-items-center justify-content-between mb-4">
+        <h2 class="page-title mb-0">Attendance Regularization</h2>
+        <div class="d-flex align-items-center gap-2">
+            <input type="month" id="monthFilter" class="form-control" style="width:auto;font-size:12px;padding:5px 10px;border-radius:8px;">
+            <div id="filterGroup" style="display:none;">
+                <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+                <button class="filter-btn" data-filter="Pending" onclick="setFilter('Pending')">Pending</button>
+                <button class="filter-btn" data-filter="Approved" onclick="setFilter('Approved')">Approved</button>
+                <button class="filter-btn" data-filter="Rejected" onclick="setFilter('Rejected')">Rejected</button>
+                <button class="filter-btn" data-filter="Cancelled" onclick="setFilter('Cancelled')">Cancelled</button>
+            </div>
+            {% if is_admin %}
+            <button class="btn btn-sm btn-outline-success" onclick="downloadExcel()" title="Download Excel"><i class="bi bi-file-earmark-excel me-1"></i>Download</button>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if is_admin %}
+    <div class="row g-2 mb-3" id="statsRow">
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-hourglass-split"></i></div>
+                <div class="stat-value" id="countPending">-</div>
+                <div class="stat-label">Pending</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#F0FDF4;color:#16A34A;"><i class="bi bi-check-circle"></i></div>
+                <div class="stat-value" id="countApproved">-</div>
+                <div class="stat-label">Approved</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-x-circle"></i></div>
+                <div class="stat-value" id="countRejected">-</div>
+                <div class="stat-label">Rejected</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="stat-card">
+                <div class="stat-icon" style="background:#F1F5F9;color:#475569;"><i class="bi bi-list-task"></i></div>
+                <div class="stat-value" id="countTotal">-</div>
+                <div class="stat-label">Total</div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="row">
+        {% if not is_admin %}
         <div class="col-lg-5">
             <div class="card">
-                <div class="card-header"><h5 class="mb-0">New Request</h5></div>
+                <div class="card-header"><h5 class="mb-0"><i class="bi bi-plus-circle"></i>New Request</h5></div>
                 <div class="card-body">
                     <form id="regForm">
-                        <div class="mb-3"><label class="form-label">Date</label><input type="date" id="regDate" class="form-control" required></div>
-                        <div class="mb-3"><label class="form-label">Reason</label><textarea id="regReason" class="form-control" rows="3" placeholder="Explain the discrepancy" required></textarea></div>
-                        <button type="submit" class="btn btn-primary">Submit Request</button>
+                        <div class="mb-3">
+                            <label class="form-label">Date</label>
+                            <input type="date" id="regDate" class="form-control" required>
+                            <div class="form-text">You can only regularize past dates (up to today)</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Reason</label>
+                            <textarea id="regReason" class="form-control" rows="3" placeholder="Explain why attendance needs correction" required></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-primary" id="submitBtn">
+                            <i class="bi bi-send me-1"></i>Submit Request
+                        </button>
                     </form>
-                    <div id="regMsg" style="margin-top:15px;display:none;"></div>
+                    <div id="regMsg" class="mt-3" style="display:none;"></div>
                 </div>
             </div>
         </div>
         <div class="col-lg-7">
+        {% else %}
+        <div class="col-12">
+        {% endif %}
             <div class="card">
-                <div class="card-header"><h5 class="mb-0">My Requests</h5></div>
+                <div class="card-header d-flex align-items-center justify-content-between">
+                    <h5 class="mb-0"><i class="bi bi-table"></i>{% if is_admin %}All Requests{% else %}My Requests{% endif %}</h5>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="loadRequests()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                </div>
                 <div class="card-body">
                     <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead><tr><th>Date</th><th>Reason</th><th>Status</th><th>Approved By</th></tr></thead>
-                            <tbody id="regTable"><tr><td colspan="4" class="text-center text-muted">Loading...</td></tr></tbody>
+                        <table class="table table-hover mb-0">
+                            <thead>
+                                <tr>
+                                    {% if is_admin %}<th>Employee</th>{% endif %}
+                                    <th>Date</th>
+                                    <th>Reason</th>
+                                    <th>Status</th>
+                                    <th>Approved By</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="regTable">
+                                <tr><td colspan="{% if is_admin %}6{% else %}5{% endif %}" class="text-center text-muted">
+                                    <div class="empty-state"><i class="bi bi-hourglass-split"></i><p>Loading...</p></div>
+                                </td></tr>
+                            </tbody>
                         </table>
                     </div>
                 </div>
@@ -93,36 +177,159 @@
         </div>
     </div>
 </div>
+
+<div class="toast-container" id="toastContainer"></div>
+
 <script>
+const IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+let currentFilter = 'all';
+
 document.addEventListener('DOMContentLoaded', () => {
+    const now = new Date();
+    document.getElementById('monthFilter').value = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+    document.getElementById('monthFilter').addEventListener('change', loadRequests);
     loadRequests();
-    document.getElementById('regForm').addEventListener('submit', submitRequest);
+    if (!IS_ADMIN) {
+        const today = new Date().toISOString().split('T')[0];
+        const dateInput = document.getElementById('regDate');
+        dateInput.max = today;
+        document.getElementById('regForm').addEventListener('submit', submitRequest);
+    } else {
+        document.getElementById('filterGroup').style.display = '';
+    }
 });
-async function loadRequests() {
-    const r = await fetch('/api/regularization');
-    const data = await r.json();
-    const tbody = document.getElementById('regTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No requests</td></tr>'; return; }
-    tbody.innerHTML = data.map(req => `
-        <tr>
-            <td>${req.date}</td>
-            <td>${esc(req.reason)}</td>
-            <td><span class="status-${req.status}">${req.status}</span></td>
-            <td>${req.approved_by || '-'}</td>
-        </tr>
-    `).join('');
+
+function setFilter(f) {
+    currentFilter = f;
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
+    loadRequests();
 }
+
+async function loadRequests() {
+    const month = document.getElementById('monthFilter').value;
+    const params = new URLSearchParams();
+    if (month) params.set('month', month);
+    if (IS_ADMIN && currentFilter !== 'all') params.set('status', currentFilter);
+    const qs = params.toString();
+    const url = '/api/regularization' + (qs ? '?' + qs : '');
+    try {
+        const r = await fetch(url);
+        const data = await r.json();
+        const tbody = document.getElementById('regTable');
+        if (IS_ADMIN) {
+            const reqs = data.requests || [];
+            const counts = data.counts || {};
+            document.getElementById('countPending').textContent = counts.pending || 0;
+            document.getElementById('countApproved').textContent = counts.approved || 0;
+            document.getElementById('countRejected').textContent = counts.rejected || 0;
+            document.getElementById('countTotal').textContent = counts.total || 0;
+            if (!reqs.length) {
+                tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><i class="bi bi-inbox"></i><p>No requests found</p></div></td></tr>`;
+                return;
+            }
+            tbody.innerHTML = reqs.map(req => `<tr>
+                <td><strong>${esc(req.name)}</strong><br><small class="text-muted">${esc(req.emp_id)}</small></td>
+                <td>${fmtDate(req.date)}</td>
+                <td>${esc(req.reason)}</td>
+                <td><span class="status-badge status-${req.status}">${req.status}</span></td>
+                <td>${esc(req.approved_by) || '<span class="text-muted">-</span>'}</td>
+                <td>${req.status === 'Pending' ? `<button class="btn btn-success btn-sm me-1" onclick="approveReq(${req.id})"><i class="bi bi-check-lg"></i> Approve</button><button class="btn btn-danger btn-sm" onclick="rejectReq(${req.id})"><i class="bi bi-x-lg"></i> Reject</button>` : '<span class="text-muted">-</span>'}</td>
+            </tr>`).join('');
+        } else {
+            const reqs = Array.isArray(data) ? data : [];
+            if (!reqs.length) {
+                tbody.innerHTML = `<tr><td colspan="5"><div class="empty-state"><i class="bi bi-inbox"></i><p>No regularization requests yet</p></div></td></tr>`;
+                return;
+            }
+            tbody.innerHTML = reqs.map(req => `<tr>
+                <td>${fmtDate(req.date)}</td>
+                <td>${esc(req.reason)}</td>
+                <td><span class="status-badge status-${req.status}">${req.status}</span></td>
+                <td>${esc(req.approved_by) || '<span class="text-muted">-</span>'}</td>
+                <td>${req.status === 'Pending' ? `<button class="btn btn-outline-secondary btn-sm" onclick="cancelReq(${req.id})"><i class="bi bi-x-circle me-1"></i>Cancel</button>` : '-'}</td>
+            </tr>`).join('');
+        }
+    } catch (e) {
+        showToast('Failed to load requests', 'error');
+    }
+}
+
 async function submitRequest(e) {
     e.preventDefault();
-    const r = await fetch('/api/regularization', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: document.getElementById('regDate').value, reason: document.getElementById('regReason').value }) });
-    const d = await r.json();
-    const msg = document.getElementById('regMsg');
-    msg.style.display = 'block';
-    msg.className = r.ok ? 'text-success' : 'text-danger';
-    msg.textContent = d.message || d.error;
-    if (r.ok) { document.getElementById('regForm').reset(); loadRequests(); }
+    const date = document.getElementById('regDate').value;
+    const reason = document.getElementById('regReason').value;
+    if (!date || !reason) return;
+    const btn = document.getElementById('submitBtn');
+    btn.disabled = true; btn.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Submitting...';
+    try {
+        const r = await fetch('/api/regularization', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date, reason }) });
+        const d = await r.json();
+        const msg = document.getElementById('regMsg');
+        msg.style.display = 'block';
+        msg.className = r.ok ? 'alert alert-success' : 'alert alert-danger';
+        msg.textContent = d.message || d.error;
+        if (r.ok) { document.getElementById('regForm').reset(); loadRequests(); }
+    } catch (e) {
+        const msg = document.getElementById('regMsg');
+        msg.style.display = 'block'; msg.className = 'alert alert-danger';
+        msg.textContent = 'Network error. Please try again.';
+    } finally {
+        btn.disabled = false; btn.innerHTML = '<i class="bi bi-send me-1"></i>Submit Request';
+    }
 }
+
+async function approveReq(id) {
+    try {
+        const r = await fetch(`/api/regularization/${id}/approve`, { method: 'POST' });
+        const d = await r.json();
+        showToast(r.ok ? 'Request approved' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+        if (r.ok) loadRequests();
+    } catch (e) { showToast('Network error', 'error'); }
+}
+
+async function rejectReq(id) {
+    try {
+        const r = await fetch(`/api/regularization/${id}/reject`, { method: 'POST' });
+        const d = await r.json();
+        showToast(r.ok ? 'Request rejected' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+        if (r.ok) loadRequests();
+    } catch (e) { showToast('Network error', 'error'); }
+}
+
+async function cancelReq(id) {
+    if (!confirm('Cancel this regularization request?')) return;
+    try {
+        const r = await fetch(`/api/regularization/${id}/cancel`, { method: 'POST' });
+        const d = await r.json();
+        showToast(r.ok ? 'Request cancelled' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+        if (r.ok) loadRequests();
+    } catch (e) { showToast('Network error', 'error'); }
+}
+
+function downloadExcel() {
+    const month = document.getElementById('monthFilter').value;
+    const params = new URLSearchParams();
+    if (month) params.set('month', month);
+    if (currentFilter !== 'all') params.set('status', currentFilter);
+    const qs = params.toString();
+    window.location.href = '/api/regularization/export' + (qs ? '?' + qs : '');
+}
+
+function fmtDate(iso) {
+    if (!iso) return '-';
+    const d = new Date(iso + 'T00:00:00');
+    return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+
+function showToast(msg, type) {
+    const c = document.getElementById('toastContainer');
+    const id = 'toast_' + Date.now();
+    const bg = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-info';
+    c.insertAdjacentHTML('beforeend', `<div id="${id}" class="toast align-items-center text-white ${bg} border-0 show" role="alert"><div class="d-flex"><div class="toast-body">${esc(msg)}</div><button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>`);
+    setTimeout(() => { const el = document.getElementById(id); if (el) el.remove(); }, 3000);
+}
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

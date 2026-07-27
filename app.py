@@ -143,6 +143,13 @@ def _scalar(sql, params=None, conn=None):
             conn.close()
 
 
+ADMIN_ROLES = ('Admin', 'Super Admin')
+
+
+def _is_admin(role):
+    return role in ADMIN_ROLES
+
+
 def _get_shift_date_for_dt(emp_id, dt, conn):
     row = conn.execute("SELECT shift_start FROM users WHERE emp_id = ?", [emp_id]).fetchone()
     if row and row[0] and row[0] != '24x7':
@@ -471,6 +478,40 @@ def init_db():
         )
     ''')
 
+    # ── Onboarding Document Checklist ─────────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS onboarding_checklist (
+            checklist_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            doc_type VARCHAR NOT NULL,
+            status VARCHAR DEFAULT 'Pending',
+            file_name VARCHAR,
+            file_path VARCHAR,
+            uploaded_at TIMESTAMP,
+            reviewed_by VARCHAR,
+            reviewed_at TIMESTAMP,
+            notes VARCHAR,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
+    # ── Onboarding Workflow Progress ──────────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS onboarding_workflow (
+            emp_id VARCHAR PRIMARY KEY,
+            current_step INTEGER DEFAULT 1,
+            step_1_status VARCHAR DEFAULT 'Pending',
+            step_2_status VARCHAR DEFAULT 'Pending',
+            step_3_status VARCHAR DEFAULT 'Pending',
+            step_4_status VARCHAR DEFAULT 'Pending',
+            step_5_status VARCHAR DEFAULT 'Pending',
+            intro_completed_by VARCHAR,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
     # ── Offboarding Tasks (Phase 2) ─────────────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS offboarding_tasks (
@@ -667,13 +708,37 @@ def init_db():
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ['EMP001', 'Shubham Jawalkar', 'shubham@company.com', pwd_hash,
-             'Admin', 'MIS', 'Tech Lead', '9876543210', now_ist().date(),
+             'Super Admin', 'MIS', 'Tech Lead', '9876543210', now_ist().date(),
              'Active', 1, 1, now_ist(), now_ist()]
         )
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ['EMP002', 'Sachin Bhakte', 'sachinbhakte@gmail.com', pwd_hash,
              'Employee', 'Operations', 'Jr Developer', '9876543211', now_ist().date(),
+             'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
+        )
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ['EMP003', 'Priya Sharma', 'priya@company.com', pwd_hash,
+             'HR', 'HR', 'HR Manager', '9876543212', now_ist().date(),
+             'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
+        )
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ['EMP004', 'Rahul Verma', 'rahul@company.com', pwd_hash,
+             'Employee', 'IT', 'System Admin', '9876543213', now_ist().date(),
+             'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
+        )
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ['EMP005', 'Neha Patil', 'neha@company.com', pwd_hash,
+             'Employee', 'Admin', 'Office Admin', '9876543214', now_ist().date(),
+             'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
+        )
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ['EMP006', 'Amit Deshmukh', 'amit@company.com', pwd_hash,
+             'Employee', 'Finance', 'Accountant', '9876543215', now_ist().date(),
              'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
         )
 
@@ -715,6 +780,25 @@ def init_db():
         except Exception:
             pass
 
+    # ── Migrate: promote EMP001 to Super Admin ─────────────────────
+    conn.execute("UPDATE users SET role = 'Super Admin' WHERE emp_id = 'EMP001'")
+
+    # ── Migrate: insert missing seed users ─────────────────────────
+    seed_users = [
+        ['EMP003', 'Priya Sharma', 'priya@company.com', 'HR', 'HR', 'HR Manager', '9876543212'],
+        ['EMP004', 'Rahul Verma', 'rahul@company.com', 'Employee', 'IT', 'System Admin', '9876543213'],
+        ['EMP005', 'Neha Patil', 'neha@company.com', 'Employee', 'Admin', 'Office Admin', '9876543214'],
+        ['EMP006', 'Amit Deshmukh', 'amit@company.com', 'Employee', 'Finance', 'Accountant', '9876543215'],
+    ]
+    existing = {r[0] for r in conn.execute("SELECT emp_id FROM users").fetchall()}
+    for su in seed_users:
+        if su[0] not in existing:
+            conn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, manager_emp_id, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [su[0], su[1], su[2], pwd_hash, su[3], su[4], su[5], su[6],
+                 now_ist().date(), 'EMP001', 'Active', 1, 1, now_ist(), now_ist()]
+            )
+
     result = _scalar("SELECT COUNT(*) FROM break_types", conn=conn)
     if result == 0:
         conn.executemany(
@@ -742,23 +826,25 @@ def init_db():
     base_id = int(now.timestamp() * 1000) % 1000000
 
     if _scalar("SELECT COUNT(*) FROM user_sessions", conn=conn) < 2:
+        two_days_ago = (now - timedelta(days=2)).date()
         conn.execute(
             "INSERT INTO user_sessions (session_id, emp_id, login_time, logout_time, total_hours, session_date) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 1, 'EMP001', now - timedelta(hours=8), now, 8.0, now.date()]
+            [base_id + 1, 'EMP001', now - timedelta(days=2, hours=8), now - timedelta(days=2), 8.0, two_days_ago]
         )
         conn.execute(
             "INSERT INTO user_sessions (session_id, emp_id, login_time, logout_time, total_hours, session_date) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 2, 'EMP002', now - timedelta(hours=6), now - timedelta(hours=1), 5.0, now.date()]
+            [base_id + 2, 'EMP002', now - timedelta(days=2, hours=6), now - timedelta(days=2, hours=1), 5.0, two_days_ago]
         )
 
     if _scalar("SELECT COUNT(*) FROM breaks", conn=conn) < 2:
+        two_days_ago = (now - timedelta(days=2)).date()
         conn.execute(
             "INSERT INTO breaks (break_id, emp_id, break_type, start_time, end_time, duration_minutes, break_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 3, 'EMP001', 'Tea', now - timedelta(minutes=30), now - timedelta(minutes=15), 15, now.date(), 'Completed']
+            [base_id + 3, 'EMP001', 'Tea', now - timedelta(days=2, minutes=30), now - timedelta(days=2, minutes=15), 15, two_days_ago, 'Completed']
         )
         conn.execute(
             "INSERT INTO breaks (break_id, emp_id, break_type, start_time, end_time, duration_minutes, break_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 4, 'EMP002', 'Lunch', now - timedelta(hours=1), now - timedelta(minutes=30), 30, now.date(), 'Completed']
+            [base_id + 4, 'EMP002', 'Lunch', now - timedelta(days=2, hours=1), now - timedelta(days=2, minutes=30), 30, two_days_ago, 'Completed']
         )
 
     if _scalar("SELECT COUNT(*) FROM audit_log", conn=conn) < 2:
@@ -1019,6 +1105,19 @@ def init_db():
     # ── Fix seed session/break dates to use shift-based dates ─────
     _fix_seed_shift_dates(conn, now)
 
+    # ── Migration: move seed sessions/breaks to 2 days ago so dashboard starts clean
+    two_days_ago = (now - timedelta(days=2)).date()
+    seed_emps = ['EMP001', 'EMP002']
+    for eid in seed_emps:
+        conn.execute(
+            "UPDATE user_sessions SET session_date = ?, login_time = login_time - INTERVAL '2 days', logout_time = logout_time - INTERVAL '2 days' WHERE emp_id = ? AND session_date >= ?",
+            [two_days_ago, eid, two_days_ago]
+        )
+        conn.execute(
+            "UPDATE breaks SET break_date = ?, start_time = start_time - INTERVAL '2 days', end_time = end_time - INTERVAL '2 days' WHERE emp_id = ? AND break_date >= ?",
+            [two_days_ago, eid, two_days_ago]
+        )
+
     conn.close()
     logger.info("Database initialized")
 
@@ -1064,16 +1163,9 @@ def gen_id():
     return int(now_ist().timestamp() * 1_000_000) % 2_147_483_647
 
 
-def _get_shift_start_dt(emp_id, conn=None, target_date=None):
+def _get_shift_start_dt(emp_id, conn, target_date=None):
     now = now_ist()
-    if conn is None:
-        conn = get_db()
-        close = True
-    else:
-        close = False
     row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if close:
-        conn.close()
     shift_start_str = row[0] if row else None
     shift_end_str = row[1] if row else None
     if shift_start_str and shift_start_str != '24x7':
@@ -1094,15 +1186,8 @@ def _get_shift_start_dt(emp_id, conn=None, target_date=None):
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
-    if conn is None:
-        conn = get_db()
-        close = True
-    else:
-        close = False
+def _get_shift_end_dt(emp_id, shift_start_dt, conn):
     row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if close:
-        conn.close()
     shift_start_str = row[0] if row else None
     shift_end_str = row[1] if row else None
     if shift_start_str and shift_start_str != '24x7' and shift_end_str:
@@ -1167,7 +1252,7 @@ def admin_required(f):
         conn = get_db()
         row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         conn.close()
-        if not row or row[0] != 'Admin':
+        if not row or not _is_admin(row[0]):
             if request.is_json:
                 return jsonify({'error': 'Forbidden'}), 403
             return redirect(url_for('dashboard'))
@@ -1188,10 +1273,14 @@ def hr_or_admin_required(f):
         row = conn.execute("SELECT role, department FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         conn.close()
         if not row:
-            return jsonify({'error': 'Forbidden'}), 403
-        if row[0] == 'Admin' or row[1] == 'HR':
+            if request.is_json:
+                return jsonify({'error': 'Forbidden'}), 403
+            return redirect(url_for('dashboard'))
+        if _is_admin(row[0]) or row[1] == 'HR':
             return f(*args, **kwargs)
-        return jsonify({'error': 'Forbidden - HR access required'}), 403
+        if request.is_json:
+            return jsonify({'error': 'Forbidden - HR access required'}), 403
+        return redirect(url_for('dashboard'))
     return decorated
 
 
@@ -1210,7 +1299,7 @@ def department_required(*depts):
             conn.close()
             if not row:
                 return jsonify({'error': 'Forbidden'}), 403
-            if row[0] == 'Admin' or row[1] in depts:
+            if _is_admin(row[0]) or row[1] in depts:
                 return f(*args, **kwargs)
             return jsonify({'error': 'Forbidden - insufficient department access'}), 403
         return decorated
@@ -1225,7 +1314,7 @@ def department_required(*depts):
 @login_required
 def get_credentials():
     """Return known user credentials for demo purposes (admin only)"""
-    if session.get('role') not in ('Admin', 'admin'):
+    if not _is_admin(session.get('role')):
         return jsonify({'error': 'Admin access required'}), 403
     conn = get_db()
     rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
@@ -1338,7 +1427,7 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    if session.get('role') == 'Admin' or session.get('department') == 'HR':
+    if _is_admin(session.get('role')) or session.get('department') == 'HR':
         return render_template('admin_dashboard.html')
     return render_template('user_dashboard.html')
 
@@ -1573,16 +1662,11 @@ def delete_dependent(did):
     return jsonify({'message': 'Deleted'}), 200
 
 
-@app.route('/api/v1/documents', methods=['GET', 'POST'])
-@app.route('/api/documents', methods=['GET', 'POST'])
+@app.route('/api/v1/employee-documents', methods=['POST'])
+@app.route('/api/employee-documents', methods=['POST'])
 @login_required
 def documents_api():
     emp_id = session['emp_id']
-    if request.method == 'GET':
-        conn = get_db()
-        rows = conn.execute("SELECT doc_id, doc_type, file_name, uploaded_at FROM employee_documents WHERE emp_id = ?", [emp_id]).fetchall()
-        conn.close()
-        return jsonify([{'id': r[0], 'doc_type': r[1], 'file_name': r[2], 'uploaded_at': r[3].isoformat() + '+05:30' if r[3] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('doc_type'):
         return jsonify({'error': 'doc_type required'}), 400
@@ -1712,28 +1796,77 @@ def mark_notifications_read():
 @login_required
 def regularization_api():
     emp_id = session['emp_id']
+    is_admin = _is_admin(session.get('role'))
+
     if request.method == 'GET':
+        status_filter = request.args.get('status', '').strip()
+        month_filter = request.args.get('month', '', type=str).strip()
         conn = get_db()
-        if session.get('role') == 'Admin':
+        conditions = []
+        params = []
+        if is_admin:
+            if status_filter:
+                conditions.append("r.status = ?")
+                params.append(status_filter)
+            if month_filter and '-' in month_filter:
+                y, m = month_filter.split('-', 1)
+                conditions.append("CAST(strftime('%m', r.request_date) AS INTEGER) = ? AND CAST(strftime('%Y', r.request_date) AS INTEGER) = ?")
+                params.extend([int(m), int(y)])
+            where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
             rows = conn.execute(
-                "SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at FROM regularization_requests ORDER BY created_at DESC"
+                f"SELECT r.request_id, r.emp_id, u.name, r.request_date, r.reason, r.status, r.approved_by, r.created_at "
+                f"FROM regularization_requests r LEFT JOIN users u ON r.emp_id = u.emp_id{where} ORDER BY r.request_date DESC, r.created_at DESC",
+                params
             ).fetchall()
+            stats = conn.execute(
+                f"SELECT r.status, COUNT(*) FROM regularization_requests r{where} GROUP BY r.status",
+                params
+            ).fetchall()
+            conn.close()
+            status_counts = {s[0]: s[1] for s in stats}
+            return jsonify({
+                'requests': [{
+                    'id': r[0], 'emp_id': r[1], 'name': r[2] or r[1],
+                    'date': r[3].isoformat() if r[3] else None,
+                    'reason': r[4], 'status': r[5], 'approved_by': r[6],
+                    'created_at': r[7].isoformat() if r[7] else None
+                } for r in rows],
+                'counts': {
+                    'pending': status_counts.get('Pending', 0),
+                    'approved': status_counts.get('Approved', 0),
+                    'rejected': status_counts.get('Rejected', 0),
+                    'cancelled': status_counts.get('Cancelled', 0),
+                    'total': sum(status_counts.values())
+                }
+            }), 200
         else:
+            emp_conditions = ["emp_id = ?"]
+            emp_params: list = [emp_id]
+            if month_filter and '-' in month_filter:
+                y, m = month_filter.split('-', 1)
+                emp_conditions.append("CAST(strftime('%m', request_date) AS INTEGER) = ? AND CAST(strftime('%Y', request_date) AS INTEGER) = ?")
+                emp_params.extend([int(m), int(y)])
+            emp_where = " WHERE " + " AND ".join(emp_conditions)
             rows = conn.execute(
-                "SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at FROM regularization_requests WHERE emp_id = ? ORDER BY created_at DESC",
-                [emp_id]
+                f"SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at "
+                f"FROM regularization_requests{emp_where} ORDER BY request_date DESC, created_at DESC",
+                emp_params
             ).fetchall()
-        conn.close()
-        return jsonify([{
-            'id': r[0], 'emp_id': r[1], 'date': r[2].isoformat() + '+05:30',
-            'reason': r[3], 'status': r[4], 'approved_by': r[5],
-            'created_at': r[6].isoformat() + '+05:30' if r[6] else None
-        } for r in rows]), 200
+            conn.close()
+            return jsonify([{
+                'id': r[0], 'emp_id': r[1],
+                'date': r[2].isoformat() if r[2] else None,
+                'reason': r[3], 'status': r[4], 'approved_by': r[5],
+                'created_at': r[6].isoformat() if r[6] else None
+            } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
     d = parse_date(data.get('date'))
     if not d or not data.get('reason'):
         return jsonify({'error': 'date and reason required'}), 400
+    from datetime import date as _date
+    if d > _date.today():
+        return jsonify({'error': 'Cannot regularize a future date'}), 400
     conn = get_db()
     if conn.execute(
         "SELECT 1 FROM regularization_requests WHERE emp_id = ? AND request_date = ? AND status = 'Pending'",
@@ -1774,6 +1907,81 @@ def reject_regularization(rid):
     )
     conn.close()
     return jsonify({'message': 'Rejected'}), 200
+
+
+@app.route('/api/v1/regularization/<int:rid>/cancel', methods=['POST'])
+@app.route('/api/regularization/<int:rid>/cancel', methods=['POST'])
+@login_required
+def cancel_regularization(rid):
+    emp_id = session['emp_id']
+    is_admin = _is_admin(session.get('role'))
+    conn = get_db()
+    row = conn.execute(
+        "SELECT emp_id, status FROM regularization_requests WHERE request_id = ?",
+        [rid]
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Request not found'}), 404
+    if row[0] != emp_id and not is_admin:
+        conn.close()
+        return jsonify({'error': 'Not authorized'}), 403
+    if row[1] != 'Pending':
+        conn.close()
+        return jsonify({'error': 'Only pending requests can be cancelled'}), 400
+    conn.execute(
+        "UPDATE regularization_requests SET status = 'Cancelled', updated_at = ? WHERE request_id = ?",
+        [now_ist(), rid]
+    )
+    conn.close()
+    return jsonify({'message': 'Cancelled'}), 200
+
+
+@app.route('/api/v1/regularization/export', methods=['GET'])
+@app.route('/api/regularization/export', methods=['GET'])
+@admin_required
+def export_regularization():
+    from io import BytesIO
+    import pandas as pd
+    month_filter = request.args.get('month', '', type=str).strip()
+    status_filter = request.args.get('status', '').strip()
+    conn = get_db()
+    try:
+        conditions = []
+        params: list = []
+        if month_filter and '-' in month_filter:
+            y, m = month_filter.split('-', 1)
+            conditions.append("CAST(strftime('%m', r.request_date) AS INTEGER) = ? AND CAST(strftime('%Y', r.request_date) AS INTEGER) = ?")
+            params.extend([int(m), int(y)])
+        if status_filter:
+            conditions.append("r.status = ?")
+            params.append(status_filter)
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = conn.execute(
+            f"SELECT r.emp_id, u.name, r.request_date, r.reason, r.status, r.approved_by, r.created_at, r.updated_at "
+            f"FROM regularization_requests r LEFT JOIN users u ON r.emp_id = u.emp_id{where} ORDER BY r.request_date DESC",
+            params
+        ).fetchall()
+    finally:
+        conn.close()
+
+    data = [{
+        'Employee ID': r[0], 'Employee Name': r[1] or r[0],
+        'Date': r[2].isoformat() if r[2] else '',
+        'Reason': r[3] or '', 'Status': r[4],
+        'Approved By': r[5] or '',
+        'Created At': r[6].isoformat() if r[6] else '',
+        'Updated At': r[7].isoformat() if r[7] else ''
+    } for r in rows]
+
+    buf = BytesIO()
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=['Employee ID', 'Employee Name', 'Date', 'Reason', 'Status', 'Approved By', 'Created At', 'Updated At'])
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Regularization')
+    buf.seek(0)
+    label = month_filter if month_filter else 'all'
+    return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                     download_name=f'regularization_{label}.xlsx', as_attachment=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1985,8 +2193,17 @@ def interviews_api():
         return jsonify({'error': 'candidate_id and scheduled_at required'}), 400
     iid = gen_id()
     conn = get_db()
+    scheduled_at = None
+    sat = data.get('scheduled_at', '')
+    if sat:
+        for fmt in ('%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+            try:
+                scheduled_at = datetime.strptime(sat, fmt)
+                break
+            except ValueError:
+                continue
     conn.execute("INSERT INTO interviews VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [iid, data['candidate_id'], parse_date(data['scheduled_at']), data.get('interviewer'), data.get('mode', 'In-person'), data.get('feedback'), 'Scheduled'])
+                 [iid, data['candidate_id'], scheduled_at, data.get('interviewer'), data.get('mode', 'In-person'), data.get('feedback'), 'Scheduled'])
     conn.close()
     return jsonify({'message': 'Interview scheduled', 'id': iid}), 201
 
@@ -2044,21 +2261,62 @@ def accept_offer(oid):
 @app.route('/onboarding')
 @login_required
 def onboarding_page():
-    return render_template('onboarding.html')
+    return render_template('onboarding.html', is_admin=_is_admin(session.get('role')), is_hr=session.get('department') == 'HR')
 
 
 @app.route('/api/v1/onboarding-tasks', methods=['GET', 'POST'])
 @app.route('/api/onboarding-tasks', methods=['GET', 'POST'])
 @login_required
 def onboarding_api():
+    is_admin = _is_admin(session.get('role'))
+
     if request.method == 'GET':
+        status_filter = request.args.get('status', '').strip()
+        month_filter = request.args.get('month', '').strip()
         conn = get_db()
-        if session.get('role') == 'Admin':
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC").fetchall()
-        else:
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
+        conditions = []
+        params: list = []
+        if not is_admin:
+            conditions.append("t.emp_id = ?")
+            params.append(session['emp_id'])
+        if status_filter:
+            conditions.append("t.status = ?")
+            params.append(status_filter)
+        if month_filter and '-' in month_filter:
+            y, m = month_filter.split('-', 1)
+            conditions.append("CAST(strftime('%m', t.due_date) AS INTEGER) = ? AND CAST(strftime('%Y', t.due_date) AS INTEGER) = ?")
+            params.extend([int(m), int(y)])
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = conn.execute(
+            f"SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at "
+            f"FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id{where} ORDER BY t.due_date ASC NULLS LAST, t.task_id DESC",
+            params
+        ).fetchall()
+        stats = conn.execute(
+            f"SELECT t.status, COUNT(*) FROM onboarding_tasks t{where} GROUP BY t.status",
+            params
+        ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() + '+05:30' if r[6] else None, 'completed_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
+        status_counts = {s[0]: s[1] for s in stats}
+        tasks = [{
+            'id': r[0], 'emp_id': r[1], 'employee': r[2] or r[1], 'task': r[3],
+            'assigned_to': r[4], 'status': r[5],
+            'due_date': r[6].isoformat() if r[6] else None,
+            'completed_at': r[7].isoformat() if r[7] else None
+        } for r in rows]
+        if is_admin:
+            return jsonify({
+                'tasks': tasks,
+                'counts': {
+                    'pending': status_counts.get('Pending', 0),
+                    'completed': status_counts.get('Completed', 0),
+                    'in_progress': status_counts.get('In Progress', 0),
+                    'total': sum(status_counts.values())
+                }
+            }), 200
+        else:
+            return jsonify(tasks), 200
+
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
@@ -2072,12 +2330,394 @@ def onboarding_api():
 
 @app.route('/api/v1/onboarding-tasks/<int:tid>/complete', methods=['POST'])
 @app.route('/api/onboarding-tasks/<int:tid>/complete', methods=['POST'])
-@admin_required
+@login_required
 def complete_onboarding_task(tid):
     conn = get_db()
+    task = conn.execute("SELECT emp_id, task_name FROM onboarding_tasks WHERE task_id = ?", [tid]).fetchone()
     conn.execute("UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [now_ist(), tid])
+    if task:
+        emp_id, task_name = task
+        if task_name == 'System Allocation':
+            now = now_ist()
+            due = (now + timedelta(days=5)).date()
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM onboarding_tasks WHERE emp_id = ? AND task_name = 'Desk & ID Card Allocation'", [emp_id]
+            ).fetchone()[0]
+            if existing == 0:
+                new_tid = gen_id()
+                conn.execute(
+                    "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date) VALUES (?, ?, 'Desk & ID Card Allocation', 'Admin Department', 'Pending', ?)",
+                    [new_tid, emp_id, due]
+                )
+            conn.execute(
+                "UPDATE onboarding_workflow SET current_step = 4, step_3_status = 'Completed', step_4_status = 'InProgress', updated_at = ? WHERE emp_id = ?",
+                [now, emp_id]
+            )
+        elif task_name == 'Desk & ID Card Allocation':
+            now = now_ist()
+            conn.execute(
+                "UPDATE onboarding_workflow SET current_step = 5, step_4_status = 'Completed', step_5_status = 'InProgress', updated_at = ? WHERE emp_id = ?",
+                [now, emp_id]
+            )
     conn.close()
     return jsonify({'message': 'Task completed'}), 200
+
+
+@app.route('/api/v1/onboarding-tasks/<int:tid>/progress', methods=['POST'])
+@app.route('/api/onboarding-tasks/<int:tid>/progress', methods=['POST'])
+@login_required
+def progress_onboarding_task(tid):
+    conn = get_db()
+    conn.execute("UPDATE onboarding_tasks SET status = 'In Progress' WHERE task_id = ? AND status = 'Pending'", [tid])
+    conn.close()
+    return jsonify({'message': 'Marked in progress'}), 200
+
+
+@app.route('/api/v1/onboarding-tasks/<int:tid>', methods=['DELETE'])
+@app.route('/api/onboarding-tasks/<int:tid>', methods=['DELETE'])
+@admin_required
+def delete_onboarding_task(tid):
+    conn = get_db()
+    conn.execute("DELETE FROM onboarding_tasks WHERE task_id = ?", [tid])
+    conn.close()
+    return jsonify({'message': 'Task deleted'}), 200
+
+
+@app.route('/api/v1/onboarding-tasks/export', methods=['GET'])
+@app.route('/api/onboarding-tasks/export', methods=['GET'])
+@admin_required
+def export_onboarding():
+    from io import BytesIO
+    import pandas as pd
+    month_filter = request.args.get('month', '').strip()
+    status_filter = request.args.get('status', '').strip()
+    conn = get_db()
+    try:
+        conditions = []
+        params2: list = []
+        if month_filter and '-' in month_filter:
+            y, m = month_filter.split('-', 1)
+            conditions.append("CAST(strftime('%m', t.due_date) AS INTEGER) = ? AND CAST(strftime('%Y', t.due_date) AS INTEGER) = ?")
+            params2.extend([int(m), int(y)])
+        if status_filter:
+            conditions.append("t.status = ?")
+            params2.append(status_filter)
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        rows = conn.execute(
+            f"SELECT t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at "
+            f"FROM onboarding_tasks t LEFT JOIN users u ON t.emp_id = u.emp_id{where} ORDER BY t.due_date ASC",
+            params2
+        ).fetchall()
+    finally:
+        conn.close()
+
+    data_rows = [{
+        'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Task': r[2],
+        'Assigned To': r[3], 'Status': r[4],
+        'Due Date': r[5].isoformat() if r[5] else '',
+        'Completed At': r[6].isoformat() if r[6] else ''
+    } for r in rows]
+
+    buf = BytesIO()
+    df = pd.DataFrame(data_rows) if data_rows else pd.DataFrame(columns=['Employee ID', 'Employee Name', 'Task', 'Assigned To', 'Status', 'Due Date', 'Completed At'])
+    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Onboarding')
+    buf.seek(0)
+    label = month_filter if month_filter else 'all'
+    return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                     download_name=f'onboarding_{label}.xlsx', as_attachment=True)
+
+
+ONBOARDING_DOC_TYPES = ['ID Proof', 'Address Proof', 'Photo', 'Previous Organisation Documents', 'Qualification Documents']
+
+@app.route('/api/v1/onboarding-checklist', methods=['GET', 'POST'])
+@app.route('/api/onboarding-checklist', methods=['GET', 'POST'])
+@login_required
+def onboarding_checklist_api():
+    is_admin = _is_admin(session.get('role'))
+    is_hr = session.get('department') == 'HR'
+    emp_id = session['emp_id']
+
+    if request.method == 'GET':
+        target_emp = request.args.get('emp_id', '').strip()
+        conn = get_db()
+        if target_emp and (is_admin or is_hr):
+            rows = conn.execute(
+                "SELECT c.checklist_id, c.emp_id, u.name, c.doc_type, c.status, c.file_name, c.uploaded_at, c.reviewed_by, c.reviewed_at, c.notes "
+                "FROM onboarding_checklist c JOIN users u ON c.emp_id = u.emp_id WHERE c.emp_id = ? ORDER BY c.doc_type",
+                [target_emp]
+            ).fetchall()
+        elif is_admin or is_hr:
+            rows = conn.execute(
+                "SELECT c.checklist_id, c.emp_id, u.name, c.doc_type, c.status, c.file_name, c.uploaded_at, c.reviewed_by, c.reviewed_at, c.notes "
+                "FROM onboarding_checklist c JOIN users u ON c.emp_id = u.emp_id ORDER BY c.emp_id, c.doc_type"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT c.checklist_id, c.emp_id, u.name, c.doc_type, c.status, c.file_name, c.uploaded_at, c.reviewed_by, c.reviewed_at, c.notes "
+                "FROM onboarding_checklist c JOIN users u ON c.emp_id = u.emp_id WHERE c.emp_id = ? ORDER BY c.doc_type",
+                [emp_id]
+            ).fetchall()
+
+        employees_with_checklist = {}
+        for r in rows:
+            eid = r[1]
+            if eid not in employees_with_checklist:
+                employees_with_checklist[eid] = {'emp_id': eid, 'employee': r[2] or eid, 'docs': [], 'progress': {'uploaded': 0, 'approved': 0, 'total': 0}}
+            doc = {
+                'id': r[0], 'doc_type': r[3], 'status': r[4], 'file_name': r[5],
+                'uploaded_at': r[6].isoformat() if r[6] else None,
+                'reviewed_by': r[7], 'reviewed_at': r[8].isoformat() if r[8] else None,
+                'notes': r[9]
+            }
+            employees_with_checklist[eid]['docs'].append(doc)
+            employees_with_checklist[eid]['progress']['total'] += 1
+            if r[4] in ('Uploaded', 'Approved'):
+                employees_with_checklist[eid]['progress']['uploaded'] += 1
+            if r[4] == 'Approved':
+                employees_with_checklist[eid]['progress']['approved'] += 1
+
+        wf_rows = conn.execute("SELECT emp_id, current_step, step_1_status, step_2_status, step_3_status, step_4_status, step_5_status, intro_completed_by FROM onboarding_workflow").fetchall()
+        wf_map = {}
+        for w in wf_rows:
+            wf_map[w[0]] = {
+                'current_step': w[1],
+                'steps': [
+                    {'step': 1, 'label': 'Document Upload', 'status': w[2]},
+                    {'step': 2, 'label': 'Document Validated by HR', 'status': w[3]},
+                    {'step': 3, 'label': 'System Allocated', 'status': w[4]},
+                    {'step': 4, 'label': 'Desk & ID Card Given', 'status': w[5]},
+                    {'step': 5, 'label': 'Introduction with Team', 'status': w[6]},
+                ],
+                'intro_completed_by': w[7]
+            }
+        conn.close()
+        for eid, data in employees_with_checklist.items():
+            data['workflow'] = wf_map.get(eid, {'current_step': 0, 'steps': [], 'intro_completed_by': None})
+        return jsonify(list(employees_with_checklist.values())), 200
+
+    data = request.get_json(silent=True) or {}
+    target_emp = data.get('emp_id', '').strip()
+    if not target_emp:
+        return jsonify({'error': 'emp_id required'}), 400
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT COUNT(*) FROM onboarding_checklist WHERE emp_id = ?", [target_emp]
+    ).fetchone()[0]
+    if existing > 0:
+        conn.close()
+        return jsonify({'error': 'Onboarding already initiated for this employee'}), 409
+    cid = gen_id()
+    for i, dt in enumerate(ONBOARDING_DOC_TYPES):
+        conn.execute(
+            "INSERT INTO onboarding_checklist (checklist_id, emp_id, doc_type, status) VALUES (?, ?, ?, 'Pending')",
+            [cid + i, target_emp, dt]
+        )
+    now = now_ist()
+    conn.execute(
+        "INSERT INTO onboarding_workflow (emp_id, current_step, step_1_status, created_at, updated_at) VALUES (?, 1, 'InProgress', ?, ?)",
+        [target_emp, now, now]
+    )
+    conn.execute("UPDATE users SET status = 'Onboarding' WHERE emp_id = ?", [target_emp])
+    conn.close()
+    return jsonify({'message': 'Onboarding initiated', 'emp_id': target_emp}), 201
+
+
+@app.route('/api/v1/onboarding-checklist/<int:cid>/upload', methods=['POST'])
+@app.route('/api/onboarding-checklist/<int:cid>/upload', methods=['POST'])
+@login_required
+def upload_onboarding_doc(cid):
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    if not f.filename:
+        return jsonify({'error': 'No file selected'}), 400
+    conn = get_db()
+    row = conn.execute("SELECT emp_id, status, doc_type FROM onboarding_checklist WHERE checklist_id = ?", [cid]).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Checklist item not found'}), 404
+    if row[0] != session['emp_id'] and not _is_admin(session.get('role')) and session.get('role') != 'HR':
+        conn.close()
+        return jsonify({'error': 'Not authorized'}), 403
+    doc_type = row[2] or ''
+    ext = os.path.splitext(f.filename)[1] or '.bin'
+    filename = f"onboarding_{cid}_{int(now_ist().timestamp())}{ext}"
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    f.save(filepath)
+    file_size = os.path.getsize(filepath)
+    max_bytes = 1 * 1024 * 1024 if doc_type == 'Photo' else 250 * 1024
+    if file_size > max_bytes:
+        os.remove(filepath)
+        label = '1 MB' if doc_type == 'Photo' else '250 KB'
+        size_mb = round(file_size / (1024 * 1024), 1)
+        conn.close()
+        return jsonify({'error': f'{doc_type} must be under {label}. Your file is {size_mb} MB'}), 413
+    conn.execute(
+        "UPDATE onboarding_checklist SET status = 'Uploaded', file_name = ?, file_path = ?, uploaded_at = ? WHERE checklist_id = ?",
+        [f.filename, filename, now_ist(), cid]
+    )
+    conn.close()
+    return jsonify({'message': 'File uploaded', 'file_name': f.filename}), 200
+
+
+@app.route('/api/v1/onboarding-checklist/<int:cid>/file')
+@app.route('/api/onboarding-checklist/<int:cid>/file')
+@login_required
+def view_onboarding_file(cid):
+    conn = get_db()
+    row = conn.execute("SELECT file_path, file_name, emp_id FROM onboarding_checklist WHERE checklist_id = ?", [cid]).fetchone()
+    conn.close()
+    if not row or not row[0]:
+        return jsonify({'error': 'File not found'}), 404
+    if row[2] != session['emp_id'] and not _is_admin(session.get('role')) and session.get('department') != 'HR':
+        return jsonify({'error': 'Not authorized'}), 403
+    filepath = os.path.join(UPLOAD_FOLDER, row[0])
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'File not found on disk'}), 404
+    ext = os.path.splitext(row[1] or '')[1].lower()
+    mime_map = {'.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.doc': 'application/msword', '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}
+    return send_file(filepath, mimetype=mime_map.get(ext, 'application/octet-stream'))
+
+
+@app.route('/api/v1/onboarding-checklist/<int:cid>/review', methods=['POST'])
+@app.route('/api/onboarding-checklist/<int:cid>/review', methods=['POST'])
+@admin_required
+def review_onboarding_doc(cid):
+    data = request.get_json(silent=True) or {}
+    action = data.get('action', '').strip()
+    notes = data.get('notes', '').strip()
+    if action not in ('Approved', 'Rejected'):
+        return jsonify({'error': 'action must be Approved or Rejected'}), 400
+    if action == 'Rejected' and not notes:
+        return jsonify({'error': 'Rejection reason is required'}), 400
+    conn = get_db()
+    conn.execute(
+        "UPDATE onboarding_checklist SET status = ?, reviewed_by = ?, reviewed_at = ?, notes = ? WHERE checklist_id = ?",
+        [action, session['emp_id'], now_ist(), notes or None, cid]
+    )
+    row = conn.execute("SELECT emp_id FROM onboarding_checklist WHERE checklist_id = ?", [cid]).fetchone()
+    emp_id = row[0] if row else None
+    if emp_id and action == 'Rejected':
+        doc_row = conn.execute("SELECT doc_type FROM onboarding_checklist WHERE checklist_id = ?", [cid]).fetchone()
+        doc_name = doc_row[0] if doc_row else 'document'
+        add_notification(emp_id, 'onboarding', f'Your {doc_name} was rejected. Reason: {notes or "No reason provided"}. Please re-upload.', '/onboarding')
+    if emp_id and action == 'Approved':
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM onboarding_checklist WHERE emp_id = ? AND status != 'Approved'", [emp_id]
+        ).fetchone()[0]
+        if pending == 0:
+            wf = conn.execute("SELECT current_step FROM onboarding_workflow WHERE emp_id = ?", [emp_id]).fetchone()
+            if wf and wf[0] == 2:
+                now = now_ist()
+                due = (now + timedelta(days=7)).date()
+                existing_task = conn.execute(
+                    "SELECT COUNT(*) FROM onboarding_tasks WHERE emp_id = ? AND task_name = 'System Allocation'", [emp_id]
+                ).fetchone()[0]
+                if existing_task == 0:
+                    tid = gen_id()
+                    conn.execute(
+                        "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date) VALUES (?, ?, 'System Allocation', 'IT Department', 'Pending', ?)",
+                        [tid, emp_id, due]
+                    )
+                conn.execute(
+                    "UPDATE onboarding_workflow SET current_step = 3, step_2_status = 'Completed', step_3_status = 'InProgress', updated_at = ? WHERE emp_id = ?",
+                    [now, emp_id]
+                )
+    conn.close()
+    return jsonify({'message': f'Document {action.lower()}'}), 200
+
+
+@app.route('/api/v1/onboarding-checklist/<int:cid>', methods=['DELETE'])
+@app.route('/api/onboarding-checklist/<int:cid>', methods=['DELETE'])
+@admin_required
+def delete_onboarding_checklist(cid):
+    conn = get_db()
+    conn.execute("DELETE FROM onboarding_checklist WHERE checklist_id = ?", [cid])
+    conn.close()
+    return jsonify({'message': 'Deleted'}), 200
+
+
+@app.route('/api/v1/onboarding-initiate-setup', methods=['POST'])
+@app.route('/api/onboarding-initiate-setup', methods=['POST'])
+@admin_required
+def initiate_setup_tasks():
+    data = request.get_json(silent=True) or {}
+    emp_id = data.get('emp_id', '').strip()
+    if not emp_id:
+        return jsonify({'error': 'emp_id required'}), 400
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM onboarding_checklist WHERE emp_id = ? AND status != 'Approved'", [emp_id]
+    ).fetchone()[0]
+    if pending > 0:
+        conn.close()
+        return jsonify({'error': f'{pending} document(s) not yet approved'}), 400
+    existing = conn.execute(
+        "SELECT COUNT(*) FROM onboarding_tasks WHERE emp_id = ? AND task_name IN ('IT System Setup', 'ID Card & Desk Allocation')", [emp_id]
+    ).fetchone()[0]
+    if existing > 0:
+        conn.close()
+        return jsonify({'error': 'Setup tasks already exist for this employee'}), 409
+    tid = gen_id()
+    due = (now_ist() + timedelta(days=7)).date()
+    conn.execute(
+        "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date) VALUES (?, ?, 'IT System Setup', 'IT Department', 'Pending', ?)",
+        [tid, emp_id, due]
+    )
+    conn.execute(
+        "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date) VALUES (?, ?, 'ID Card & Desk Allocation', 'Admin Department', 'Pending', ?)",
+        [tid + 1, emp_id, due]
+    )
+    conn.close()
+    return jsonify({'message': 'IT & Admin setup tasks created'}), 201
+
+
+@app.route('/api/onboarding-checklist/submit', methods=['POST'])
+@login_required
+def submit_docs_for_approval():
+    emp_id = session['emp_id']
+    conn = get_db()
+    wf = conn.execute("SELECT current_step FROM onboarding_workflow WHERE emp_id = ?", [emp_id]).fetchone()
+    if not wf or wf[0] != 1:
+        conn.close()
+        return jsonify({'error': 'Not at step 1 or no onboarding in progress'}), 400
+    docs = conn.execute(
+        "SELECT checklist_id, status FROM onboarding_checklist WHERE emp_id = ?", [emp_id]
+    ).fetchall()
+    if not docs:
+        conn.close()
+        return jsonify({'error': 'No documents found'}), 400
+    uploaded = sum(1 for d in docs if d[1] in ('Uploaded', 'Approved'))
+    if uploaded == 0:
+        conn.close()
+        return jsonify({'error': 'Upload at least one document before submitting'}), 400
+    now = now_ist()
+    conn.execute(
+        "UPDATE onboarding_workflow SET current_step = 2, step_1_status = 'Completed', step_2_status = 'InProgress', updated_at = ? WHERE emp_id = ?",
+        [now, emp_id]
+    )
+    conn.close()
+    return jsonify({'message': 'Documents submitted for HR approval'}), 200
+
+
+@app.route('/api/onboarding/complete-intro', methods=['POST'])
+@login_required
+def complete_intro():
+    emp_id = session['emp_id']
+    conn = get_db()
+    wf = conn.execute("SELECT current_step FROM onboarding_workflow WHERE emp_id = ?", [emp_id]).fetchone()
+    if not wf or wf[0] != 5:
+        conn.close()
+        return jsonify({'error': 'Not at step 5 or no onboarding in progress'}), 400
+    now = now_ist()
+    conn.execute(
+        "UPDATE onboarding_workflow SET step_5_status = 'Completed', intro_completed_by = ?, updated_at = ? WHERE emp_id = ?",
+        [emp_id, now, emp_id]
+    )
+    conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = ? AND status = 'Onboarding'", [emp_id])
+    conn.close()
+    return jsonify({'message': 'Introduction completed'}), 200
 
 
 @app.route('/offboarding')
@@ -2092,7 +2732,7 @@ def offboarding_page():
 def offboarding_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC").fetchall()
         else:
             rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
@@ -2245,7 +2885,7 @@ def payroll_items(rid):
 @app.route('/api/payslip/<int:run_id>/<emp_id>')
 @login_required
 def get_payslip(run_id, emp_id):
-    if session.get('role') != 'Admin' and session['emp_id'] != emp_id:
+    if not _is_admin(session.get('role')) and session['emp_id'] != emp_id:
         return jsonify({'error': 'Forbidden'}), 403
     conn = get_db()
     row = conn.execute(
@@ -2305,7 +2945,7 @@ def goals_page():
 def goals_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id ORDER BY g.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id WHERE g.emp_id = ? ORDER BY g.created_at DESC", [session['emp_id']]).fetchall()
@@ -2394,7 +3034,7 @@ def submit_review(rid):
 def feedback_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute("SELECT f.feedback_id, f.emp_id, u.name, f.reviewer_id, rev.name, f.category, f.rating, f.comment, f.submitted_at FROM feedback_360 f JOIN users u ON f.emp_id = u.emp_id JOIN users rev ON f.reviewer_id = rev.emp_id ORDER BY f.submitted_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT f.feedback_id, f.emp_id, u.name, f.reviewer_id, rev.name, f.category, f.rating, f.comment, f.submitted_at FROM feedback_360 f JOIN users u ON f.emp_id = u.emp_id JOIN users rev ON f.reviewer_id = rev.emp_id WHERE f.emp_id = ? ORDER BY f.submitted_at DESC", [session['emp_id']]).fetchall()
@@ -2443,7 +3083,7 @@ def expense_categories():
 def expenses_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id ORDER BY c.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.emp_id = ? ORDER BY c.created_at DESC", [session['emp_id']]).fetchall()
@@ -2496,7 +3136,7 @@ def tickets_page():
 def tickets_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.created_at DESC", [session['emp_id']]).fetchall()
@@ -2523,7 +3163,7 @@ def ticket_detail(tid):
     if not row:
         conn.close()
         return jsonify({'error': 'Not found'}), 404
-    if session.get('role') != 'Admin' and session['emp_id'] != row[1]:
+    if not _is_admin(session.get('role')) and session['emp_id'] != row[1]:
         conn.close()
         return jsonify({'error': 'Forbidden'}), 403
     comments = conn.execute("SELECT c.comment_id, c.emp_id, u.name, c.comment, c.created_at FROM ticket_comments c JOIN users u ON c.emp_id = u.emp_id WHERE c.ticket_id = ? ORDER BY c.created_at", [tid]).fetchall()
@@ -2611,7 +3251,7 @@ def documents_page():
 @login_required
 def documents_list():
     conn = get_db()
-    if session.get('role') == 'Admin':
+    if _is_admin(session.get('role')):
         rows = conn.execute("SELECT d.doc_id, d.emp_id, u.name, d.name, d.category, d.file_path, d.file_size, d.uploaded_at FROM documents d JOIN users u ON d.emp_id = u.emp_id ORDER BY d.uploaded_at DESC").fetchall()
     else:
         rows = conn.execute("SELECT d.doc_id, d.emp_id, u.name, d.name, d.category, d.file_path, d.file_size, d.uploaded_at FROM documents d JOIN users u ON d.emp_id = u.emp_id WHERE d.emp_id = ? ORDER BY d.uploaded_at DESC", [session['emp_id']]).fetchall()
@@ -2788,11 +3428,13 @@ def analytics_attrition():
 @admin_required
 def analytics_expense_summary():
     conn = get_db()
-    total = _scalar("SELECT COALESCE(SUM(amount),0) FROM expense_claims WHERE status IN ('Approved','Paid')")
-    by_cat = conn.execute("SELECT e.name, COALESCE(SUM(c.amount),0) FROM expense_claims c JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.status IN ('Approved','Paid') GROUP BY e.name ORDER BY SUM(c.amount) DESC").fetchall()
-    pending = _scalar("SELECT COUNT(*) FROM expense_claims WHERE status = 'Pending'")
-    conn.close()
-    return jsonify({'total': float(total), 'by_category': [{'cat': r[0], 'amount': float(r[1])} for r in by_cat], 'pending_claims': pending}), 200
+    try:
+        total = _scalar("SELECT COALESCE(SUM(amount),0) FROM expense_claims WHERE status IN ('Approved','Paid')")
+        by_cat = conn.execute("SELECT e.name, COALESCE(SUM(c.amount),0) FROM expense_claims c JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.status IN ('Approved','Paid') GROUP BY e.name ORDER BY SUM(c.amount) DESC").fetchall()
+        pending = _scalar("SELECT COUNT(*) FROM expense_claims WHERE status = 'Pending'")
+        return jsonify({'total': float(total), 'by_category': [{'cat': r[0], 'amount': float(r[1])} for r in by_cat], 'pending_claims': pending}), 200
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/analytics/performance-summary')
@@ -2881,7 +3523,7 @@ def generate_payslip_pdf(run_id, emp_id):
 @app.route('/api/payroll-runs/<int:rid>/payslip-pdf/<emp_id>')
 @login_required
 def payslip_pdf(rid, emp_id):
-    if session.get('role') != 'Admin' and session['emp_id'] != emp_id:
+    if not _is_admin(session.get('role')) and session['emp_id'] != emp_id:
         return jsonify({'error': 'Forbidden'}), 403
     pdf = generate_payslip_pdf(rid, emp_id)
     if not pdf:
@@ -3006,7 +3648,7 @@ def leaves_api():
         status_filter = request.args.get('status')
         month_filter = request.args.get('month', type=int)
         year_filter = request.args.get('year', type=int)
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
                        l.reason, l.status, l.approved_by, l.created_at
                        FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id"""
@@ -3538,7 +4180,7 @@ def break_approvals_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if _is_admin(session.get('role')):
             rows = conn.execute(
                 "SELECT a.approval_id, a.emp_id, u.name, a.break_type, a.break_date, a.reason, a.status, a.approved_by, a.created_at FROM break_approvals a JOIN users u ON a.emp_id = u.emp_id ORDER BY a.created_at DESC"
             ).fetchall()
@@ -4001,7 +4643,7 @@ def get_users():
     conditions = []
     params = []
     if active_only:
-        conditions.append("status = 'Active'")
+        conditions.append("status IN ('Active', 'Onboarding')")
     if search:
         conditions.append("(LOWER(emp_id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(email) LIKE ?)")
         like = f"%{search.lower()}%"
@@ -4154,8 +4796,7 @@ def delete_user(emp_id):
         ('feedback_360', 'emp_id'), ('expense_claims', 'emp_id'),
         ('tickets', 'emp_id'), ('ticket_comments', 'emp_id'),
         ('assets', 'emp_id'), ('documents', 'emp_id'), ('dependents', 'emp_id'),
-        ('interviews', 'interviewer'), ('interviews', 'emp_id'),
-        ('offer_letters', 'emp_id'), ('offer_letters', 'candidate_id'),
+        ('interviews', 'interviewer'),
     ]
     for table, col in tables:
         try:
@@ -4187,7 +4828,7 @@ def admin_holidays():
 @app.route('/regularization')
 @login_required
 def regularization_page():
-    return render_template('regularization.html')
+    return render_template('regularization.html', is_admin=_is_admin(session.get('role')))
 
 
 @app.route('/admin/import-users')
@@ -4208,59 +4849,60 @@ def get_reports():
     emp_id_filter = request.args.get('emp_id', '').strip()
 
     conn = get_db()
+    try:
+        user_where = "WHERE u.role = 'Employee'"
+        user_params: list = []
+        if department:
+            user_where += " AND u.department = ?"
+            user_params.append(department)
+        if emp_id_filter:
+            user_where += " AND u.emp_id = ?"
+            user_params.append(emp_id_filter)
 
-    user_where = "WHERE u.role = 'Employee'"
-    user_params = []
-    if department:
-        user_where += " AND u.department = ?"
-        user_params.append(department)
-    if emp_id_filter:
-        user_where += " AND u.emp_id = ?"
-        user_params.append(emp_id_filter)
+        summary = conn.execute(f"""
+            SELECT u.emp_id, u.name, u.department,
+                   (SELECT MIN(login_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
+                   (SELECT MAX(logout_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
+                   COALESCE((SELECT SUM(total_hours) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0),
+                   COALESCE((SELECT SUM(duration_minutes) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
+                   COALESCE((SELECT COUNT(*) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
+                   COALESCE((SELECT COUNT(*) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0)
+            FROM users u {user_where} ORDER BY u.name
+        """, [start_date, end_date, start_date, end_date, start_date, end_date,
+              start_date, end_date, start_date, end_date, start_date, end_date] + user_params).fetchall()
 
-    summary = conn.execute(f"""
-        SELECT u.emp_id, u.name, u.department,
-               (SELECT MIN(login_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
-               (SELECT MAX(logout_time) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?),
-               COALESCE((SELECT SUM(total_hours) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0),
-               COALESCE((SELECT SUM(duration_minutes) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
-               COALESCE((SELECT COUNT(*) FROM breaks b WHERE b.emp_id = u.emp_id AND b.break_date BETWEEN ? AND ? AND b.status = 'Completed'), 0),
-               COALESCE((SELECT COUNT(*) FROM user_sessions us WHERE us.emp_id = u.emp_id AND us.session_date BETWEEN ? AND ?), 0)
-        FROM users u {user_where} ORDER BY u.name
-    """, [start_date, end_date, start_date, end_date, start_date, end_date,
-          start_date, end_date, start_date, end_date, start_date, end_date] + user_params).fetchall()
+        break_where = "WHERE b.break_date BETWEEN ? AND ?"
+        break_params: list = [start_date, end_date]
+        if department:
+            break_where += " AND u.department = ?"
+            break_params.append(department)
+        if emp_id_filter:
+            break_where += " AND b.emp_id = ?"
+            break_params.append(emp_id_filter)
 
-    break_where = "WHERE b.break_date BETWEEN ? AND ?"
-    break_params: list = [start_date, end_date]
-    if department:
-        break_where += " AND u.department = ?"
-        break_params.append(department)
-    if emp_id_filter:
-        break_where += " AND b.emp_id = ?"
-        break_params.append(emp_id_filter)
+        break_details = conn.execute(f"""
+            SELECT b.break_id, b.emp_id, u.name, u.department, b.break_type, b.start_time, b.end_time, b.duration_minutes, b.break_date, b.status
+            FROM breaks b JOIN users u ON b.emp_id = u.emp_id {break_where} ORDER BY b.break_date DESC, b.start_time DESC
+        """, break_params).fetchall()
 
-    break_details = conn.execute(f"""
-        SELECT b.break_id, b.emp_id, u.name, u.department, b.break_type, b.start_time, b.end_time, b.duration_minutes, b.break_date, b.status
-        FROM breaks b JOIN users u ON b.emp_id = u.emp_id {break_where} ORDER BY b.break_date DESC, b.start_time DESC
-    """, break_params).fetchall()
+        sess_where = "WHERE us.session_date BETWEEN ? AND ?"
+        sess_params: list = [start_date, end_date]
+        if department:
+            sess_where += " AND u.department = ?"
+            sess_params.append(department)
+        if emp_id_filter:
+            sess_where += " AND us.emp_id = ?"
+            sess_params.append(emp_id_filter)
 
-    sess_where = "WHERE us.session_date BETWEEN ? AND ?"
-    sess_params: list = [start_date, end_date]
-    if department:
-        sess_where += " AND u.department = ?"
-        sess_params.append(department)
-    if emp_id_filter:
-        sess_where += " AND us.emp_id = ?"
-        sess_params.append(emp_id_filter)
+        session_details = conn.execute(f"""
+            SELECT us.session_id, us.emp_id, u.name, u.department, us.login_time, us.logout_time, us.total_hours, us.session_date
+            FROM user_sessions us JOIN users u ON us.emp_id = u.emp_id {sess_where} ORDER BY us.session_date DESC, us.login_time DESC
+        """, sess_params).fetchall()
 
-    session_details = conn.execute(f"""
-        SELECT us.session_id, us.emp_id, u.name, u.department, us.login_time, us.logout_time, us.total_hours, us.session_date
-        FROM user_sessions us JOIN users u ON us.emp_id = u.emp_id {sess_where} ORDER BY us.session_date DESC, us.login_time DESC
-    """, sess_params).fetchall()
-
-    departments = [r[0] for r in conn.execute("SELECT DISTINCT department FROM users WHERE role = 'Employee' AND department IS NOT NULL ORDER BY department").fetchall()]
-    employees = conn.execute(f"SELECT emp_id, name FROM users u {user_where} ORDER BY name", user_params).fetchall()
-    conn.close()
+        departments = [r[0] for r in conn.execute("SELECT DISTINCT department FROM users WHERE role = 'Employee' AND department IS NOT NULL ORDER BY department").fetchall()]
+        employees = conn.execute(f"SELECT emp_id, name FROM users u {user_where} ORDER BY name", user_params).fetchall()
+    finally:
+        conn.close()
 
     summary_list = []
     for r in summary:
