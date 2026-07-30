@@ -1,32 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Analytics</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
@@ -49,7 +24,11 @@
         .risk-medium { background: #fff3cd; color: #856404; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .risk-low { background: #d4edda; color: #155724; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .filter-bar { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 16px 20px; margin-bottom: 20px; display: flex; align-items: end; gap: 16px; flex-wrap: wrap; }
+        .filter-bar .form-label { font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
+        .filter-bar .form-select, .filter-bar .form-control { border: 1.5px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+        .filter-bar .form-select:focus, .filter-bar .form-control:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); }
     </style>
 </head>
 <body>
@@ -57,6 +36,27 @@
 
 <div class="container-fluid p-4">
     <h2 class="page-title">Advanced Analytics</h2>
+
+    <div class="filter-bar" id="filterBar">
+        <div>
+            <label class="form-label">Department</label>
+            <select class="form-select" id="filterDept" style="width:180px">
+                <option value="">All Departments</option>
+            </select>
+        </div>
+        <div>
+            <label class="form-label">From</label>
+            <input type="date" class="form-control" id="filterFrom" style="width:160px">
+        </div>
+        <div>
+            <label class="form-label">To</label>
+            <input type="date" class="form-control" id="filterTo" style="width:160px">
+        </div>
+        <div>
+            <button class="btn btn-primary" onclick="applyFilters()" style="padding:8px 24px">Apply</button>
+            <button class="btn btn-outline-secondary" onclick="clearFilters()" style="padding:8px 16px;margin-left:6px">Clear</button>
+        </div>
+    </div>
 
     <div class="row mb-4">
         <div class="col-md-3"><div class="card metric-card"><div class="metric-value" id="hcTotal">0</div><div class="metric-label">Employees</div></div></div>
@@ -67,7 +67,7 @@
 
     <div class="row mb-4">
         <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Headcount by Department</h5></div><div class="card-body"><div class="chart-container"><canvas id="deptChart"></canvas></div></div></div></div>
-        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Leave Trends (6 months)</h5></div><div class="card-body"><div class="chart-container"><canvas id="leaveChart"></canvas></div></div></div></div>
+        <div class="col-md-6"><div class="card"><div class="card-header"><h5 class="mb-0">Leave Trends</h5></div><div class="card-body"><div class="chart-container"><canvas id="leaveChart"></canvas></div></div></div></div>
     </div>
 
     <div class="row mb-4">
@@ -80,8 +80,8 @@
         <div class="card-body">
             <div class="table-responsive">
                 <table class="table table-hover">
-                    <thead><tr><th>Employee</th><th>Department</th><th>Leaves (3mo)</th><th>Pending Reg.</th><th>Risk Score</th><th>Level</th></tr></thead>
-                    <tbody id="riskTable"><tr><td colspan="6" class="text-center text-muted">Loading...</td></tr></tbody>
+                    <thead><tr><th>Employee</th><th>Department</th><th>Leaves (3mo)</th><th>Pending Reg.</th><th>Early Breaks</th><th>Attendance</th><th>Rating</th><th>Risk Score</th><th>Level</th></tr></thead>
+                    <tbody id="riskTable"><tr><td colspan="9" class="text-center text-muted">Loading...</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -91,12 +91,53 @@
 let deptChart, leaveChart, expChart, perfChart;
 const COLORS = ['#1e293b','#198754','#0d6efd','#ffc107','#dc3545','#6f42c1','#fd7e14','#20c997'];
 
-document.addEventListener('DOMContentLoaded', () => { loadAll(); });
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadDepartments();
+    await loadAll();
+});
+
+function qs(o) {
+    const p = [];
+    if (o.department) p.push('department=' + encodeURIComponent(o.department));
+    if (o.date_from) p.push('date_from=' + encodeURIComponent(o.date_from));
+    if (o.date_to) p.push('date_to=' + encodeURIComponent(o.date_to));
+    return p.length ? '?' + p.join('&') : '';
+}
+
+function getFilters() {
+    return {
+        department: document.getElementById('filterDept').value,
+        date_from: document.getElementById('filterFrom').value,
+        date_to: document.getElementById('filterTo').value
+    };
+}
+
+async function loadDepartments() {
+    const r = await fetch('/api/analytics/headcount');
+    const d = await r.json();
+    const sel = document.getElementById('filterDept');
+    (d.by_department || []).forEach(x => {
+        const opt = document.createElement('option');
+        opt.value = x.dept; opt.textContent = x.dept;
+        sel.appendChild(opt);
+    });
+}
+
 async function loadAll() {
     await Promise.all([loadHeadcount(), loadLeaveTrends(), loadExpenses(), loadPerformance(), loadAttrition()]);
 }
+
+function applyFilters() { loadAll(); }
+function clearFilters() {
+    document.getElementById('filterDept').value = '';
+    document.getElementById('filterFrom').value = '';
+    document.getElementById('filterTo').value = '';
+    loadAll();
+}
+
 async function loadHeadcount() {
-    const r = await fetch('/api/analytics/headcount');
+    const f = getFilters();
+    const r = await fetch('/api/analytics/headcount' + qs(f));
     const d = await r.json();
     document.getElementById('hcTotal').textContent = d.total;
     const depts = d.by_department || [];
@@ -107,13 +148,15 @@ async function loadHeadcount() {
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
     });
 }
+
 async function loadLeaveTrends() {
-    const r = await fetch('/api/analytics/leave-trends');
+    const f = getFilters();
+    const r = await fetch('/api/analytics/leave-trends' + qs(f));
     const data = await r.json();
     const months = [...new Set(data.map(x => x.month))].sort();
     const types = [...new Set(data.map(x => x.type))];
     const datasets = types.map((t, i) => ({
-        label: t, data: months.map(m => { const f = data.find(x => x.month === m && x.type === t); return f ? f.count : 0; }),
+        label: t, data: months.map(m => { const f2 = data.find(x => x.month === m && x.type === t); return f2 ? f2.count : 0; }),
         backgroundColor: COLORS[i % COLORS.length], borderColor: COLORS[i % COLORS.length]
     }));
     if (leaveChart) leaveChart.destroy();
@@ -123,11 +166,13 @@ async function loadLeaveTrends() {
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } }, scales: { x: { stacked: true }, y: { stacked: true } } }
     });
 }
+
 async function loadExpenses() {
-    const r = await fetch('/api/analytics/expense-summary');
+    const f = getFilters();
+    const r = await fetch('/api/analytics/expense-summary' + qs(f));
     const d = await r.json();
-    document.getElementById('expTotal').textContent = '₹' + d.total.toLocaleString('en-IN', {maximumFractionDigits:0});
-    document.getElementById('pendingExp').textContent = d.pending_claims;
+    document.getElementById('expTotal').textContent = '₹' + (d.total || 0).toLocaleString('en-IN', {maximumFractionDigits:0});
+    document.getElementById('pendingExp').textContent = d.pending_claims || 0;
     const cats = d.by_category || [];
     if (expChart) expChart.destroy();
     expChart = new Chart(document.getElementById('expChart'), {
@@ -136,10 +181,12 @@ async function loadExpenses() {
         options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
     });
 }
+
 async function loadPerformance() {
-    const r = await fetch('/api/analytics/performance-summary');
+    const f = getFilters();
+    const r = await fetch('/api/analytics/performance-summary' + qs(f));
     const d = await r.json();
-    document.getElementById('avgPerf').textContent = d.avg_rating.toFixed(2);
+    document.getElementById('avgPerf').textContent = (d.avg_rating || 0).toFixed(2);
     const depts = d.by_department || [];
     if (perfChart) perfChart.destroy();
     perfChart = new Chart(document.getElementById('perfChart'), {
@@ -148,14 +195,18 @@ async function loadPerformance() {
         options: { responsive: true, maintainAspectRatio: false, scales: { y: { min: 0, max: 5 } }, plugins: { legend: { display: false } } }
     });
 }
+
 async function loadAttrition() {
-    const r = await fetch('/api/analytics/attrition-risk');
+    const f = getFilters();
+    const r = await fetch('/api/analytics/attrition-risk' + qs(f));
     const data = await r.json();
     const tbody = document.getElementById('riskTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No data</td></tr>'; return; }
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">No data</td></tr>'; return; }
     tbody.innerHTML = data.map(x => {
         const level = x.risk_score >= 3 ? 'High' : x.risk_score >= 1 ? 'Medium' : 'Low';
-        return `<tr><td><strong>${x.name}</strong><br><small>${x.emp_id}</small></td><td>${x.department || '-'}</td><td>${x.leave_count}</td><td>${x.reg_count}</td><td>${x.risk_score}</td><td><span class="risk-${level.toLowerCase()}">${level}</span></td></tr>`;
+        const attPct = x.attendance_rate != null ? (x.attendance_rate * 100).toFixed(0) + '%' : '-';
+        const rating = x.rating || '-';
+        return `<tr><td><strong>${x.name}</strong><br><small>${x.emp_id}</small></td><td>${x.department || '-'}</td><td>${x.leave_count}</td><td>${x.reg_count}</td><td>${x.early_break}</td><td>${attPct}</td><td>${rating}</td><td>${x.risk_score}</td><td><span class="risk-${level.toLowerCase()}">${level}</span></td></tr>`;
     }).join('');
 }
 </script>

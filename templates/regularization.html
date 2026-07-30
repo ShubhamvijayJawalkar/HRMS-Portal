@@ -1,53 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Regularization</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 16px; }
         .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control:focus, .form-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 14px; font-size: 12px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(71,85,105,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: var(--text); }
         .btn-outline-secondary { border-color: var(--border); color: var(--text-muted); font-weight: 600; font-size: 12px; border-radius: var(--button-radius); }
         .btn-outline-secondary:hover { background: var(--muted); color: var(--text); border-color: var(--border); }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
-        .table tbody tr:hover { background: #FAFBFC; }
-        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
         .alert { border-radius: 8px; border: none; }
         .status-badge { padding: 4px 10px; border-radius: 16px; font-size: 11px; font-weight: 600; display: inline-block; }
-        .status-Pending { background: #FEFCE8; color: #92400E; }
+        .status-Pending { background: var(--warning-light); color: #92400E; }
         .status-Approved { background: #F0FDF4; color: #166534; }
         .status-Rejected { background: #FEF2F2; color: #991B1B; }
         .status-Cancelled { background: #F1F5F9; color: #475569; }
@@ -80,6 +48,9 @@
                 <button class="filter-btn" data-filter="Rejected" onclick="setFilter('Rejected')">Rejected</button>
                 <button class="filter-btn" data-filter="Cancelled" onclick="setFilter('Cancelled')">Cancelled</button>
             </div>
+            {% if is_manager %}
+            <button class="btn btn-sm btn-outline-warning" id="pendingApprovalRegBtn" onclick="loadPendingRegApprovals()"><i class="bi bi-inbox me-1"></i>Pending My Approval</button>
+            {% endif %}
             {% if is_admin %}
             <button class="btn btn-sm btn-outline-success" onclick="downloadExcel()" title="Download Excel"><i class="bi bi-file-earmark-excel me-1"></i>Download</button>
             {% endif %}
@@ -182,7 +153,9 @@
 
 <script>
 const IS_ADMIN = {{ 'true' if is_admin else 'false' }};
+const IS_MANAGER = {{ 'true' if is_manager else 'false' }};
 let currentFilter = 'all';
+let isPendingApprovalView = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     const now = new Date();
@@ -278,6 +251,50 @@ async function submitRequest(e) {
     }
 }
 
+async function loadPendingRegApprovals() {
+    isPendingApprovalView = true;
+    document.querySelector('.card-header h5').textContent = 'Pending My Approval';
+    document.getElementById('filterGroup').style.display = 'none';
+    const pendingBtn = document.getElementById('pendingApprovalRegBtn');
+    if (pendingBtn) pendingBtn.style.display = 'none';
+    try {
+        const r = await fetch('/api/regularization?pending_my_approval=true');
+        const data = await r.json();
+        const tbody = document.getElementById('regTable');
+        const reqs = Array.isArray(data) ? data : [];
+        if (!reqs.length) {
+            tbody.innerHTML = `<tr><td colspan="6"><div class="empty-state"><i class="bi bi-inbox"></i><p>No pending approvals</p></div></td></tr>`;
+            return;
+        }
+        tbody.innerHTML = reqs.map(req => `<tr>
+            <td><strong>${esc(req.name)}</strong><br><small class="text-muted">${esc(req.emp_id)}</small></td>
+            <td>${fmtDate(req.date)}</td>
+            <td>${esc(req.reason)}</td>
+            <td><span class="status-badge status-${req.status}">${req.status}</span></td>
+            <td>${esc(req.approved_by) || '<span class="text-muted">-</span>'}</td>
+            <td><button class="btn btn-success btn-sm me-1" onclick="approvePendingReg(${req.id})"><i class="bi bi-check-lg"></i> Approve</button><button class="btn btn-danger btn-sm" onclick="rejectPendingReg(${req.id})"><i class="bi bi-x-lg"></i> Reject</button></td>
+        </tr>`).join('');
+    } catch (e) { showToast('Failed to load', 'error'); }
+}
+
+async function approvePendingReg(id) {
+    try {
+        const r = await fetch(`/api/regularization/${id}/approve`, { method: 'POST' });
+        const d = await r.json();
+        showToast(r.ok ? 'Approved' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+        if (r.ok) loadPendingRegApprovals();
+    } catch (e) { showToast('Network error', 'error'); }
+}
+
+async function rejectPendingReg(id) {
+    try {
+        const r = await fetch(`/api/regularization/${id}/reject`, { method: 'POST' });
+        const d = await r.json();
+        showToast(r.ok ? 'Rejected' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+        if (r.ok) loadPendingRegApprovals();
+    } catch (e) { showToast('Network error', 'error'); }
+}
+
 async function approveReq(id) {
     try {
         const r = await fetch(`/api/regularization/${id}/approve`, { method: 'POST' });
@@ -331,6 +348,5 @@ function showToast(msg, type) {
     setTimeout(() => { const el = document.getElementById(id); if (el) el.remove(); }, 3000);
 }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>

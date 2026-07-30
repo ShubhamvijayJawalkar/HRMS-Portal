@@ -1,0 +1,90 @@
+{% include "_base_start.html" %}
+    <title>HRMS - Payroll Rates</title>
+    <style>
+        {% include "_shared_css.html" %}
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
+        .card-header i { margin-right: 8px; color: #94A3B8; }
+        .card-body { padding: 16px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .edit-row { background: #FFFBEB; }
+        .badge-rate-type { background: #E0F2FE; color: #0369A1; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; }
+    </style>
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <h2 class="page-title"><i class="bi bi-sliders me-2"></i>Payroll Rates</h2>
+    <p class="text-muted" style="margin-top:-14px;margin-bottom:20px;">Configure tax slabs, PF/ESI/PT rates. Changes apply to future payroll runs.</p>
+
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0"><i class="bi bi-list"></i>Rate Configuration</h5></div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead><tr><th>Label</th><th>Type</th><th>Value</th><th>Effective From</th><th>Effective To</th><th>Description</th><th></th></tr></thead>
+                    <tbody id="ratesTable"><tr><td colspan="7" class="text-center text-muted py-4">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', loadRates);
+
+async function loadRates() {
+    const r = await fetch('/api/payroll-rates');
+    const data = await r.json();
+    const tbody = document.getElementById('ratesTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-4">No rates configured</td></tr>'; return; }
+    tbody.innerHTML = data.map(r => `<tr id="row-${r.id}">
+        <td><strong>${esc(r.label)}</strong></td>
+        <td><span class="badge-rate-type">${esc(r.rate_type)}</span></td>
+        <td><span id="val-${r.id}">${r.value.toFixed(2)}</span></td>
+        <td>${r.effective_from ? r.effective_from.substring(0,10) : '-'}</td>
+        <td>${r.effective_to ? r.effective_to.substring(0,10) : '—'}</td>
+        <td><small class="text-muted">${esc(r.description)}</small></td>
+        <td><button class="btn btn-sm btn-outline-primary" onclick="editRate(${r.id})"><i class="bi bi-pencil"></i></button></td>
+    </tr>`).join('');
+}
+
+function editRate(id) {
+    const row = document.getElementById('row-' + id);
+    const valSpan = document.getElementById('val-' + id);
+    const currentVal = valSpan.textContent;
+    row.classList.add('edit-row');
+    valSpan.innerHTML = `<input id="edit-val-${id}" class="form-control form-control-sm d-inline-block" style="width:120px;" type="number" step="0.01" value="${currentVal}">`;
+    const actionCell = row.querySelector('td:last-child');
+    actionCell.innerHTML = `<button class="btn btn-sm btn-success me-1" onclick="saveRate(${id})"><i class="bi bi-check-lg"></i></button><button class="btn btn-sm btn-outline-secondary" onclick="cancelEdit(${id},'${currentVal}')"><i class="bi bi-x-lg"></i></button>`;
+}
+
+async function saveRate(id) {
+    const newVal = parseFloat(document.getElementById('edit-val-' + id).value);
+    if (isNaN(newVal)) return alert('Invalid value');
+    const r = await fetch('/api/payroll-rates', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id, value: newVal }) });
+    if (r.ok) { loadRates(); } else { const d = await r.json(); alert(d.error); }
+}
+
+function cancelEdit(id, oldVal) {
+    const row = document.getElementById('row-' + id);
+    row.classList.remove('edit-row');
+    document.getElementById('val-' + id).textContent = oldVal;
+    const actionCell = row.querySelector('td:last-child');
+    actionCell.innerHTML = `<button class="btn btn-sm btn-outline-primary" onclick="editRate(${id})"><i class="bi bi-pencil"></i></button>`;
+}
+
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+</script>
+</body>
+</html>

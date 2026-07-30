@@ -1,28 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - My Profile</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
@@ -30,21 +10,21 @@
         .navbar-nav .nav-link i { margin-right: 6px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
         .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-header i { margin-right: 8px; color: #94A3B8; }
         .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #2563EB 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
-        .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #BFDBFE; font-weight: 700; margin-bottom: 6px; }
+        .page-header { display: flex; justify-content: space-between; align-items: center; background: linear-gradient(135deg, var(--primary) 0%, #475569 100%); color: white; border-radius: 20px; padding: 20px 24px; margin-bottom: 20px; box-shadow: var(--shadow); }
+        .page-header .eyebrow { font-size: 11px; text-transform: uppercase; letter-spacing: 0.18em; color: #CBD5E1; font-weight: 700; margin-bottom: 6px; }
         .page-header .page-title { color: white; margin-bottom: 0; font-size: 24px; }
         .page-header-badge { background: rgba(255,255,255,0.16); border: 1px solid rgba(255,255,255,0.2); padding: 8px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
         .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #334155; }
         .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
         .table tbody tr:hover { background: #FAFBFC; }
@@ -122,11 +102,18 @@
                     </form>
                 </div>
             </div>
+            <div class="card mt-4">
+                <div class="card-header"><h5 class="mb-0">Notification Preferences</h5></div>
+                <div class="card-body">
+                    <p class="text-muted small">Choose how you want to receive notifications for each category.</p>
+                    <div id="notifPrefs"><p class="text-muted">Loading...</p></div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
 <script>
-document.addEventListener('DOMContentLoaded', () => { loadProfile(); loadDependents(); document.getElementById('profileForm').addEventListener('submit', updateProfile); document.getElementById('passwordForm').addEventListener('submit', changePassword); document.getElementById('dependentForm').addEventListener('submit', addDependent); });
+document.addEventListener('DOMContentLoaded', () => { loadProfile(); loadDependents(); loadNotifPrefs(); document.getElementById('profileForm').addEventListener('submit', updateProfile); document.getElementById('passwordForm').addEventListener('submit', changePassword); document.getElementById('dependentForm').addEventListener('submit', addDependent); });
 async function loadProfile() {
     const r = await fetch('/api/profile'); const d = await r.json();
     document.getElementById('profEmpId').value = d.emp_id; document.getElementById('profName').value = d.name;
@@ -175,8 +162,35 @@ async function addDependent(e) {
     if (r.ok) { document.getElementById('dependentForm').reset(); loadDependents(); }
 }
 async function deleteDep(id) { await fetch(`/api/dependents/${id}`, { method: 'DELETE' }); loadDependents(); }
+async function loadNotifPrefs() {
+    const r = await fetch('/api/notification-preferences');
+    const data = await r.json();
+    const c = document.getElementById('notifPrefs');
+    c.innerHTML = '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Category</th><th>In-App</th><th>Email</th></tr></thead><tbody>' + data.map(p => `<tr>
+        <td><strong>${esc(p.category)}</strong></td>
+        <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" ${p.in_app ? 'checked' : ''} onchange="toggleNotifPref('${esc(p.category)}','in_app',this.checked)"></div></td>
+        <td><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" ${p.email ? 'checked' : ''} onchange="toggleNotifPref('${esc(p.category)}','email',this.checked)"></div></td>
+    </tr>`).join('') + '</tbody></table></div>';
+}
+let notifPrefTimeout = null;
+async function toggleNotifPref(category, field, value) {
+    if (notifPrefTimeout) clearTimeout(notifPrefTimeout);
+    notifPrefTimeout = setTimeout(async () => {
+        const table = document.getElementById('notifPrefs');
+        const inputs = table.querySelectorAll('input[type="checkbox"]');
+        const cats = ['Onboarding', 'Leaves', 'Expenses', 'Tickets', 'Payroll'];
+        const idx = cats.indexOf(category);
+        const prefs = cats.map((c, i) => ({
+            category: c,
+            in_app: inputs[i * 2]?.checked ? 1 : 0,
+            email: inputs[i * 2 + 1]?.checked ? 1 : 0
+        }));
+        const r = await fetch('/api/notification-preferences', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(prefs) });
+        if (!r.ok) loadNotifPrefs();
+    }, 300);
+}
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>

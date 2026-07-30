@@ -8,65 +8,37 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
     <style>
-        :root {
-            --primary: #0F172A;
-            --primary-light: #1E293B;
-            --secondary: #334155;
-            --accent: #0369A1;
-            --accent-light: #E0F2FE;
-            --background: #F8FAFC;
-            --surface: #FFFFFF;
-            --text: #020617;
-            --text-muted: #64748B;
-            --muted: #E8ECF1;
-            --border: #E2E8F0;
-            --destructive: #DC2626;
-            --success: #22C55E;
-            --success-light: #F0FDF4;
-            --warning: #EAB308;
-            --warning-light: #FEFCE8;
-            --info: #0369A1;
-            --card-radius: 14px;
-            --button-radius: 8px;
-            --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06);
-            --shadow-lg: 0 10px 40px rgba(15,23,42,0.15);
-            --transition-fast: 150ms ease;
-            --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: linear-gradient(135deg, #0F172A 0%, #1E293B 50%, #0F172A 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+        {% include "_shared_css.html" %}
+        body { background: linear-gradient(135deg, #0F172A 0%, #334155 50%, #0F172A 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
         .login-container { width: 100%; max-width: 520px; }
         .brand { text-align: center; margin-bottom: 28px; }
         .brand-icon { width: 56px; height: 56px; background: rgba(255,255,255,0.12); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 16px; backdrop-filter: blur(8px); }
-        .brand-icon i { font-size: 28px; color: #60A5FA; }
+        .brand-icon i { font-size: 28px; color: #94A3B8; }
         .brand h1 { color: #FFFFFF; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; margin: 0; }
         .brand p { color: #94A3B8; font-size: 14px; margin: 4px 0 0; }
-        .card { background: rgba(255,255,255,0.98); border-radius: var(--card-radius); box-shadow: var(--shadow-lg); padding: 36px; border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(20px); }
+        .card { background: rgba(255,255,255,0.98); border-radius: var(--card-radius); box-shadow: 0 10px 40px rgba(15,23,42,0.15); padding: 36px; border: 1px solid rgba(255,255,255,0.1); backdrop-filter: blur(20px); }
         .card h2 { color: var(--text); font-weight: 800; font-size: 20px; text-align: center; margin-bottom: 4px; letter-spacing: -0.3px; }
         .card .subtitle { color: var(--text-muted); font-size: 14px; text-align: center; margin-bottom: 24px; }
         .form-label { font-weight: 600; color: var(--text); margin-bottom: 6px; font-size: 13px; }
-        .form-control { border: 1.5px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 14px; background: var(--background); transition: all 0.2s; }
-        .form-control:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control { border: 1.5px solid var(--border); border-radius: 10px; padding: 12px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .form-control::placeholder { color: #94A3B8; font-size: 13px; }
         .input-group-text { background: var(--background); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text-muted); }
-        .btn-login { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: var(--button-radius); font-weight: 700; font-size: 15px; cursor: pointer; transition: all 0.25s; letter-spacing: 0.3px; }
-        .btn-login:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(15,23,42,0.25); }
+        .btn-login { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: var(--button-radius); font-weight: 700; font-size: 15px; cursor: pointer; letter-spacing: 0.3px; }
+        .btn-login:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(71,85,105,0.25); }
         .btn-login:active { transform: translateY(0); }
         .btn-login:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-        .forgot-link { color: var(--accent); font-size: 13px; font-weight: 500; text-decoration: none; transition: color 0.2s; }
-        .forgot-link:hover { color: #075985; text-decoration: underline; }
+        .forgot-link { color: var(--primary); font-size: 13px; font-weight: 500; text-decoration: none; }
+        .forgot-link:hover { color: #334155; text-decoration: underline; }
         hr { margin: 24px 0; border-color: var(--border); opacity: 0.6; }
-        .error-message { color: var(--destructive); font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #FEF2F2; padding: 8px 12px; border-radius: 8px; }
-        .success-message { color: #166534; font-size: 13px; margin-top: 10px; text-align: center; display: none; background: #F0FDF4; padding: 8px 12px; border-radius: 8px; }
+        .error-message { color: var(--destructive); font-size: 13px; margin-top: 10px; text-align: center; display: none; background: var(--destructive-light); padding: 8px 12px; border-radius: 8px; }
+        .success-message { color: #065F46; font-size: 13px; margin-top: 10px; text-align: center; display: none; background: var(--success-light); padding: 8px 12px; border-radius: 8px; }
         .role-badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
-        .role-badge.admin { background: #F1F5F9; color: var(--primary); }
-        .role-badge.employee { background: #EFF6FF; color: var(--accent); }
+        .role-badge.admin { background: var(--muted); color: var(--primary); }
+        .role-badge.employee { background: var(--primary-light); color: var(--primary); }
         .pulse { animation: pulse 2s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
     </style>
@@ -149,6 +121,6 @@ async function showForgotPassword() {
 }
 
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>

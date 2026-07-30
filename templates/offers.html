@@ -1,0 +1,140 @@
+{% include "_base_start.html" %}
+    <title>HRMS - Offers</title>
+    <style>
+        {% include "_shared_css.html" %}
+        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
+        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
+        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
+        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
+        .navbar-nav .nav-link i { margin-right: 6px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
+        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
+        .card-header i { margin-right: 8px; color: #94A3B8; }
+        .card-body { padding: 16px; }
+        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
+        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #334155; }
+        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
+        .table tbody tr:hover { background: #FAFBFC; }
+        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
+        .status-Pending { background: #FEFCE8; color: #92400E; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Accepted { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Rejected { background: #FEF2F2; color: #991B1B; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Offered { background: #E0F2FE; color: #0369A1; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+</head>
+<body>
+{% include "_navbar.html" %}
+
+<div class="container-fluid p-4">
+    <h2 class="page-title">Offer Management</h2>
+
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0"><i class="bi bi-send"></i>Generate Offer</h5></div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-3"><label class="form-label">Candidate</label><select id="candidateSelect" class="form-select"></select></div>
+                <div class="col-md-2"><label class="form-label">Offered Salary</label><input id="offeredSalary" class="form-control" type="number" step="0.01"></div>
+                <div class="col-md-2"><label class="form-label">Joining Date</label><input id="joiningDate" class="form-control" type="date"></div>
+                <div class="col-md-3"><label class="form-label">Notes</label><input id="offerNotes" class="form-control"></div>
+                <div class="col-md-2"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="sendOffer()"><i class="bi bi-send me-1"></i>Send Offer</button></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Offers</h5></div>
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover">
+                    <thead><tr><th>Candidate</th><th>Email</th><th>Salary</th><th>Offer Date</th><th>Status</th><th>Actions</th></tr></thead>
+                    <tbody id="offersTable"><tr><td colspan="6" class="text-center text-muted">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const r = await fetch('/api/candidates');
+    const candidates = await r.json();
+    const sel = document.getElementById('candidateSelect');
+    const offered = candidates.filter(c => c.status === 'Offered');
+    if (!offered.length) {
+        sel.innerHTML = '<option value="">No candidates with Offered status</option>';
+    } else {
+        sel.innerHTML = offered.map(c => `<option value="${c.id}">${esc(c.name)} (${c.email})</option>`).join('');
+    }
+    loadOffers();
+});
+
+async function loadOffers() {
+    const r = await fetch('/api/offers');
+    const data = await r.json();
+    const tbody = document.getElementById('offersTable');
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No offers yet</td></tr>'; return; }
+    tbody.innerHTML = data.map(o => `<tr>
+        <td><strong>${esc(o.candidate_name)}</strong></td>
+        <td>${esc(o.email)}</td>
+        <td>&#8377;${Number(o.salary).toLocaleString('en-IN')}</td>
+        <td>${o.offer_date ? new Date(o.offer_date).toLocaleDateString() : '-'}</td>
+        <td><span class="status-${o.status}">${o.status}</span></td>
+        <td>
+            ${o.status === 'Pending' ? `<button class="btn btn-success btn-sm me-1" onclick="acceptOffer(${o.id})"><i class="bi bi-check-lg"></i></button><button class="btn btn-danger btn-sm" onclick="rejectOffer(${o.id})"><i class="bi bi-x-lg"></i></button>` : o.status === 'Accepted' ? '<span class="text-success fw-bold"><i class="bi bi-check-circle"></i> Accepted</span>' : o.status === 'Rejected' ? '<span class="text-danger fw-bold"><i class="bi bi-x-circle"></i> Rejected</span>' : '-'}
+        </td>
+    </tr>`).join('');
+}
+
+async function sendOffer() {
+    const candidateId = document.getElementById('candidateSelect').value;
+    const salary = document.getElementById('offeredSalary').value;
+    const joiningDate = document.getElementById('joiningDate').value;
+    const notes = document.getElementById('offerNotes').value;
+    if (!candidateId || !salary) return showToast('Candidate and salary required', 'error');
+    const r = await fetch('/api/offers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidate_id: parseInt(candidateId), offered_salary: parseFloat(salary), notes }) });
+    const d = await r.json();
+    showToast(r.ok ? 'Offer sent!' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) { document.getElementById('offeredSalary').value = ''; document.getElementById('offerNotes').value = ''; loadOffers(); }
+}
+
+async function acceptOffer(id) {
+    if (!confirm('Accept this offer?')) return;
+    const r = await fetch('/api/offers/' + id + '/accept', { method: 'POST' });
+    const d = await r.json();
+    showToast(r.ok ? 'Offer accepted' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) loadOffers();
+}
+
+async function rejectOffer(id) {
+    if (!confirm('Reject this offer?')) return;
+    const r = await fetch('/api/offers/' + id + '/reject', { method: 'POST' });
+    const d = await r.json();
+    showToast(r.ok ? 'Offer rejected' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) loadOffers();
+}
+
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+
+function showToast(msg, type) {
+    const c = document.getElementById('toastContainer'); const id = 'toast_' + Date.now();
+    const bg = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-info';
+    c.insertAdjacentHTML('beforeend', `<div id="${id}" class="toast align-items-center text-white ${bg} border-0 show" role="alert"><div class="d-flex"><div class="toast-body">${esc(msg)}</div><button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>`);
+    setTimeout(() => { const el = document.getElementById(id); if (el) el.remove(); }, 3000);
+}
+</script>
+</body>
+</html>
