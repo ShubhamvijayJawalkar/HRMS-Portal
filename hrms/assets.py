@@ -1,9 +1,10 @@
 import logging
-from flask import Blueprint, render_template, request, jsonify, session
+
+from flask import Blueprint, jsonify, render_template, request, session
 
 from .db import get_db
-from .helpers import now_ist, gen_id, parse_date
 from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import gen_id, now_ist, parse_date
 
 logger = logging.getLogger('hrms')
 
@@ -23,7 +24,7 @@ def my_assets():
     conn = get_db()
     rows = conn.execute("SELECT asset_id, asset_type, asset_tag, brand, model, serial_number, issued_date, return_date, status, notes FROM assets WHERE emp_id = ? ORDER BY issued_date DESC", [session['emp_id']]).fetchall()
     conn.close()
-    return jsonify([{'id': r[0], 'type': r[1], 'tag': r[2], 'brand': r[3], 'model': r[4], 'serial': r[5], 'issued': r[6].isoformat() + '+05:30' if r[6] else None, 'returned': r[7].isoformat() + '+05:30' if r[7] else None, 'status': r[8], 'notes': r[9]} for r in rows]), 200
+    return jsonify([{'id': r[0], 'type': r[1], 'tag': r[2], 'brand': r[3], 'model': r[4], 'serial': r[5], 'issued': r[6].isoformat() if r[6] else None, 'returned': r[7].isoformat() if r[7] else None, 'status': r[8], 'notes': r[9]} for r in rows]), 200
 
 
 @assets_bp.route('/api/v1/assets', methods=['GET', 'POST'])
@@ -38,7 +39,7 @@ def assets_api():
         else:
             rows = conn.execute("SELECT a.asset_id, a.emp_id, u.name, a.asset_type, a.asset_tag, a.brand, a.model, a.serial_number, a.issued_date, a.return_date, a.status, a.notes FROM assets a JOIN users u ON a.emp_id = u.emp_id ORDER BY a.issued_date DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'type': r[3], 'tag': r[4], 'brand': r[5], 'model': r[6], 'serial': r[7], 'issued': r[8].isoformat() + '+05:30' if r[8] else None, 'returned': r[9].isoformat() + '+05:30' if r[9] else None, 'status': r[10], 'notes': r[11]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'type': r[3], 'tag': r[4], 'brand': r[5], 'model': r[6], 'serial': r[7], 'issued': r[8].isoformat() if r[8] else None, 'returned': r[9].isoformat() if r[9] else None, 'status': r[10], 'notes': r[11]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('asset_type'):
         return jsonify({'error': 'emp_id and asset_type required'}), 400

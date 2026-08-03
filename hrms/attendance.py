@@ -1,11 +1,23 @@
 import logging
 from datetime import datetime, timedelta
 from io import BytesIO
+
 import pandas as pd
-from flask import Blueprint, render_template, request, jsonify, session, send_file
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, parse_date, _is_admin, _get_shift_start_dt, _get_shift_end_dt, _get_shift_date_for_dt, add_notification, audit_log
-from .decorators import login_required, admin_required
+from flask import Blueprint, jsonify, render_template, request, send_file, session
+
+from .db import _scalar, get_db
+from .decorators import admin_required, login_required
+from .helpers import (
+    _get_shift_date_for_dt,
+    _get_shift_end_dt,
+    _get_shift_start_dt,
+    _is_admin,
+    add_notification,
+    audit_log,
+    gen_id,
+    now_ist,
+    parse_date,
+)
 
 logger = logging.getLogger('hrms')
 attendance_bp = Blueprint('attendance', __name__)
@@ -91,7 +103,7 @@ def break_approvals_api():
         else:
             rows = conn.execute("SELECT a.approval_id, a.emp_id, u.name, a.break_type, a.break_date, a.reason, a.status, a.approved_by, a.created_at FROM break_approvals a JOIN users u ON a.emp_id = u.emp_id WHERE a.emp_id = ? ORDER BY a.created_at DESC", [emp_id]).fetchall()
         conn.close()
-        return jsonify([{'approval_id': r[0], 'emp_id': r[1], 'emp_name': r[2], 'break_type': r[3], 'break_date': r[4].isoformat() + '+05:30', 'reason': r[5], 'status': r[6], 'approved_by': r[7], 'created_at': r[8].isoformat() + '+05:30' if r[8] else None} for r in rows]), 200
+        return jsonify([{'approval_id': r[0], 'emp_id': r[1], 'emp_name': r[2], 'break_type': r[3], 'break_date': r[4].isoformat(), 'reason': r[5], 'status': r[6], 'approved_by': r[7], 'created_at': r[8].isoformat() + '+05:30' if r[8] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     bt = data.get('break_type')
     if bt != 'Lunch':
@@ -164,9 +176,27 @@ def reject_break(aid):
 @login_required
 def get_break_types():
     conn = get_db()
+    emp_id = session['emp_id']
     types = conn.execute("SELECT break_type, daily_limit_minutes, description FROM break_types").fetchall()
+    shift_start_dt = _get_shift_start_dt(emp_id, conn)
+    shift_date = _get_shift_date_for_dt(emp_id, now_ist(), conn)
+    result = []
+    for t in types:
+        used = _scalar(
+            "SELECT COALESCE(SUM(duration_minutes), 0) FROM breaks WHERE emp_id = ? AND break_type = ? AND start_time >= ? AND status = 'Completed'",
+            [emp_id, t[0], shift_start_dt], conn)
+        requires_approval = (t[0] == 'Lunch')
+        approval_status = None
+        if requires_approval:
+            row = conn.execute(
+                "SELECT status FROM break_approvals WHERE emp_id = ? AND break_type = ? AND break_date = ? ORDER BY created_at DESC LIMIT 1",
+                [emp_id, t[0], shift_date]).fetchone()
+            approval_status = row[0] if row else None
+        result.append({'break_type': t[0], 'daily_limit_minutes': t[1], 'description': t[2],
+                       'used_minutes': int(used or 0), 'requires_approval': requires_approval,
+                       'approval_status': approval_status})
     conn.close()
-    return jsonify([{'break_type': t[0], 'daily_limit_minutes': t[1], 'description': t[2]} for t in types]), 200
+    return jsonify(result), 200
 
 @attendance_bp.route('/api/login-hours')
 @login_required
@@ -174,30 +204,34 @@ def get_login_hours():
     emp_id = session['emp_id']
     conn = get_db()
     date_str = request.args.get('date', '')
+    current_shift_date = _get_shift_start_dt(emp_id, conn).date()
     if date_str:
         try:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            target_date = now_ist().date()
+            target_date = current_shift_date
     else:
-        target_date = now_ist().date()
+        target_date = current_shift_date
     sessions = conn.execute("SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC", [emp_id, target_date]).fetchall()
     conn.close()
-    return jsonify([{'login_time': s[0].strftime('%H:%M:%S') if s[0] else 'N/A', 'logout_time': s[1].strftime('%H:%M:%S') if s[1] else 'Active', 'total_hours': float(s[2]) if s[2] else 0, 'session_date': s[3].isoformat() + '+05:30' if s[3] else None} for s in sessions]), 200
+    return jsonify([{'login_time': s[0].strftime('%H:%M:%S') if s[0] else 'N/A', 'logout_time': s[1].strftime('%H:%M:%S') if s[1] else 'Active', 'total_hours': float(s[2]) if s[2] else 0, 'session_date': s[3].isoformat() if s[3] else None} for s in sessions]), 200
 
 @attendance_bp.route('/api/user/shift-summary')
 @login_required
 def get_shift_summary():
-    emp_id = session['emp_id']
+    return jsonify(_compute_shift_summary(session['emp_id'], request.args.get('date', '')))
+
+
+def _compute_shift_summary(emp_id, date_str=''):
     conn = get_db()
-    date_str = request.args.get('date', '')
+    current_shift_date = _get_shift_start_dt(emp_id, conn).date()
     if date_str:
         try:
             target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
         except ValueError:
-            target_date = now_ist().date()
+            target_date = current_shift_date
     else:
-        target_date = now_ist().date()
+        target_date = current_shift_date
     shift_start_dt = _get_shift_start_dt(emp_id, conn, target_date)
     shift_end_dt = _get_shift_end_dt(emp_id, shift_start_dt, conn)
     sessions = conn.execute("SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC", [emp_id, target_date]).fetchall()
@@ -219,7 +253,7 @@ def get_shift_summary():
         shift_hours = round((now_ist() - first_login).total_seconds() / 3600, 2)
     productive_hours = max(0, shift_hours - total_break_minutes / 60)
     efficiency = round((productive_hours / shift_hours) * 100, 1) if shift_hours > 0 else 0
-    return jsonify({'date': target_date.isoformat() + '+05:30', 'shift_start': shift_start_dt.strftime('%H:%M'), 'shift_end': shift_end_dt.strftime('%H:%M'), 'first_login': first_login.strftime('%H:%M:%S') if first_login else None, 'last_logout': last_logout.strftime('%H:%M:%S') if last_logout else None, 'shift_hours': shift_hours, 'total_session_hours': total_session_hours, 'total_break_minutes': total_break_minutes, 'productive_hours': round(productive_hours, 2), 'efficiency': efficiency, 'session_count': session_count, 'break_count': len(breaks)}), 200
+    return {'date': target_date.isoformat(), 'shift_start': shift_start_dt.strftime('%H:%M'), 'shift_end': shift_end_dt.strftime('%H:%M'), 'first_login': first_login.strftime('%H:%M:%S') if first_login else None, 'last_logout': last_logout.strftime('%H:%M:%S') if last_logout else None, 'shift_hours': shift_hours, 'total_session_hours': total_session_hours, 'total_break_minutes': total_break_minutes, 'productive_hours': round(productive_hours, 2), 'efficiency': efficiency, 'session_count': session_count, 'break_count': len(breaks)}
 
 @attendance_bp.route('/api/user/calendar')
 @login_required
@@ -241,27 +275,36 @@ def get_user_calendar():
     conn.close()
     sess_map = {}
     for s in sessions:
-        d = s[0].isoformat() + '+05:30' if s[0] else None
-        if not d: continue
-        if d not in sess_map: sess_map[d] = []
+        d = s[0].isoformat() if s[0] else None
+        if not d:
+            continue
+        if d not in sess_map:
+            sess_map[d] = []
         sess_map[d].append({'login': s[1].strftime('%H:%M') if s[1] else None, 'logout': s[2].strftime('%H:%M') if s[2] else 'Active', 'hours': float(s[3]) if s[3] else 0})
     brk_map = {}
     for b in breaks:
-        d = b[0].isoformat() + '+05:30' if b[0] else None
-        if not d: continue
-        if d not in brk_map: brk_map[d] = []
+        d = b[0].isoformat() if b[0] else None
+        if not d:
+            continue
+        if d not in brk_map:
+            brk_map[d] = []
         brk_map[d].append({'type': b[1], 'start': b[2].strftime('%H:%M') if b[2] else None, 'end': b[3].strftime('%H:%M') if b[3] else None, 'minutes': int(b[4]) if b[4] else 0, 'status': b[5]})
     leave_map = {}
-    for l in leaves:
-        ld_start, ld_end, leave_type, leave_status = l[0], l[1], l[2], l[3]
+    for leave in leaves:
+        ld_start, ld_end = leave[0], leave[1]
+        if isinstance(ld_start, datetime):
+            ld_start = ld_start.date()
+        if isinstance(ld_end, datetime):
+            ld_end = ld_end.date()
         current = ld_start
         while current <= ld_end:
-            leave_map[current.isoformat() + '+05:30'] = {'type': leave_type, 'status': leave_status}
+            leave_map[current.isoformat()] = {'type': leave[2], 'status': leave[3]}
             current += timedelta(days=1)
     holiday_map = {}
     for h in holidays:
-        d = h[0].isoformat() + '+05:30' if h[0] else None
-        if d: holiday_map[d] = h[1]
+        d = h[0].isoformat() if h[0] else None
+        if d:
+            holiday_map[d] = h[1]
     shift_start = user_row[0] if user_row and user_row[0] else None
     shift_end = user_row[1] if user_row and user_row[1] else None
     return jsonify({'sessions': sess_map, 'breaks': brk_map, 'leaves': leave_map, 'holidays': holiday_map, 'shift_start': shift_start, 'shift_end': shift_end, 'month': month, 'year': year}), 200
@@ -306,18 +349,30 @@ def get_disposed_breaks():
 @attendance_bp.route('/api/dashboard-stats')
 @admin_required
 def get_dashboard_stats():
+    return jsonify(_compute_dashboard_stats())
+
+
+def _compute_dashboard_stats():
     conn = get_db()
-    now = now_ist()
     total = _scalar("SELECT COUNT(*) FROM users WHERE role = 'Employee'")
     all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
-    shift_starts = [_get_shift_start_dt(eid, conn) for (eid,) in all_employees]
-    shift_date = min(shift_starts).date() if shift_starts else now.date()
-    logged_in_today = _scalar("SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE session_date = ?", [shift_date])
-    on_break = _scalar("SELECT COUNT(DISTINCT emp_id) FROM breaks WHERE status = 'Active' AND break_date = ?", [shift_date])
-    blocked = _scalar("SELECT COUNT(*) FROM users WHERE status = 'Blocked'")
-    pending_leaves = _scalar("SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'")
+    by_shift_date = {}
+    for (eid,) in all_employees:
+        sdt = _get_shift_start_dt(eid, conn).date()
+        by_shift_date.setdefault(sdt, []).append(eid)
+    logged_in_today = 0
+    on_break = 0
+    for sdate, eids in by_shift_date.items():
+        if not eids:
+            continue
+        placeholders = ','.join('?' * len(eids))
+        params = [sdate] + eids
+        logged_in_today += _scalar(f"SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE session_date = ? AND emp_id IN ({placeholders})", params, conn)
+        on_break += _scalar(f"SELECT COUNT(DISTINCT emp_id) FROM breaks WHERE status = 'Active' AND break_date = ? AND emp_id IN ({placeholders})", params, conn)
+    blocked = _scalar("SELECT COUNT(*) FROM users WHERE status = 'Blocked'", conn=conn)
+    pending_leaves = _scalar("SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'", conn=conn)
     conn.close()
-    return jsonify({'total_employees': total, 'logged_in_today': logged_in_today, 'on_break': on_break, 'blocked_users': blocked, 'pending_leaves': pending_leaves}), 200
+    return {'total_employees': total, 'logged_in_today': logged_in_today, 'on_break': on_break, 'blocked_users': blocked, 'pending_leaves': pending_leaves}
 
 @attendance_bp.route('/api/admin/breaks')
 @admin_required

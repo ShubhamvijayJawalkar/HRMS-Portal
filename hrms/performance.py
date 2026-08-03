@@ -1,7 +1,8 @@
-from flask import Blueprint, render_template, request, jsonify, session
+from flask import Blueprint, jsonify, render_template, request, session
+
 from .db import get_db
-from .helpers import now_ist, gen_id, parse_date, _is_admin
-from .decorators import login_required, admin_required, hr_or_admin_required
+from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import _is_admin, gen_id, now_ist, parse_date
 
 performance_bp = Blueprint('performance', __name__)
 
@@ -37,7 +38,7 @@ def goals_api():
         else:
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id WHERE g.emp_id = ? ORDER BY g.created_at DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'title': r[3], 'description': r[4], 'target_date': r[5].isoformat() + '+05:30' if r[5] else None, 'weight': r[6], 'rating': r[7], 'status': r[8], 'created_at': r[9].isoformat() + '+05:30' if r[9] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'title': r[3], 'description': r[4], 'target_date': r[5].isoformat() if r[5] else None, 'weight': r[6], 'rating': r[7], 'status': r[8], 'created_at': r[9].isoformat() + '+05:30' if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('title'):
         return jsonify({'error': 'title required'}), 400

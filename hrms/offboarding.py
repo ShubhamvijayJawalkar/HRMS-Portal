@@ -1,8 +1,8 @@
-from datetime import timedelta
-from flask import Blueprint, render_template, request, jsonify, session
+from flask import Blueprint, jsonify, render_template, request, session
+
 from .db import get_db
-from .helpers import now_ist, gen_id, parse_date, _is_admin, add_notification, notify_admins, audit_log
-from .decorators import login_required, admin_required
+from .decorators import admin_required, login_required
+from .helpers import _is_admin, add_notification, audit_log, gen_id, notify_admins, now_ist, parse_date
 
 offboarding_bp = Blueprint('offboarding', __name__)
 
@@ -26,7 +26,7 @@ def offboarding_api():
         else:
             rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() + '+05:30' if r[6] else None, 'completed_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() if r[6] else None, 'completed_at': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
@@ -57,7 +57,7 @@ def exit_interviews_api():
         conn = get_db()
         rows = conn.execute("SELECT ei.interview_id, ei.emp_id, u.name, ei.reason, ei.feedback, ei.exit_date, ei.created_at FROM exit_interviews ei JOIN users u ON ei.emp_id = u.emp_id ORDER BY ei.created_at DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4], 'exit_date': r[5].isoformat() + '+05:30' if r[5] else None, 'created_at': r[6].isoformat() + '+05:30' if r[6] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4], 'exit_date': r[5].isoformat() if r[5] else None, 'created_at': r[6].isoformat() + '+05:30' if r[6] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('reason') or not data.get('exit_date'):
         return jsonify({'error': 'emp_id, reason, exit_date required'}), 400
@@ -152,7 +152,7 @@ def offboarding_proceed():
     if step_num > 1:
         if not wf[step_num - 1]:
             conn.close()
-            return jsonify({'error': f'Previous step must be completed first'}), 400
+            return jsonify({'error': 'Previous step must be completed first'}), 400
     conn.execute(f"UPDATE offboarding_workflow SET {col} = 1, updated_at = ? WHERE emp_id = ?", [now, emp_id])
     step_labels = ['Resignation/Termination Recorded', 'Manager Clearance', 'Asset Return', 'Final Settlement', 'Exit Interview & Access Revocation']
     add_notification(emp_id, 'offboarding', f'Offboarding step "{step_labels[step_num - 1]}" completed by admin.', '/offboarding')

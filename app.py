@@ -1,8 +1,15 @@
 import os
 
 from hrms import create_app
-from hrms.db import get_db
-from hrms.helpers import hash_password, gen_id, now_ist, audit_log, get_user, _is_admin
+from hrms.db import get_db  # noqa: F401 - re-export for tests (from app import get_db)
+from hrms.helpers import (  # noqa: F401 - re-exports for tests
+    _is_admin,
+    audit_log,
+    gen_id,
+    get_user,
+    hash_password,
+    now_ist,
+)
 
 app = create_app()
 

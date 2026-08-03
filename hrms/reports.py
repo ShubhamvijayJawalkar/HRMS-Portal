@@ -2,11 +2,11 @@ import logging
 from io import BytesIO
 
 import pandas as pd
-from flask import Blueprint, render_template, request, jsonify, send_file
+from flask import Blueprint, jsonify, render_template, request, send_file
 
-from .db import get_db, _scalar
-from .helpers import now_ist, parse_date
+from .db import get_db
 from .decorators import admin_required, hr_or_admin_required
+from .helpers import now_ist, parse_date
 
 logger = logging.getLogger('hrms')
 
@@ -109,10 +109,10 @@ def export_report():
 @reports_bp.route('/api/reports/pdf')
 @admin_required
 def export_report_pdf():
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     start_date = parse_date(request.args.get('start_date'), now_ist().date())
     end_date = parse_date(request.args.get('end_date'), start_date)
@@ -261,7 +261,7 @@ def get_reports():
         'break_type': r[4], 'start_time': r[5].strftime('%H:%M:%S') if r[5] else 'N/A',
         'end_time': r[6].strftime('%H:%M:%S') if r[6] else 'Ongoing',
         'duration_minutes': int(r[7]) if r[7] else 0,
-        'break_date': r[8].isoformat() + '+05:30' if r[8] else 'N/A', 'status': r[9]
+        'break_date': r[8].isoformat() if r[8] else 'N/A', 'status': r[9]
     } for r in break_details]
 
     session_list = [{
@@ -269,11 +269,11 @@ def get_reports():
         'login_time': r[4].strftime('%H:%M:%S') if r[4] else 'N/A',
         'logout_time': r[5].strftime('%H:%M:%S') if r[5] else 'Active',
         'total_hours': float(r[6]) if r[6] else 0,
-        'session_date': r[7].isoformat() + '+05:30' if r[7] else 'N/A'
+        'session_date': r[7].isoformat() if r[7] else 'N/A'
     } for r in session_details]
 
     return jsonify({
-        'report_range': {'start_date': start_date.isoformat() + '+05:30', 'end_date': end_date.isoformat() + '+05:30'},
+        'report_range': {'start_date': start_date.isoformat(), 'end_date': end_date.isoformat()},
         'departments': departments,
         'employees': [{'emp_id': e[0], 'name': e[1]} for e in employees],
         'summary': summary_list, 'break_details': break_list, 'session_details': session_list

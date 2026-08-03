@@ -23,6 +23,17 @@
         .module-card:hover .module-icon { transform: scale(1.1); }
         .module-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
         .module-desc { font-size: 10px; color: var(--text-muted); line-height: 1.3; }
+        .notification-item { border-left: 3px solid var(--primary); padding: 8px 10px; margin-bottom: 5px; background: var(--muted); border-radius: 8px; transition: background var(--transition-fast); font-size: 12px; }
+        .notification-item:hover { background: #F1F5F9; }
+        .notifications-card .card-header-custom { padding: 6px 12px; font-size: 12px; }
+        .notifications-card .card-body { padding: 8px 10px; }
+        .notifications-card .notification-item { padding: 5px 8px; margin-bottom: 4px; font-size: 11px; }
+        .notifications-card .notification-item:last-child { margin-bottom: 0; }
+        .status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+        .status-chip.approved { background: #F0FDF4; color: #166534; }
+        .status-chip.pending { background: #FEF3C7; color: #92400E; }
+        .status-chip.rejected { background: #FEF2F2; color: #991B1B; }
+        .status-chip.none { background: var(--muted); color: var(--text-muted); }
         .card-header-custom { background: var(--primary); color: white; padding: 10px 14px; border-radius: 8px 8px 0 0; font-weight: 700; font-size: 13px; }
         .card-header-custom i { margin-right: 6px; color: #CBD5E1; font-size: 13px; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
@@ -80,10 +91,10 @@
 <div class="container-fluid px-4 py-3">
     <!-- Stats -->
     <div class="row g-2 mb-3">
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F1F5F9;color:var(--accent);"><i class="bi bi-people-fill"></i></div><div class="stat-value" id="totalEmployees">-</div><div class="stat-label"><span class="live-dot green"></span>Total Employees</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="loggedInToday">-</div><div class="stat-label"><span class="live-dot green pulse"></span>Logged In Today</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="onBreakCount">-</div><div class="stat-label"><span class="live-dot yellow"></span>On Break</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEF2F2;color:var(--destructive);"><i class="bi bi-shield-exclamation"></i></div><div class="stat-value" id="blockedCount">-</div><div class="stat-label"><span class="live-dot red"></span>Blocked</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F1F5F9;color:var(--accent);"><i class="bi bi-people-fill"></i></div><div class="stat-value" id="totalEmployees">{{ stats.total_employees if stats else '-' }}</div><div class="stat-label"><span class="live-dot green"></span>Total Employees</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="loggedInToday">{{ stats.logged_in_today if stats else '-' }}</div><div class="stat-label"><span class="live-dot green pulse"></span>Logged In Today</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="onBreakCount">{{ stats.on_break if stats else '-' }}</div><div class="stat-label"><span class="live-dot yellow"></span>On Break</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEF2F2;color:var(--destructive);"><i class="bi bi-shield-exclamation"></i></div><div class="stat-value" id="blockedCount">{{ stats.blocked_users if stats else '-' }}</div><div class="stat-label"><span class="live-dot red"></span>Blocked</div></div></div>
     </div>
 
     <!-- Tabs -->
@@ -97,13 +108,17 @@
         <!-- Modules + Calendar -->
         <div class="tab-pane fade show active" id="modules" role="tabpanel">
             <div class="row g-2">
-                <div class="col-lg-6 d-flex">
-                    <div class="row g-2 flex-grow-1 align-content-start">
+                <div class="col-lg-6 d-flex flex-column gap-2">
+                    <div class="row g-2 align-content-start">
                         <!-- 4 Main Modules -->
                         <div class="col-md-6"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
                         <div class="col-md-6"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday's</div><div class="module-desc">Company holidays & events</div></a></div>
                         <div class="col-md-6"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
                         <div class="col-md-6"><a href="/admin/reports" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-file-spreadsheet-fill"></i></div><div class="module-title">Reports</div><div class="module-desc">Export data & efficiency metrics</div></a></div>
+                    </div>
+                    <div class="card border-0 shadow-sm notifications-card">
+                        <div class="card-header-custom"><i class="bi bi-bell-fill"></i>Notifications</div>
+                        <div class="card-body"><div id="notificationsHome"><p class="text-muted mb-0">Loading...</p></div></div>
                     </div>
                 </div>
                 <!-- Calendar -->
@@ -152,18 +167,12 @@
 
         <!-- Productivity -->
         <div class="tab-pane fade" id="productivity" role="tabpanel">
-            <div class="row g-2 mb-3">
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Active Breaks</small><div class="stat-value" id="activeBreakCount" style="font-size:16px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Today's Disposed</small><div class="stat-value" id="disposedCount" style="font-size:16px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Avg Break Duration</small><div class="stat-value" id="avgDuration" style="font-size:16px;">0 min</div></div></div>
-            </div>
             <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm" style="background:var(--primary);color:white;" onclick="refreshData()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
-            <div class="row g-2">
-                <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody id="liveBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr></tbody></table></div></div></div></div>
-                <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-check-circle-fill"></i>Today's Disposed Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>End Time</th></tr></thead><tbody id="disposedBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No disposed breaks</td></tr></tbody></table></div></div></div></div>
+            <div class="row g-2 mb-2">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-patch-check-fill"></i>Break Approvals</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Date</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody id="breakApprovalsBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
             </div>
-            <div class="row g-2 mt-2">
-                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-bar-chart-fill"></i>Break Summary by Type</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Type</th><th>Total</th><th>Avg Duration</th><th>Max Duration</th><th>Employees</th></tr></thead><tbody id="breakSummaryBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
+            <div class="row g-2">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody id="liveBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr></tbody></table></div></div></div></div>
             </div>
         </div>
     </div>
@@ -176,7 +185,7 @@ let calMonth = new Date().getMonth() + 1, calYear = new Date().getFullYear(), ca
 
 document.addEventListener('DOMContentLoaded', () => {
     loadStats(); refreshData();
-    loadCalendar();
+    loadCalendar(); loadNotifications();
     document.getElementById('calPrev').addEventListener('click', () => { calMonth--; if (calMonth < 1) { calMonth = 12; calYear--; } loadCalendar(); });
     document.getElementById('calNext').addEventListener('click', () => { calMonth++; if (calMonth > 12) { calMonth = 1; calYear++; } loadCalendar(); });
     document.getElementById('calToday').addEventListener('click', () => { calMonth = new Date().getMonth() + 1; calYear = new Date().getFullYear(); loadCalendar(); });
@@ -185,7 +194,26 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelector('#reviews-tab')?.addEventListener('shown.bs.tab', loadReviewProgress);
     loadReviewProgress();
     setInterval(loadStats, 5000);
+    setInterval(loadNotifications, 30000);
 });
+
+async function loadNotifications() {
+    try {
+        const r = await fetch('/api/notifications');
+        const data = await r.json();
+        const b = document.getElementById('notifBadge');
+        if (b) {
+            if (data && data.unread > 0) { b.style.display = 'flex'; b.textContent = data.unread > 9 ? '9+' : data.unread; } else { b.style.display = 'none'; }
+        }
+        const c = document.getElementById('notificationsHome');
+        if (!c) return;
+        const items = (data && data.data) ? data.data.slice(0, 3) : [];
+        if (!items.length) { c.innerHTML = '<p class="text-muted mb-0">No notifications</p>'; return; }
+        c.innerHTML = items.map(n => `<div class="notification-item ${n.is_read ? '' : 'fw-bold'}" style="${n.is_read ? '' : 'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');
+        if (data.unread > 0) fetch('/api/notifications/read', { method: 'POST' });
+    } catch (e) {}
+}
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
 
 async function loadStats() {
     try {
@@ -203,23 +231,38 @@ async function refreshData() {
         const r = await fetch('/api/admin/breaks');
         const d = await r.json();
         const active = d.active_breaks || [];
-        const disposed = d.disposed_breaks || [];
-        const summary = d.break_summary || [];
-        document.getElementById('activeBreakCount').textContent = active.length;
-        document.getElementById('disposedCount').textContent = disposed.length;
-        const avg = summary.reduce((s,b) => s + b.avg_duration, 0) / (summary.length || 1);
-        document.getElementById('avgDuration').textContent = Math.round(avg) + ' min';
         const ab = document.getElementById('liveBreaksBody');
         if (!active.length) ab.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr>';
         else ab.innerHTML = active.map(b => `<tr><td><strong>${b.emp_name}</strong></td><td><span class="badge bg-soft-warning">${b.break_type}</span></td><td>${b.duration || '...'} min</td><td><button class="btn btn-sm" style="background:#DC2626;color:white;" onclick="disposeBreak(${b.break_id})"><i class="bi bi-stop-circle me-1"></i>End</button></td></tr>`).join('');
-        const db = document.getElementById('disposedBreaksBody');
-        if (!disposed.length) db.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No disposed breaks</td></tr>';
-        else db.innerHTML = disposed.map(b => `<tr><td><strong>${b.emp_name}</strong></td><td><span class="badge bg-soft-success">${b.break_type}</span></td><td>${b.duration} min</td><td>${b.end_time}</td></tr>`).join('');
-        const sb = document.getElementById('breakSummaryBody');
-        if (!summary.length) sb.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No data</td></tr>';
-        else sb.innerHTML = summary.map(b => `<tr><td><strong>${b.break_type}</strong></td><td>${b.count}</td><td>${Math.round(b.avg_duration)} min</td><td>${Math.round(b.max_duration)} min</td><td>${b.employees || '-'}</td></tr>`).join('');
+        loadBreakApprovals();
     } catch(e) {}
     setTimeout(refreshData, 5000);
+}
+
+async function loadBreakApprovals() {
+    try {
+        const r = await fetch('/api/break-approvals');
+        const rows = await r.json();
+        const tb = document.getElementById('breakApprovalsBody');
+        if (!tb) return;
+        const list = Array.isArray(rows) ? rows : [];
+        if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No break approval requests</td></tr>'; return; }
+        tb.innerHTML = list.map(a => `<tr><td><strong>${esc(a.emp_name)}</strong></td><td><span class="status-chip ${a.break_type === 'Lunch' ? 'pending' : 'none'}">${esc(a.break_type)}</span></td><td>${esc(a.break_date)}</td><td class="text-truncate" style="max-width:200px;" title="${esc(a.reason || '')}">${esc(a.reason || '-')}</td><td><span class="status-chip ${String(a.status).toLowerCase()}">${esc(a.status)}</span></td><td>${a.status === 'Pending' ? `<button class="btn btn-sm" style="background:#16A34A;color:white;" onclick="approveBreak(${a.approval_id})" title="Approve"><i class="bi bi-check-lg"></i></button> <button class="btn btn-sm" style="background:#DC2626;color:white;" onclick="rejectBreak(${a.approval_id})" title="Reject"><i class="bi bi-x-lg"></i></button>` : '-'}</td></tr>`).join('');
+    } catch (e) {}
+}
+async function approveBreak(id) {
+    try {
+        const r = await fetch('/api/break-approvals/' + id + '/approve', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) loadBreakApprovals(); else alert(d.error || 'Failed to approve');
+    } catch (e) {}
+}
+async function rejectBreak(id) {
+    try {
+        const r = await fetch('/api/break-approvals/' + id + '/reject', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) loadBreakApprovals(); else alert(d.error || 'Failed to reject');
+    } catch (e) {}
 }
 
 async function loadReviewProgress() {
@@ -283,18 +326,21 @@ function renderCalendar(grid) {
                 const isWeekend = d >= 5;
                 const holiday = calData.holidays && calData.holidays[dateStr];
                 const leave = calData.leaves && calData.leaves[dateStr];
-                const hasSession = calData.sessions && calData.sessions[dateStr];
+                const sess = (calData.sessions && calData.sessions[dateStr]) || [];
                 let cls = 'cal-day-cell';
                 if (isWeekend) cls += ' weekend';
                 if (isToday) cls += ' today';
                 if (holiday) cls += ' has-holiday';
-                else if (leave === 'Approved') cls += ' has-leave-approved';
-                else if (leave === 'Pending') cls += ' has-leave-pending';
-                else if (hasSession) cls += ' has-session';
+                else if (leave && leave.status === 'Approved') cls += ' has-leave-approved';
+                else if (leave && leave.status === 'Pending') cls += ' has-leave-pending';
+                else if (sess.length) cls += ' has-session';
                 let info = '';
-                if (hasSession) info += `<div class="cal-info-row hours"><i class="bi bi-clock-fill"></i>${hasSession}</div>`;
-                if (leave === 'Approved') info += `<div class="cal-info-row leave-approved"><i class="bi bi-check-circle-fill"></i>Leave</div>`;
-                else if (leave === 'Pending') info += `<div class="cal-info-row leave-pending"><i class="bi bi-hourglass-split"></i>Pending</div>`;
+                if (sess.length) {
+                    const totalHrs = sess.reduce((s, x) => s + (x.hours || 0), 0).toFixed(1);
+                    info += `<div class="cal-info-row hours"><i class="bi bi-clock-fill"></i>${totalHrs}h</div>`;
+                }
+                if (leave && leave.status === 'Approved') info += `<div class="cal-info-row leave-approved"><i class="bi bi-check-circle-fill"></i>Leave</div>`;
+                else if (leave && leave.status === 'Pending') info += `<div class="cal-info-row leave-pending"><i class="bi bi-hourglass-split"></i>Pending</div>`;
                 if (holiday) info += `<div class="cal-info-row holiday"><i class="bi bi-moon-stars"></i>${holiday}</div>`;
                 html += `<div class="${cls}"><div class="cal-day-number">${isToday ? `<span class="cal-today-badge">${day}</span>` : day}</div>${info}</div>`;
                 day++;

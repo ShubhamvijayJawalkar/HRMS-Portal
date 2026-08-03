@@ -1,14 +1,24 @@
-import os, logging
-from datetime import datetime, timedelta
+import os
+from datetime import timedelta
 from io import BytesIO
-from flask import Blueprint, render_template, request, jsonify, session, send_file, redirect
+
 import pandas as pd
-from .db import get_db, _scalar
+from flask import Blueprint, jsonify, redirect, render_template, request, send_file, session, url_for
+
+from .db import get_db
+from .decorators import admin_required, login_required
 from .helpers import (
-    now_ist, gen_id, parse_date, audit_log, _is_admin,
-    add_notification, notify_admins, UPLOAD_FOLDER, ONBOARDING_DOC_TYPES, validate_upload
+    ONBOARDING_DOC_TYPES,
+    UPLOAD_FOLDER,
+    _is_admin,
+    add_notification,
+    audit_log,
+    gen_id,
+    notify_admins,
+    now_ist,
+    parse_date,
+    validate_upload,
 )
-from .decorators import login_required, admin_required
 
 onboarding_bp = Blueprint('onboarding', __name__)
 
@@ -201,8 +211,6 @@ def delete_onboarding_task(tid):
 @onboarding_bp.route('/api/onboarding-tasks/export', methods=['GET'])
 @admin_required
 def export_onboarding():
-    from io import BytesIO
-    import pandas as pd
     month_filter = request.args.get('month', '').strip()
     status_filter = request.args.get('status', '').strip()
     conn = get_db()
@@ -241,8 +249,6 @@ def export_onboarding():
     return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                      download_name=f'onboarding_{label}.xlsx', as_attachment=True)
 
-
-ONBOARDING_DOC_TYPES = ['ID Proof', 'Address Proof', 'Photo', 'Previous Organisation Documents', 'Qualification Documents']
 
 @onboarding_bp.route('/api/v1/onboarding-checklist', methods=['GET', 'POST'])
 @onboarding_bp.route('/api/onboarding-checklist', methods=['GET', 'POST'])

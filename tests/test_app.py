@@ -1,9 +1,9 @@
 import os
 import sys
-import json
 import tempfile
-import bcrypt
 from datetime import datetime
+
+import bcrypt
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -12,7 +12,8 @@ os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_test_{datetim
 os.environ['FLASK_DEBUG'] = '0'
 
 import pytest
-from app import app, get_db, hash_password, gen_id
+
+from app import app, get_db, hash_password
 from hrms.helpers import now_ist
 
 
@@ -471,8 +472,9 @@ def test_reset_password(client):
     import secrets
     token = secrets.token_urlsafe(32)
     conn = get_db()
-    from hrms.helpers import now_ist
     from datetime import timedelta
+
+    from hrms.helpers import now_ist
     conn.execute(
         "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) VALUES (?, ?, ?, ?)",
         [999950, 'EMP001', token, now_ist() + timedelta(hours=1)]
@@ -885,8 +887,8 @@ def test_notification_preferences_get_set(client):
     data = resp.get_json()
     for p in data:
         if p['category'] == 'Leaves':
-            assert p['in_app'] == False
-            assert p['email'] == False
+            assert not p['in_app']
+            assert not p['email']
             break
 
 
@@ -940,7 +942,7 @@ def test_notification_preferences_email_opt_out(client):
 
 def test_calc_payroll_item_matches_rates(client):
     """calc_payroll_item_from_rates must match calc_payroll_item for default rates"""
-    from hrms.helpers import calc_payroll_item, calc_payroll_item_from_rates, calc_tds, calc_tds_from_rates
+    from hrms.helpers import calc_payroll_item, calc_payroll_item_from_rates
     test_cases = [
         (None, 30000, 9000, 4000, 1500),
         (None, 15000, 5000, 2000, 500),
@@ -1057,8 +1059,8 @@ def test_review_cycle_progress_admin(auth_client):
 # ── Phase 4: Open Review Cycle Scheduler Tests ───────────────────
 
 def test_open_review_cycle_creates_reviews(client):
-    from hrms.payroll import open_review_cycle, _current_review_period
-    from hrms.db import get_db, _scalar
+    from hrms.db import _scalar, get_db
+    from hrms.payroll import _current_review_period, open_review_cycle
     conn = get_db()
     period = _current_review_period()
     conn.execute("DELETE FROM performance_reviews WHERE review_period = ?", [period])
@@ -1071,13 +1073,11 @@ def test_open_review_cycle_creates_reviews(client):
 
 
 def test_open_review_cycle_skips_existing(client):
-    from hrms.payroll import open_review_cycle, _current_review_period
-    from hrms.db import get_db, _scalar
+    from hrms.db import _scalar, get_db
+    from hrms.payroll import open_review_cycle
     open_review_cycle()
     open_review_cycle()
     conn = get_db()
-    period = _current_review_period()
-    count = _scalar("SELECT COUNT(*) FROM performance_reviews WHERE review_period = ?", [period], conn=conn)
     conn.close()
     initial = _scalar("SELECT COUNT(*) FROM performance_reviews")
     open_review_cycle()
@@ -1136,8 +1136,6 @@ def test_analytics_headcount_filters_department(client):
         sess['role'] = 'Admin'
         sess['session_id'] = 99972
     resp = client.get('/api/analytics/headcount')
-    all_data = resp.get_json()
-    all_depts = len(all_data.get('by_department', []))
     resp = client.get('/api/analytics/headcount?department=Engineering')
     filtered = resp.get_json()
     if filtered['by_department']:

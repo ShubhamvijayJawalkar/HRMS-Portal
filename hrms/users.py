@@ -1,12 +1,21 @@
-from io import BytesIO
 import logging
+from io import BytesIO
 
 import pandas as pd
-from flask import Blueprint, render_template, request, jsonify, session, send_file
+from flask import Blueprint, jsonify, render_template, request, session
 
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, hash_password, check_password, get_user, audit_log, _is_admin, send_email, parse_date
+from .db import _scalar, get_db
 from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import (
+    audit_log,
+    check_password,
+    gen_id,
+    get_user,
+    hash_password,
+    now_ist,
+    parse_date,
+    send_email,
+)
 
 logger = logging.getLogger('hrms')
 
@@ -118,8 +127,9 @@ def add_user():
     audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}')
 
     admin_name = session.get('name', 'Admin')
-    from .auth import secrets as _secrets
     from datetime import timedelta as _td
+
+    from .auth import secrets as _secrets
     reset_token = _secrets.token_urlsafe(32)
     conn = get_db()
     conn.execute(
@@ -211,7 +221,6 @@ def delete_user(emp_id):
     if not user:
         conn.close()
         return jsonify({'error': 'User not found'}), 404
-    conn.execute("BEGIN TRANSACTION")
     try:
         tables = [
             ('user_sessions', 'emp_id'), ('breaks', 'emp_id'), ('leave_requests', 'emp_id'),
@@ -232,12 +241,11 @@ def delete_user(emp_id):
         ]
         for table, col in tables:
             conn.execute(f"DELETE FROM {table} WHERE {col} = ?", [emp_id])
+        conn.execute("DELETE FROM ticket_comments WHERE emp_id = ?", [emp_id])
         conn.execute("DELETE FROM ticket_comments WHERE ticket_id IN (SELECT ticket_id FROM tickets WHERE emp_id = ?)", [emp_id])
         conn.execute("DELETE FROM tickets WHERE emp_id = ?", [emp_id])
         conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
-        conn.execute("COMMIT")
     except Exception as e:
-        conn.execute("ROLLBACK")
         conn.close()
         logger.error("delete_user failed for %s: %s", emp_id, e)
         return jsonify({'error': 'Failed to delete user'}), 500
@@ -299,7 +307,7 @@ def dependents_api():
         conn = get_db()
         rows = conn.execute("SELECT dependent_id, name, relationship, date_of_birth FROM dependents WHERE emp_id = ?", [emp_id]).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'name': r[1], 'relationship': r[2], 'date_of_birth': r[3].isoformat() + '+05:30' if r[3] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'name': r[1], 'relationship': r[2], 'date_of_birth': r[3].isoformat() if r[3] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('relationship'):
         return jsonify({'error': 'name and relationship required'}), 400
@@ -359,8 +367,8 @@ def profile_api():
             'allow_login': u[6], 'allow_breaks': u[7],
             'designation': u[8], 'manager_emp_id': u[9],
             'phone': u[10],
-            'date_of_birth': u[11].isoformat() + '+05:30' if u[11] else None,
-            'date_of_joining': u[12].isoformat() + '+05:30' if u[12] else None,
+            'date_of_birth': u[11].isoformat() if u[11] else None,
+            'date_of_joining': u[12].isoformat() if u[12] else None,
             'address': u[13], 'emergency_contact_name': u[14],
             'emergency_contact_phone': u[15]
         }), 200

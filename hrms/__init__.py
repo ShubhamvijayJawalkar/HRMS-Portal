@@ -1,20 +1,37 @@
-import os
-import logging
-import secrets
 import atexit
+import logging
+import os
+import secrets
 from datetime import timedelta
 
-from flask import Flask
 from dotenv import load_dotenv
+from flask import Flask
 
 load_dotenv()
 
-from .extensions import scheduler, limiter, STARTED
-from .db import DB_FILE, get_db, close_db, health_status
-from .schema import init_db
-from .helpers import now_ist, gen_id, hash_password, check_password, get_user, audit_log, add_notification, notify_admins, send_email, _is_admin
+from .db import DB_FILE, close_db, get_db, health_status
+from .decorators import (
+    admin_required,
+    department_required,
+    hr_or_admin_required,
+    login_required,
+    manager_or_admin_required,
+)
+from .extensions import STARTED, limiter, scheduler
+from .helpers import (
+    _is_admin,
+    add_notification,
+    audit_log,
+    check_password,
+    gen_id,
+    get_user,
+    hash_password,
+    notify_admins,
+    now_ist,
+    send_email,
+)
 from .payroll import open_review_cycle
-from .decorators import login_required, admin_required, hr_or_admin_required, department_required, manager_or_admin_required
+from .schema import init_db
 
 log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(format='%(asctime)s [%(levelname)s] %(name)s: %(message)s', level=log_level)
@@ -89,23 +106,23 @@ def create_app():
     except Exception:
         logger.warning("Flasgger/Swagger not available, skipping docs endpoint")
 
-    from .auth import auth_bp
-    from .users import users_bp
+    from .analytics import analytics_bp
+    from .assets import assets_bp
+    from .ats import ats_bp
     from .attendance import attendance_bp
+    from .audit import audit_bp
+    from .auth import auth_bp
+    from .documents import documents_bp
+    from .expenses import expenses_bp
     from .leaves import leaves_bp
+    from .notifications import notifications_bp
+    from .offboarding import offboarding_bp
+    from .onboarding import onboarding_bp
     from .payroll import payroll_bp
     from .performance import performance_bp
-    from .expenses import expenses_bp
-    from .tickets import tickets_bp
-    from .documents import documents_bp
-    from .onboarding import onboarding_bp
-    from .offboarding import offboarding_bp
-    from .ats import ats_bp
-    from .analytics import analytics_bp
     from .reports import reports_bp
-    from .audit import audit_bp
-    from .notifications import notifications_bp
-    from .assets import assets_bp
+    from .tickets import tickets_bp
+    from .users import users_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(users_bp)

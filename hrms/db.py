@@ -1,5 +1,6 @@
-import os
 import logging
+import os
+import threading
 
 import duckdb
 
@@ -15,6 +16,7 @@ else:
 class _PersistentConnection:
     def __init__(self, conn):
         self._conn = conn
+        self._closed = False
 
     def __getattr__(self, name):
         return getattr(self._conn, name)
@@ -23,27 +25,38 @@ class _PersistentConnection:
         pass
 
 
-_global_conn = None
+_local = threading.local()
+_conns = set()
+_conns_lock = threading.Lock()
 
 
 def close_db():
-    global _global_conn
-    if _global_conn is not None:
-        _global_conn._conn.close()
-        _global_conn = None
+    global _conns
+    with _conns_lock:
+        conns = list(_conns)
+        _conns = set()
+    for c in conns:
+        c._closed = True
+        try:
+            c._conn.close()
+        except Exception:
+            pass
 
 
 def get_db():
-    global _global_conn
-    if _global_conn is None:
-        _global_conn = _PersistentConnection(duckdb.connect(DB_FILE))
-    return _global_conn
+    conn = getattr(_local, 'conn', None)
+    if conn is None or conn._closed:
+        conn = _PersistentConnection(duckdb.connect(DB_FILE))
+        _local.conn = conn
+        with _conns_lock:
+            _conns.add(conn)
+    return conn
 
 
 def health_status():
     return {
         'db_file': DB_FILE,
-        'connected': _global_conn is not None,
+        'connected': len(_conns) > 0,
         'exists': os.path.exists(DB_FILE),
     }
 

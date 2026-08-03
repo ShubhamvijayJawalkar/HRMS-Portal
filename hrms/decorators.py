@@ -1,7 +1,8 @@
 from functools import wraps
 
-from flask import session, request, redirect, url_for, jsonify
+from flask import jsonify, redirect, request, session, url_for
 
+from .db import get_db
 from .helpers import _is_admin
 
 

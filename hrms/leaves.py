@@ -1,10 +1,11 @@
-from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime
+
 import pandas as pd
-from flask import Blueprint, render_template, request, jsonify, session, send_file
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, parse_date, audit_log, _is_admin, add_notification
-from .decorators import login_required, admin_required, hr_or_admin_required
+from flask import Blueprint, jsonify, render_template, request, send_file, session
+
+from .db import get_db
+from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import _is_admin, add_notification, audit_log, gen_id, now_ist, parse_date
 
 leaves_bp = Blueprint('leaves', __name__)
 
@@ -118,7 +119,7 @@ def leaves_api():
         conn.close()
         return jsonify([{
             'leave_id': r[0], 'emp_id': r[1], 'emp_name': r[2] or r[1], 'leave_type': r[3],
-            'start_date': r[4].isoformat() + '+05:30', 'end_date': r[5].isoformat() + '+05:30',
+            'start_date': r[4].isoformat(), 'end_date': r[5].isoformat(),
             'reason': r[6], 'status': r[7], 'approved_by': r[8],
             'created_at': r[9].isoformat() + '+05:30' if r[9] else None
         } for r in rows]), 200
@@ -184,10 +185,10 @@ def export_leaves():
     finally:
         conn.close()
 
-    import io, pandas as pd
+    import io
     data = [{
         'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
-        'From': r[3].isoformat() + '+05:30', 'To': r[4].isoformat() + '+05:30', 'Days': (r[4] - r[3]).days + 1,
+        'From': r[3].isoformat(), 'To': r[4].isoformat(), 'Days': (r[4] - r[3]).days + 1,
         'Reason': r[5] or '', 'Status': r[6], 'Approved By': r[7] or ''
     } for r in rows]
 

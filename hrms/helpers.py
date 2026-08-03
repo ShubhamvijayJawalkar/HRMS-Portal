@@ -1,17 +1,16 @@
-import os
 import logging
+import os
 import secrets
 import smtplib
 from datetime import datetime, timedelta
-from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 
 import bcrypt
-
 from flask import request
 
-from .db import get_db, _scalar
+from .db import get_db
 
 logger = logging.getLogger('hrms')
 
@@ -202,7 +201,6 @@ def _get_shift_start_dt(emp_id, conn, target_date=None):
     now = now_ist()
     row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
     shift_start_str = row[0] if row else None
-    shift_end_str = row[1] if row else None
     if shift_start_str and shift_start_str != '24x7':
         try:
             parts = shift_start_str.split(':')
@@ -374,10 +372,11 @@ ONBOARDING_DOC_TYPES = ['ID Proof', 'Address Proof', 'Photo', 'Previous Organisa
 
 def generate_payslip_pdf(run_id, emp_id):
     from io import BytesIO
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet
+
     from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     conn = get_db()
     row = conn.execute(

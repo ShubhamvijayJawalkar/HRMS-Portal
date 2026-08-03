@@ -1,9 +1,10 @@
 import logging
-from flask import Blueprint, render_template, request, jsonify
 
-from .db import get_db, _scalar
-from .helpers import now_ist, parse_date
+from flask import Blueprint, jsonify, render_template, request
+
+from .db import _scalar, get_db
 from .decorators import admin_required, hr_or_admin_required
+from .helpers import now_ist, parse_date
 
 logger = logging.getLogger('hrms')
 

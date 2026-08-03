@@ -4,19 +4,27 @@
 
 ### Running all tests
 ```bash
-python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.py -v
+python -m pytest tests/test_app.py -v && python -m pytest tests/test_api_coverage.py -v && python -m pytest tests/test_workflows.py -v && python -m pytest tests/test_connection.py -v && python -m pytest tests/test_playwright.py -v && python -m pytest tests/test_playwright_e2e.py -v
 ```
 **Note:** Run test suites separately — they share an `app` module and separate DB env vars, causing 403 login failures if combined.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast, 26 tests)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 14 tests)
+python -m pytest tests/test_app.py -v           # Unit tests (fast, 114 tests)
+python -m pytest tests/test_api_coverage.py -v  # API coverage (34 tests)
+python -m pytest tests/test_workflows.py -v     # Module workflows (24 tests)
+python -m pytest tests/test_connection.py -v    # DB connection lifecycle (7 tests)
+python -m pytest tests/test_playwright.py -v    # Browser tests (~2 min, 16 tests, port 8787)
+python -m pytest tests/test_playwright_e2e.py -v  # Extra browser page coverage (11 tests, port 8788)
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (26 tests)
-- `tests/test_playwright.py` — Playwright browser tests (14 tests)
+- `tests/test_app.py` — Flask unit tests (114 tests)
+- `tests/test_api_coverage.py` — API endpoint coverage (34 tests)
+- `tests/test_workflows.py` — cross-module workflows (24 tests)
+- `tests/test_connection.py` — DB connection lifecycle (7 tests)
+- `tests/test_playwright.py` — Playwright browser tests (16 tests)
+- `tests/test_playwright_e2e.py` — Playwright browser tests (11 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns

@@ -1,9 +1,10 @@
 import logging
-from flask import Blueprint, render_template, request, jsonify
 
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, parse_date
+from flask import Blueprint, jsonify, render_template, request
+
+from .db import _scalar, get_db
 from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import gen_id, now_ist, parse_date
 
 logger = logging.getLogger('hrms')
 
@@ -74,7 +75,7 @@ def get_holidays():
     conn = get_db()
     try:
         rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
-        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat() + '+05:30', 'type': r[3]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat(), 'type': r[3]} for r in rows]), 200
     finally:
         conn.close()
 

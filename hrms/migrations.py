@@ -1,12 +1,14 @@
 import logging
+
 import duckdb
-from .db import get_db, _scalar
+
+from .db import get_db
 
 logger = logging.getLogger('hrms')
 
 
 def migration_010_seed_holidays(conn):
-    from .helpers import now_ist, gen_id
+    from .helpers import now_ist
     now = now_ist()
     current_year = now.year
     existing_years = conn.execute("SELECT DISTINCT year FROM holidays").fetchall()

@@ -1,14 +1,13 @@
-import os
 import logging
-import tempfile
 from datetime import timedelta
 
 import bcrypt
 
-from .db import get_db, _scalar
+from .db import _scalar, get_db
 from .helpers import (
-    now_ist, gen_id, hash_password,
-    _get_shift_date_for_dt, _fix_seed_shift_dates,
+    _fix_seed_shift_dates,
+    gen_id,
+    now_ist,
 )
 from .migrations import run_migrations
 

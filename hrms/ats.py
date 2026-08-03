@@ -1,9 +1,10 @@
-import os, logging
-from datetime import datetime, timedelta
-from flask import Blueprint, render_template, request, jsonify, session
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, parse_date, audit_log, _is_admin, hash_password, add_notification
+from datetime import datetime
+
+from flask import Blueprint, jsonify, render_template, request, session
+
+from .db import get_db
 from .decorators import admin_required, hr_or_admin_required
+from .helpers import audit_log, gen_id, hash_password, now_ist, parse_date
 
 ats_bp = Blueprint('ats', __name__)
 
@@ -224,7 +225,7 @@ def offers_api():
         conn = get_db()
         rows = conn.execute("SELECT o.offer_id, o.candidate_id, c.name, c.email, o.offered_salary, o.offer_date, o.status, o.accepted_at, o.notes FROM offer_letters o JOIN candidates c ON o.candidate_id = c.candidate_id ORDER BY o.offer_date DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3], 'salary': float(r[4]) if r[4] else 0, 'offer_date': r[5].isoformat() + '+05:30' if r[5] else None, 'status': r[6], 'accepted_at': r[7].isoformat() + '+05:30' if r[7] else None, 'notes': r[8]} for r in rows]), 200
+        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3], 'salary': float(r[4]) if r[4] else 0, 'offer_date': r[5].isoformat() if r[5] else None, 'status': r[6], 'accepted_at': r[7].isoformat() + '+05:30' if r[7] else None, 'notes': r[8]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('candidate_id') or not data.get('offered_salary'):
         return jsonify({'error': 'candidate_id and offered_salary required'}), 400

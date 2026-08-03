@@ -1,9 +1,10 @@
 import os
-from io import BytesIO
-from flask import Blueprint, render_template, request, jsonify, session, send_file
+
+from flask import Blueprint, jsonify, render_template, request, send_file, session
+
 from .db import get_db
-from .helpers import now_ist, gen_id, _is_admin, audit_log, UPLOAD_FOLDER, validate_upload
-from .decorators import login_required, hr_or_admin_required
+from .decorators import hr_or_admin_required, login_required
+from .helpers import UPLOAD_FOLDER, _is_admin, audit_log, gen_id, now_ist, validate_upload
 
 documents_bp = Blueprint('documents', __name__)
 

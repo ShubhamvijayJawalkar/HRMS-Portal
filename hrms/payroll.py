@@ -1,14 +1,25 @@
 import csv
 import logging
 from io import BytesIO, TextIOWrapper
-from datetime import timedelta
+
+from flask import Blueprint, jsonify, render_template, request, send_file, session
+
+from .db import _scalar, get_db
+from .decorators import admin_required, hr_or_admin_required, login_required
+from .helpers import (
+    _is_admin,
+    audit_log,
+    calc_payroll_item,
+    calc_payroll_item_from_rates,
+    calc_tds,
+    calc_tds_from_rates,
+    gen_id,
+    generate_payslip_pdf,
+    now_ist,
+    parse_date,
+)
 
 logger = logging.getLogger(__name__)
-from flask import Blueprint, render_template, request, jsonify, session, send_file
-from .db import get_db, _scalar
-from .helpers import now_ist, gen_id, parse_date, _is_admin, audit_log, calc_payroll_item, calc_payroll_item_from_rates, calc_tds, calc_tds_from_rates, generate_payslip_pdf
-from .decorators import login_required, admin_required, hr_or_admin_required
-
 payroll_bp = Blueprint('payroll', __name__)
 
 
@@ -40,7 +51,7 @@ def salary_api():
         conn = get_db()
         rows = conn.execute("SELECT s.struct_id, s.emp_id, u.name, s.basic, s.hra, s.allowances, s.deductions, s.effective_from FROM salary_structures s JOIN users u ON s.emp_id = u.emp_id ORDER BY s.effective_from DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() + '+05:30' if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() if r[7] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('basic'):
         return jsonify({'error': 'emp_id and basic required'}), 400
@@ -95,8 +106,8 @@ def payroll_rates_api():
         conn.close()
         return jsonify([{
             'id': r[0], 'label': r[1], 'rate_type': r[2], 'value': float(r[3]),
-            'effective_from': r[4].isoformat() + '+05:30' if r[4] else None,
-            'effective_to': r[5].isoformat() + '+05:30' if r[5] else None,
+            'effective_from': r[4].isoformat() if r[4] else None,
+            'effective_to': r[5].isoformat() if r[5] else None,
             'description': r[6] or ''
         } for r in rows]), 200
     data = request.get_json(silent=True) or {}
@@ -303,7 +314,6 @@ def bank_file_export(rid):
     conn.close()
     if not rows:
         return jsonify({'error': 'No items'}), 404
-    import csv
     buf = BytesIO()
     text_buf = TextIOWrapper(buf, encoding='utf-8', newline='')
     writer = csv.writer(text_buf)
@@ -329,7 +339,6 @@ def tds_report(rid):
         [rid]
     ).fetchall()
     conn.close()
-    annual_est = float(run[1])
     result = []
     for r in rows:
         monthly_gross = float(r[2])

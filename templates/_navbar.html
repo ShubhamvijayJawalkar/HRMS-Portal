@@ -152,6 +152,10 @@
             {% set dept = session.get('department', '') %}
             <div class="col-6"><a href="/admin/assets" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-laptop-fill"></i></div><div class="module-title">Asset Management</div><div class="module-desc">Issue & track assets</div></a></div>
             <div class="col-6"><a href="/admin/jobs" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-briefcase-fill"></i></div><div class="module-title">Job Postings</div><div class="module-desc">Manage job openings</div></a></div>
+            {% if not (role in ('Admin', 'Super Admin') or dept == 'HR') %}
+            <div class="col-6"><a href="/expenses" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-receipt-cutoff"></i></div><div class="module-title">Expenses</div><div class="module-desc">Submit expense claims</div></a></div>
+            <div class="col-6"><a href="/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-text-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Upload & manage your files</div></a></div>
+            {% endif %}
             {% if role in ('Admin', 'Super Admin') or dept == 'HR' %}
             <div class="col-6"><a href="/admin/candidates" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-person-lines-fill"></i></div><div class="module-title">Candidates</div><div class="module-desc">Hiring pipeline</div></a></div>
             <div class="col-6"><a href="/admin/payroll" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-cash-stack"></i></div><div class="module-title">Payroll</div><div class="module-desc">Monthly payroll</div></a></div>

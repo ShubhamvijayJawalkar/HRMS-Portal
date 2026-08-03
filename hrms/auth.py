@@ -1,11 +1,21 @@
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from flask import Blueprint, render_template, request, jsonify, session, redirect, url_for
+from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
+
 from .db import get_db
-from .helpers import now_ist, gen_id, hash_password, check_password, get_user, audit_log, _is_admin, _get_shift_date_for_dt, send_email
 from .extensions import limiter
+from .helpers import (
+    _get_shift_date_for_dt,
+    _is_admin,
+    audit_log,
+    check_password,
+    gen_id,
+    hash_password,
+    now_ist,
+    send_email,
+)
 
 logger = logging.getLogger('hrms')
 
@@ -21,7 +31,6 @@ def index():
 
 @auth_bp.route('/api/credentials')
 def get_credentials():
-    from .decorators import login_required
     # Inline check since login_required redirects to url_for('auth.login')
     if 'emp_id' not in session:
         return jsonify({'error': 'Authentication required'}), 401
@@ -122,12 +131,13 @@ def logout():
 
 @auth_bp.route('/dashboard')
 def dashboard():
-    from .decorators import login_required
     if 'emp_id' not in session:
         return redirect(url_for('auth.login'))
     if _is_admin(session.get('role')) or session.get('department') == 'HR':
-        return render_template('admin_dashboard.html')
-    return render_template('user_dashboard.html')
+        from .attendance import _compute_dashboard_stats
+        return render_template('admin_dashboard.html', stats=_compute_dashboard_stats())
+    from .attendance import _compute_shift_summary
+    return render_template('user_dashboard.html', shift=_compute_shift_summary(session['emp_id']))
 
 
 @auth_bp.route('/api/forgot-password', methods=['POST'])
