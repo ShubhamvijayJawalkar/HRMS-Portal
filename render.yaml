@@ -20,7 +20,7 @@ services:
       - key: PYTHON_VERSION
         value: "3.12"
     healthCheckPath: /login
-    autoDeploy: false
+    autoDeploy: true
     disk:
       name: data
       mountPath: /data
