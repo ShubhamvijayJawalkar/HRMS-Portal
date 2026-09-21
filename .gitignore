@@ -8,6 +8,10 @@ __pycache__/
 
 # Environment
 .env
+.env.*
+!.env.example
+!.env.production.example
+.secret_key
 
 # Database
 *.duckdb
@@ -15,12 +19,20 @@ __pycache__/
 
 # Generated / Build
 uploads/*
+!uploads/.gitkeep
 *.pptx
+
+# Deployment configs (project uses Render only)
+railway.json
+deploy/
+
+# Dev tools & docs
 generate_ppt.py
 ppt_screenshots/
 HRMS_Deployment_Guide.docx
 
-# IDE / Config
+# IDE / OS
 .DS_Store
+.vscode/
+.idea/
 .opencode/
-

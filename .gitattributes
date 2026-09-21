@@ -1,0 +1,5 @@
+*.pdf binary
+*.duckdb binary
+*.png binary
+*.jpg binary
+*.jpeg binary

@@ -1,14 +1,21 @@
-import os, sys, json, tempfile
+import os
+import sys
+import tempfile
 from datetime import datetime
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
+os.environ['FLASK_ENV'] = 'test'
+
+import threading
+import time
 
 import pytest
-from app import app
-import threading, time
 from playwright.sync_api import sync_playwright
+
+from app import app
 
 BASE_URL = 'http://localhost:8787'
 
@@ -60,9 +67,7 @@ def test_admin_sees_user_tab(page):
     page.click('button[type="submit"]')
     page.wait_for_timeout(2000)
     page.goto(BASE_URL + '/admin/users')
-    page.wait_for_timeout(2000)
-    page.click('#manage-tab')
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
     tbody = page.locator('#usersTableBody')
     assert tbody.is_visible()
     page.wait_for_timeout(1000)
@@ -85,19 +90,18 @@ def test_admin_create_user(page):
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
+    page.wait_for_timeout(2000)
+    page.click('.create-user-btn')
     page.wait_for_timeout(1000)
-    page.click('#create-tab')
-    page.wait_for_timeout(500)
-    page.fill('#empId', 'TEST01')
-    page.fill('#name', 'Test User')
-    page.fill('#email', 'test@company.com')
-    page.select_option('#department', 'MIS')
-    page.select_option('#role', 'Employee')
+    modal_input = page.locator('#createUserModal #empId')
+    modal_input.fill('TEST01')
+    page.locator('#createUserModal #name').fill('Test User')
+    page.locator('#createUserModal #email').fill('test@company.com')
+    page.locator('#createUserModal #department').select_option('MIS')
+    page.locator('#createUserModal #role').select_option('Employee')
     with page.expect_response(lambda r: r.url.endswith('/api/users') and r.request.method == 'POST') as resp:
-        page.click('button[type="submit"]')
+        page.evaluate('submitCreateUser()')
     assert resp.value.ok, f'Create user failed: {resp.value.status}'
-    page.wait_for_timeout(1000)
-    page.click('#manage-tab')
     page.wait_for_timeout(2000)
     body = page.text_content('#usersTableBody')
     assert 'TEST01' in body, f'TEST01 not found in {body}'
@@ -110,7 +114,7 @@ def test_breaks_tab_shows_on_user_dashboard(page):
     page.wait_for_timeout(3000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
-    btns = page.locator('.break-type-btn')
+    btns = page.locator('.break-type-card')
     assert btns.count() >= 1
 
 def test_can_start_and_end_break(page):
@@ -121,7 +125,7 @@ def test_can_start_and_end_break(page):
     page.wait_for_timeout(3000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
-    first_btn = page.locator('.break-type-btn').first
+    first_btn = page.locator('.break-type-card').first
     assert first_btn.is_visible(), 'No break type buttons visible'
     first_btn.click()
     page.wait_for_timeout(2000)
@@ -142,7 +146,7 @@ def test_login_hours_display(page):
     page.wait_for_timeout(3000)
     total = page.locator('#totalLoginHours')
     txt = total.text_content()
-    val = float(txt)
+    val = float(txt.replace('h', '').strip())
     assert val >= 0, f'Login hours should be >= 0, got {val}'
 
 def test_end_break_self_heal(page):
@@ -165,12 +169,18 @@ def test_break_daily_limit_enforced(page):
     page.fill('#empId', 'EMP002')
     page.fill('#password', 'pass123')
     page.click('button[type="submit"]')
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(3000)
+    if '/login' in page.url:
+        page.wait_for_timeout(15000)
+        page.fill('#empId', 'EMP002')
+        page.fill('#password', 'pass123')
+        page.click('button[type="submit"]')
+        page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/dashboard')
     page.wait_for_timeout(2000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
-    first_btn = page.locator('.break-type-btn').first
+    first_btn = page.locator('.break-type-card').first
     assert first_btn.is_visible()
     first_btn.click()
     page.wait_for_timeout(1000)
@@ -190,6 +200,38 @@ def test_break_daily_limit_enforced(page):
         return {status: r.status, json: await r.json()};
     }''')
     assert result['status'] == 201, f'Second break should be allowed until daily limit reached, got {result}'
+
+def test_admin_approves_break_request(page):
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP002')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_url(BASE_URL + '/dashboard')
+    page.wait_for_timeout(3000)
+    res = page.evaluate('''async () => {
+        const r = await fetch('/api/break-approvals', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({break_type: 'Lunch', reason: 'E2E approval test'})
+        });
+        return {status: r.status, json: await r.json()};
+    }''')
+    assert res['status'] == 201, f'Lunch approval request should be created, got {res}'
+    page.goto(BASE_URL + '/logout')
+    page.wait_for_timeout(1000)
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_url(BASE_URL + '/dashboard')
+    page.wait_for_timeout(3000)
+    page.click('#productivity-tab')
+    page.wait_for_timeout(2000)
+    body = page.text_content('#breakApprovalsBody')
+    assert 'E2E approval test' in body, f'Approval request not shown in Agent Productivity: {body}'
+    page.locator('#breakApprovalsBody button[title="Approve"]').first.click()
+    page.wait_for_timeout(2000)
+    body = page.text_content('#breakApprovalsBody')
+    assert 'Pending' not in body, f'Request should no longer be pending after approval: {body}'
 
 def test_today_login_sessions_table(page):
     page.goto(BASE_URL + '/login')
@@ -217,7 +259,7 @@ def test_holidays_page_loads_for_admin(page):
 
 def test_can_submit_regularization(page):
     from datetime import date, timedelta
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     page.goto(BASE_URL + '/login')
     page.fill('#empId', 'EMP002')
     page.fill('#password', 'pass123')
@@ -225,7 +267,7 @@ def test_can_submit_regularization(page):
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/regularization', wait_until='commit')
     page.wait_for_timeout(2000)
-    page.fill('#regDate', tomorrow)
+    page.fill('#regDate', yesterday)
     page.fill('#regReason', 'Test regularization request')
     with page.expect_response(lambda r: r.url.endswith('/api/regularization') and r.request.method == 'POST') as resp:
         page.click('button[type="submit"]')

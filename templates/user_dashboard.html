@@ -1,32 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308; --warning-light: #FEFCE8;
-            --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); color: var(--text); }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) {
-            *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
-        }
+        {% include "_shared_css.html" %}
         .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 16px; box-shadow: var(--shadow-sm); transition: transform var(--transition-base), box-shadow var(--transition-base); height: 100%; }
         .stat-card:hover { transform: translateY(-2px) scale(1.01); box-shadow: var(--shadow); }
         .stat-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 17px; margin-bottom: 10px; }
@@ -34,20 +9,22 @@
         .stat-label { color: var(--text-muted); font-size: 11px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
         .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 9px 16px; border-radius: 10px; transition: all var(--transition-fast); font-size: 12px; border: 1.5px solid transparent; cursor: pointer; }
         .nav-pills .nav-link:hover { background: var(--muted); color: var(--text); }
-        .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 14px rgba(15,23,42,0.3); transform: translateY(-1px); }
+        .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 14px rgba(71,85,105,0.3); transform: translateY(-1px); }
         .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 16px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
         .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 14px 12px; box-shadow: var(--shadow-sm); transition: transform var(--transition-base), box-shadow var(--transition-base); cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
-        .module-card:hover { transform: translateY(-3px) scale(1.02); box-shadow: var(--shadow-lg); }
-        .module-card:active { transform: translateY(-1px) scale(0.99); }
-        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+        .module-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+        .module-card:active { transform: translateY(-1px) scale(0.98); }
+        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--primary); }
         .module-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 17px; margin-bottom: 8px; transition: transform var(--transition-fast); }
         .module-card:hover .module-icon { transform: scale(1.1); }
         .module-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
         .module-desc { font-size: 10px; color: var(--text-muted); line-height: 1.3; }
+        .notifications-card .card-header-custom { padding: 6px 12px; font-size: 12px; }
+        .notifications-card .card-body { padding: 8px 10px; }
+        .notifications-card .notification-item { padding: 5px 8px; margin-bottom: 4px; font-size: 11px; }
+        .notifications-card .notification-item:last-child { margin-bottom: 0; }
         .card-header-custom { background: var(--primary); color: white; padding: 12px 16px; border-radius: var(--card-radius) var(--card-radius) 0 0; font-weight: 700; font-size: 13px; }
-        .card-header-custom i { margin-right: 6px; color: #60A5FA; font-size: 13px; }
-        .break-type-btn { margin: 4px; background: var(--surface); color: var(--text); border: 1.5px solid var(--border); border-radius: var(--button-radius); padding: 8px 14px; font-weight: 600; transition: all var(--transition-fast); font-size: 12px; cursor: pointer; }
-        .break-type-btn:hover { background: var(--primary); color: white; border-color: var(--primary); transform: translateY(-1px); }
+        .card-header-custom i { margin-right: 6px; color: #94A3B8; font-size: 13px; }
         .break-item { border-left: 3px solid var(--primary); padding: 8px 12px; margin-bottom: 6px; background: var(--muted); border-radius: 8px; transition: background var(--transition-fast); }
         .break-item:hover { background: #F1F5F9; }
         .break-item.completed { border-left-color: var(--success); }
@@ -55,6 +32,21 @@
         .status-badge { display: inline-block; padding: 3px 8px; border-radius: 16px; font-size: 10px; font-weight: 600; }
         .status-badge.active { background: #FEFCE8; color: #92400E; }
         .status-badge.completed { background: #F0FDF4; color: #166534; }
+        .break-type-card { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: var(--surface); border: 1.5px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 8px; cursor: pointer; transition: all 0.15s ease; }
+        .break-type-card:hover { border-color: var(--primary); box-shadow: var(--shadow-sm); transform: translateY(-1px); }
+        .break-type-card.disabled { opacity: 0.55; cursor: not-allowed; }
+        .break-type-card.disabled:hover { border-color: var(--border); box-shadow: none; transform: none; }
+        .break-type-card .bt-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+        .break-type-card .bt-name { font-size: 12px; font-weight: 700; color: var(--text); }
+        .break-type-card .bt-meta { font-size: 10px; color: var(--text-muted); }
+        .usage-track { height: 5px; background: var(--muted); border-radius: 99px; overflow: hidden; margin-top: 6px; }
+        .usage-fill { height: 100%; border-radius: 99px; transition: width 0.3s ease; }
+        .break-timer { font-size: 30px; font-weight: 800; letter-spacing: -0.5px; color: var(--text); line-height: 1.1; }
+        .status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+        .status-chip.approved { background: #F0FDF4; color: #166534; }
+        .status-chip.pending { background: #FEF3C7; color: #92400E; }
+        .status-chip.rejected { background: #FEF2F2; color: #991B1B; }
+        .status-chip.none { background: var(--muted); color: var(--text-muted); }
         .time-display { font-size: 22px; font-weight: 800; color: var(--text); margin: 10px 0; letter-spacing: -0.5px; }
         .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
         .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
@@ -86,7 +78,7 @@
         .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: auto repeat(6, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; transition: opacity 0.25s ease; flex-grow: 1; }
         .cal-grid.loading { opacity: 0.3; pointer-events: none; }
         .cal-header-cell { background: var(--primary); color: white; font-weight: 600; font-size: 9px; padding: 5px 3px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
-        .cal-header-cell.weekend { background: #1E293B; }
+        .cal-header-cell.weekend { background: #334155; }
         .cal-day-cell { background: var(--surface); min-height: 52px; padding: 4px; cursor: pointer; transition: all 0.15s ease; position: relative; border: 1px solid transparent; overflow: hidden; }
         .cal-day-cell:hover { background: rgba(15,23,42,0.03); border-color: rgba(15,23,42,0.1); z-index: 1; }
         .cal-day-cell.weekend { background: #E2E8F0; }
@@ -106,12 +98,12 @@
         .cal-info-row { display: flex; align-items: center; gap: 2px; font-size: 8px; line-height: 1.2; margin-bottom: 1px; padding: 1px 3px; border-radius: 3px; }
         .cal-info-row.login { background: rgba(34,197,94,0.1); color: #166534; }
         .cal-info-row.logout { background: rgba(220,38,38,0.08); color: #991B1B; }
-        .cal-info-row.hours { background: rgba(3,105,161,0.1); color: #075985; font-weight: 700; }
+        .cal-info-row.hours { background: rgba(71,85,105,0.1); color: #475569; font-weight: 700; }
         .cal-info-row.breaks { background: rgba(234,179,8,0.1); color: #92400E; }
         .cal-info-row.leave-approved { background: rgba(22,163,74,0.12); color: #166534; font-weight: 600; }
         .cal-info-row.leave-pending { background: rgba(217,119,6,0.15); color: #92400E; font-weight: 600; }
         .cal-info-row.shift { background: rgba(99,102,241,0.1); color: #4338CA; font-size: 7px; font-weight: 600; }
-        .cal-info-row.holiday { background: rgba(3,105,161,0.1); color: #075985; font-weight: 600; }
+        .cal-info-row.holiday { background: rgba(71,85,105,0.1); color: #475569; font-weight: 600; }
         .cal-info-row i { font-size: 8px; flex-shrink: 0; }
         .cal-legend { display: flex; gap: 8px; flex-wrap: wrap; }
         .cal-legend-item { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-muted); font-weight: 500; }
@@ -133,9 +125,9 @@
 
 <div class="container-fluid px-4 py-3">
     <div class="row g-2 mb-3">
-        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:var(--success-light);color:var(--success);"><i class="bi bi-stopwatch-fill"></i></div><div class="stat-value" id="totalLoginHours">0h</div><div class="stat-label">Shift Hours</div></div></div>
-        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:var(--warning-light);color:var(--warning);"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="totalBreakTime">0 min</div><div class="stat-label">Break Time</div></div></div>
-        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:rgba(139,92,246,0.08);color:#8B5CF6;"><i class="bi bi-speedometer"></i></div><div class="stat-value" id="shiftEfficiency">0%</div><div class="stat-label">Efficiency</div></div></div>
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:var(--success-light);color:var(--success);"><i class="bi bi-stopwatch-fill"></i></div><div class="stat-value" id="totalLoginHours">{{ '%.1f'|format(shift.shift_hours) if shift else '0.0' }}h</div><div class="stat-label">Shift Hours</div></div></div>
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:var(--warning-light);color:var(--warning);"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="totalBreakTime">{{ shift.total_break_minutes if shift else 0 }} min</div><div class="stat-label">Break Time</div></div></div>
+        <div class="col-md-4"><div class="stat-card"><div class="stat-icon" style="background:rgba(139,92,246,0.08);color:#8B5CF6;"><i class="bi bi-speedometer"></i></div><div class="stat-value" id="shiftEfficiency">{{ shift.efficiency if shift else 0 }}%</div><div class="stat-label">Efficiency</div></div></div>
     </div>
 
     <ul class="nav nav-pills mb-0" id="dashTabs" role="tablist" style="gap:4px;">
@@ -148,16 +140,16 @@
         <!-- Modules + Calendar -->
         <div class="tab-pane fade show active" id="modules" role="tabpanel">
             <div class="row g-2">
-                <div class="col-lg-6 d-flex">
-                    <div class="row g-2 flex-grow-1">
+                <div class="col-lg-6 d-flex flex-column gap-2">
+                    <div class="row g-2 align-content-start">
                         <div class="col-md-6"><a href="/leaves" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-calendar-check-fill"></i></div><div class="module-title">Leaves</div><div class="module-desc">Apply for leave & track balance</div></a></div>
                         <div class="col-md-6"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Fix missing or incorrect attendance</div></a></div>
-                        <div class="col-md-6"><a href="/onboarding" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-rocket-takeoff-fill"></i></div><div class="module-title">Onboarding</div><div class="module-desc">Track your onboarding tasks</div></a></div>
                         <div class="col-md-6"><a href="/goals" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-bullseye"></i></div><div class="module-title">Goals</div><div class="module-desc">Set personal performance goals</div></a></div>
-                        <div class="col-md-6"><a href="/expenses" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-receipt-cutoff"></i></div><div class="module-title">Expenses</div><div class="module-desc">Submit expense claims</div></a></div>
                         <div class="col-md-6"><a href="/tickets" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-ticket-perforated-fill"></i></div><div class="module-title">Tickets</div><div class="module-desc">Raise support requests</div></a></div>
-                        <div class="col-md-6"><a href="/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-text-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Upload & manage your files</div></a></div>
-                        <div class="col-md-6"><a href="/profile" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-person-fill-gear"></i></div><div class="module-title">Profile</div><div class="module-desc">Edit personal details & dependents</div></a></div>
+                    </div>
+                    <div class="card border-0 shadow-sm notifications-card">
+                        <div class="card-header-custom"><i class="bi bi-bell-fill"></i>Notifications</div>
+                        <div class="card-body"><div id="notificationsHome"><p class="text-muted mb-0">Loading...</p></div></div>
                     </div>
                 </div>
                 <div class="col-lg-6 d-flex">
@@ -189,12 +181,12 @@
         <!-- Breaks -->
         <div class="tab-pane fade" id="breakpanel" role="tabpanel">
             <div class="row g-2">
-                <div class="col-lg-5"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-plus-circle-fill"></i>Request Break</div><div class="card-body"><p class="text-muted mb-2" style="font-size:11px;">Select a break type to start:</p><div id="breakTypesContainer"></div><div id="breakMessage" style="margin-top:12px;display:none;"><small id="breakMessageText" class="text-success"></small></div></div></div></div>
-                <div class="col-lg-3"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Break</div><div class="card-body text-center py-3"><div id="activeBreakInfo"><p class="text-muted mb-0" style="font-size:12px;">No active break</p></div></div></div></div>
-                <div class="col-lg-4"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-info-circle-fill"></i>Break Types</div><div class="card-body"><div id="availableBreaksContainer"></div></div></div></div>
+                <div class="col-lg-4"><div class="card border-0 shadow-sm h-100"><div class="card-header-custom"><i class="bi bi-plus-circle-fill"></i>Request Break</div><div class="card-body"><p class="text-muted mb-2" style="font-size:11px;">Tap a break type to start:</p><div id="breakTypesContainer"><p class="text-muted mb-0">Loading...</p></div><div id="breakMessage" style="margin-top:12px;display:none;"><small id="breakMessageText" class="text-success"></small></div></div></div></div>
+                <div class="col-lg-4"><div class="card border-0 shadow-sm h-100"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Break</div><div class="card-body d-flex flex-column"><div id="activeBreakInfo"><p class="text-muted mb-0">Loading...</p></div></div></div></div>
+                <div class="col-lg-4"><div class="card border-0 shadow-sm h-100"><div class="card-header-custom"><i class="bi bi-patch-check-fill"></i>Lunch Approval</div><div class="card-body" id="lunchApprovalContainer"><p class="text-muted mb-0">Loading...</p></div></div></div>
             </div>
             <div class="row g-2 mt-2">
-                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-clock-history"></i>Today's Breaks</div><div class="card-body"><div id="breaksHistoryContainer"></div></div></div></div>
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-clock-history"></i>Today's Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Type</th><th>Status</th><th>Start</th><th>End</th><th>Duration</th></tr></thead><tbody id="breaksHistoryBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
             </div>
         </div>
 
@@ -213,7 +205,7 @@
 let calMonth=new Date().getMonth()+1, calYear=new Date().getFullYear(), calData={};
 
 document.addEventListener('DOMContentLoaded', () => {
-    loadUserInfo(); loadAvailableBreaks(); loadUserBreaks(); loadLoginHours(); loadShiftSummary(); checkActiveBreak(); loadHolidays(); loadNotifications();
+    loadUserInfo(); loadAvailableBreaks(); loadUserBreaks(); loadLoginHours(); loadShiftSummary(); checkActiveBreak(); loadHolidays(); loadNotifications(); loadLunchApprovals();
     loadCalendar();
     const loginDateFilter=document.getElementById('loginDateFilter');
     if(loginDateFilter){
@@ -223,7 +215,7 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('calPrev').addEventListener('click',()=>{calMonth--;if(calMonth<1){calMonth=12;calYear--;}loadCalendar()});
     document.getElementById('calNext').addEventListener('click',()=>{calMonth++;if(calMonth>12){calMonth=1;calYear++;}loadCalendar()});
     document.getElementById('calToday').addEventListener('click',()=>{calMonth=new Date().getMonth()+1;calYear=new Date().getFullYear();loadCalendar()});
-    setInterval(checkActiveBreak, 5000); setInterval(loadUserBreaks, 10000);
+    setInterval(checkActiveBreak, 5000); setInterval(loadUserBreaks, 10000); setInterval(renderActiveBreakTick, 1000);
     document.addEventListener('click', function(e){
         const btn=e.target.closest('.endBreakBtn');
         if(btn){e.preventDefault();endBreak();}
@@ -238,17 +230,35 @@ function loadUserInfo() {
         localStorage.setItem('userName',localStorage.getItem('userName')||'Employee');
     });
 }
+const BREAK_STYLE = { 'Tea': { icon: 'bi-cup-hot-fill', color: '#D97706', bg: '#FFFBEB' }, 'Lunch': { icon: 'bi-egg-fried', color: '#EA580C', bg: '#FFF7ED' }, 'Personal': { icon: 'bi-person-fill-check', color: '#7C3AED', bg: '#F5F3FF' } };
+let breakTypesData = [];
 function loadAvailableBreaks() {
     fetch('/api/break-types').then(r=>r.json()).then(breaks=>{
         if(!Array.isArray(breaks))return;
-        const c1=document.getElementById('breakTypesContainer'), c2=document.getElementById('availableBreaksContainer');
-        if(!c1||!c2)return;
-        c1.innerHTML=''; c2.innerHTML='';
+        breakTypesData = breaks;
+        const c=document.getElementById('breakTypesContainer');
+        if(!c)return;
+        c.innerHTML='';
         breaks.forEach(b=>{
-            const btn=document.createElement('button'); btn.className='btn break-type-btn';
-            btn.textContent=`${b.break_type} (${b.daily_limit_minutes} min)`;
-            btn.onclick=()=>startBreak(b.break_type); c1.appendChild(btn);
-            c2.innerHTML+=`<div class="break-item py-2 px-3 mb-2"><strong>${b.break_type}</strong><br><small class="text-muted" style="font-size:11px;">${b.description}</small></div>`;
+            const st=BREAK_STYLE[b.break_type]||{icon:'bi-cup-hot',color:'#475569',bg:'#F1F5F9'};
+            const limit=b.daily_limit_minutes||0;
+            const used=Math.min(b.used_minutes, limit||b.used_minutes);
+            const pct=limit?Math.round(used/limit*100):(used?100:0);
+            const exhausted=!!limit&&used>=limit;
+            const approvalNeeded=b.requires_approval&&b.approval_status!=='Approved'&&b.approval_status!=='Pending';
+            const card=document.createElement('div');
+            card.className='break-type-card'+(exhausted||approvalNeeded?' disabled':'');
+            let chip='';
+            if(b.requires_approval){
+                if(b.approval_status==='Approved') chip='<span class="status-chip approved"><i class="bi bi-check-circle-fill"></i>Approved</span>';
+                else if(b.approval_status==='Pending') chip='<span class="status-chip pending"><i class="bi bi-hourglass-split"></i>Pending</span>';
+                else chip='<span class="status-chip none"><i class="bi bi-shield-exclamation"></i>Approval needed</span>';
+            } else if(exhausted) chip='<span class="status-chip none"><i class="bi bi-x-circle"></i>Limit reached</span>';
+            else if(used>0) chip='<span class="status-chip pending" style="background:#ECFEFF;color:#0E7490;">'+used+'/'+limit+' min used</span>';
+            card.innerHTML='<div class="bt-icon" style="background:'+st.bg+';color:'+st.color+';"><i class="bi '+st.icon+'"></i></div><div style="flex:1;min-width:0;"><div class="d-flex justify-content-between align-items-center"><span class="bt-name">'+esc(b.break_type)+'</span>'+chip+'</div><div class="bt-meta">'+esc(b.description)+'</div><div class="usage-track"><div class="usage-fill" style="width:'+pct+'%;background:'+st.color+';"></div></div></div>';
+            if(!exhausted&&!approvalNeeded) card.onclick=()=>startBreak(b.break_type);
+            else if(approvalNeeded) card.onclick=()=>{const r=document.getElementById('lunchReason');if(r)r.focus();};
+            c.appendChild(card);
         });
     }).catch(()=>{});
 }
@@ -257,8 +267,7 @@ function startBreak(breakType) {
         .then(r=>r.json()).then(d=>{
             if(d.break_id){
                 localStorage.setItem('activeBreakId',d.break_id);
-                const c=document.getElementById('activeBreakInfo');
-                c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${d.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started now</small><div class="time-display">0 min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;
+                checkActiveBreak(); loadAvailableBreaks(); loadUserBreaks();
                 showMsg('Break started!','success');
             }else showMsg(d.error||'Failed','error');
         }).catch(()=>showMsg('Error starting break','error'));
@@ -271,27 +280,72 @@ function endBreak() {
             if(ab){localStorage.setItem('activeBreakId',ab.break_id);endBreak();}
         });return;
     }
-    fetch(`/api/end-break/${id}`,{method:'POST'}).then(r=>r.json()).then(d=>{localStorage.removeItem('activeBreakId');checkActiveBreak();loadUserBreaks();showMsg(`Break ended: ${d.duration_minutes} min`,'success');}).catch(()=>showMsg('Failed to end break','error'));
+    fetch(`/api/end-break/${id}`,{method:'POST'}).then(r=>r.json()).then(d=>{localStorage.removeItem('activeBreakId');checkActiveBreak();loadAvailableBreaks();loadUserBreaks();showMsg(`Break ended: ${d.duration_minutes} min`,'success');}).catch(()=>showMsg('Failed to end break','error'));
 }
+let activeBreakStart=null, activeBreakType='', activeBreakLimit=0;
 function checkActiveBreak() {
     fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
         if(!Array.isArray(breaks))return;
         const c=document.getElementById('activeBreakInfo');
         if(!c)return;
         const ab=breaks.find(b=>b.status==='Active');
-        if(ab){            const el=calcElapsed(ab.start_time);const st=fmtHMSShort(ab.start_time);c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${ab.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started ${st}</small><div class="time-display">${el} min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;localStorage.setItem('activeBreakId',ab.break_id);
+        if(ab){
+            activeBreakStart=new Date(ab.start_time).getTime();
+            activeBreakType=ab.break_type;
+            const bt=breakTypesData.find(t=>t.break_type===ab.break_type);
+            activeBreakLimit=bt&&bt.daily_limit_minutes?bt.daily_limit_minutes:0;
+            const st=BREAK_STYLE[ab.break_type]||{icon:'bi-cup-hot',color:'#475569',bg:'#F1F5F9'};
+            c.innerHTML='<div class="text-center py-2"><div class="break-timer" id="activeBreakTimer">0 min</div><div class="mt-2 mb-1" style="font-size:12px;font-weight:700;">'+esc(ab.break_type)+' Break <span class="status-chip approved"><i class="bi bi-play-circle-fill"></i>Active</span></div><small class="text-muted" style="font-size:10px;">Started '+fmtHMSShort(ab.start_time)+'</small>'+(activeBreakLimit?'<div class="usage-track mx-2 mt-2"><div class="usage-fill" id="activeBreakProgress" style="width:0%;background:'+st.color+';"></div></div><small class="text-muted" style="font-size:9px;">Daily limit: '+activeBreakLimit+' min</small>':'')+'<div class="mt-3"><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:7px 22px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div></div>';
+            renderActiveBreakTick();
+            localStorage.setItem('activeBreakId',ab.break_id);
             const bm=document.getElementById('breakMessage');if(bm)bm.style.display='none';
-        }else{c.innerHTML='<p class="text-muted mb-0">No active break</p>';localStorage.removeItem('activeBreakId');}
+        }else{
+            activeBreakStart=null;
+            c.innerHTML='<div class="text-center py-4"><div style="font-size:34px;color:#CBD5E1;"><i class="bi bi-cup-hot"></i></div><p class="text-muted mb-0 mt-2" style="font-size:12px;">No active break</p></div>';
+            localStorage.removeItem('activeBreakId');
+        }
     }).catch(()=>{setTimeout(checkActiveBreak,2000);});
+}
+function renderActiveBreakTick() {
+    if(!activeBreakStart)return;
+    const el=document.getElementById('activeBreakTimer');
+    if(el)el.textContent=Math.max(0,Math.floor((Date.now()-activeBreakStart)/60000))+' min';
+    const p=document.getElementById('activeBreakProgress');
+    if(p&&activeBreakLimit)p.style.width=Math.min(100,Math.round(Math.max(0,Date.now()-activeBreakStart)/60000/activeBreakLimit*100))+'%';
 }
 function loadUserBreaks() {
     fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
         if(!Array.isArray(breaks))return;
-        const c=document.getElementById('breaksHistoryContainer');
-        if(!c)return;
-        if(!breaks.length){c.innerHTML='<p class="text-muted mb-0">No breaks this shift</p>';return;}
-        c.innerHTML=breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${b.break_type}</strong> <span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></div><div class="text-end"><small class="text-muted">${fmtHMSShort(b.start_time)} - ${b.end_time?fmtHMSShort(b.end_time):'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
+        const tbody=document.getElementById('breaksHistoryBody');
+        if(!tbody)return;
+        if(!breaks.length){tbody.innerHTML='<tr><td colspan="5" class="text-center text-muted py-4">No breaks this shift</td></tr>';return;}
+        tbody.innerHTML=breaks.map(b=>`<tr><td><strong>${esc(b.break_type)}</strong></td><td><span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></td><td>${fmtHMSShort(b.start_time)}</td><td>${b.end_time?fmtHMSShort(b.end_time):'now'}</td><td>${b.duration_minutes||'...'} min</td></tr>`).join('');
     }).catch(()=>{});
+}
+function loadLunchApprovals() {
+    fetch('/api/break-approvals').then(r=>r.json()).then(items=>{
+        const c=document.getElementById('lunchApprovalContainer');
+        if(!c)return;
+        const list=Array.isArray(items)?items:[];
+        let html='';
+        if(list.length){
+            html=list.slice(0,4).map(a=>'<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:#F8FAFC;border-radius:8px;"><span><strong style="font-size:12px;">'+esc(a.break_date)+'</strong><br><small class="text-muted" style="font-size:10px;">'+esc(a.reason||'Lunch break request')+'</small></span><span class="status-chip '+String(a.status).toLowerCase()+'">'+esc(a.status)+'</span></div>').join('');
+        } else {
+            html='<p class="text-muted mb-0" style="font-size:11px;">No lunch approval requests yet.</p>';
+        }
+        html+='<hr class="my-2"><input type="text" id="lunchReason" class="form-control form-control-sm mb-2" placeholder="Reason for lunch break" maxlength="200"><button class="btn btn-sm w-100" style="background:var(--primary);color:white;" onclick="requestLunchApproval()"><i class="bi bi-send-fill me-1"></i>Request Lunch Approval</button>';
+        c.innerHTML=html;
+    }).catch(()=>{});
+}
+function requestLunchApproval() {
+    const r=document.getElementById('lunchReason');
+    const val=r?r.value.trim():'';
+    if(!val){showMsg('Please add a reason','error');return;}
+    fetch('/api/break-approvals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({break_type:'Lunch',reason:val})})
+        .then(res=>res.json()).then(d=>{
+            if(d.approval_id||d.message){showMsg('Lunch approval requested','success');loadLunchApprovals();loadAvailableBreaks();}
+            else showMsg(d.error||'Failed','error');
+        }).catch(()=>showMsg('Request failed','error'));
 }
 function loadLoginHours() {
     const dateFilter=document.getElementById('loginDateFilter');
@@ -312,22 +366,14 @@ function loadShiftSummary() {
         if(ef)ef.textContent=d.efficiency+'%';
     }).catch(()=>{});
 }
-function calcElapsed(isoStr){
-    if(!isoStr)return 0;
-    const start=new Date(isoStr);
-    const now=new Date();
-    const diff=now-start;
-    if(diff<0)return 0;
-    return Math.floor(diff/60000);
-}
 function fmtHMSShort(isoStr){
     if(!isoStr)return 'N/A';
-    const d=new Date(isoStr);
-    return d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    if(isoStr.includes('T'))return new Date(isoStr).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit',timeZone:'Asia/Kolkata'});
+    return isoStr.split(' ').pop()||isoStr;
 }
 function showMsg(text,type){const d=document.getElementById('breakMessage');document.getElementById('breakMessageText').textContent=text;document.getElementById('breakMessageText').className=type==='success'?'text-success':'text-danger';d.style.display='block';setTimeout(()=>d.style.display='none',3000);}
 async function loadHolidays(){const r=await fetch('/api/holidays');const data=await r.json();const c=document.getElementById('holidaysContainer');if(!c||!Array.isArray(data))return;const now=new Date();const upcoming=data.filter(h=>new Date(h.date)>=now).sort((a,b)=>new Date(a.date)-new Date(b.date)).slice(0,5);if(!upcoming.length){c.innerHTML='<p class="text-muted mb-0">No upcoming holidays</p>';return;}c.innerHTML=upcoming.map(h=>`<div class="d-flex justify-content-between align-items-center mb-2 p-2" style="background:#F8FAFC;border-radius:8px;"><span><strong style="font-size:13px;">${esc(h.name)}</strong><br><small class="text-muted">${h.date}</small></span><span class="badge ${h.type==='National'?'bg-primary':'bg-warning text-dark'} rounded-pill">${h.type}</span></div>`).join('');}
-async function loadNotifications(){const r=await fetch('/api/notifications');const data=await r.json();const b=document.getElementById('notifBadge');if(!b)return;if(data&&data.unread>0){b.style.display='inline';b.textContent=data.unread;}else b.style.display='none';const c=document.getElementById('notificationsContainer');if(!c)return;const items=data&&data.data?data.data.slice(0,5):[];if(!items.length){c.innerHTML='<p class="text-muted mb-0">No notifications</p>';return;}c.innerHTML=items.map(n=>`<div class="notification-item ${n.is_read?'':'fw-bold'}" style="${n.is_read?'':'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');if(data.unread>0){fetch('/api/notifications/read',{method:'POST'});}}setInterval(loadNotifications,30000);
+async function loadNotifications(){const r=await fetch('/api/notifications');const data=await r.json();const b=document.getElementById('notifBadge');if(!b)return;if(data&&data.unread>0){b.style.display='inline';b.textContent=data.unread;}else b.style.display='none';const all=(data&&data.data)||[];const render=(id,count)=>{const c=document.getElementById(id);if(!c)return;const items=all.slice(0,count);if(!items.length){c.innerHTML='<p class="text-muted mb-0">No notifications</p>';return;}c.innerHTML=items.map(n=>`<div class="notification-item ${n.is_read?'':'fw-bold'}" style="${n.is_read?'':'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');};render('notificationsContainer',5);render('notificationsHome',3);if(data.unread>0){fetch('/api/notifications/read',{method:'POST'});}}setInterval(loadNotifications,30000);
 function esc(t){const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'};return(t||'').replace(/[&<>"']/g,c=>m[c]);}
 
 const MONTHS=['','January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -446,6 +492,6 @@ function renderCalendar(){
     grid.innerHTML=html;
 }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>

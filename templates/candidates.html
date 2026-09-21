@@ -1,28 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Candidates</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
@@ -30,17 +9,17 @@
         .navbar-nav .nav-link i { margin-right: 6px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
         .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-header i { margin-right: 8px; color: #94A3B8; }
         .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
         .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #334155; }
         .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
         .table tbody tr:hover { background: #FAFBFC; }
@@ -59,6 +38,7 @@
         .status-Interviewed { background: #EDE9FE; color: #5B21B6; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
         .status-Offered { background: #E0F2FE; color: #0369A1; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
         .status-Hired { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; }
     </style>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -93,7 +73,30 @@
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="convertModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title fw-bold"><i class="bi bi-person-check me-2"></i>Convert to Employee</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+        <input type="hidden" id="convertCandidateId">
+        <div class="mb-3"><label class="form-label">Name</label><input id="convertName" class="form-control" readonly></div>
+        <div class="mb-3"><label class="form-label">Email</label><input id="convertEmail" class="form-control" readonly></div>
+        <div class="mb-3"><label class="form-label">Phone</label><input id="convertPhone" class="form-control" readonly></div>
+        <div class="mb-3"><label class="form-label">Department</label><input id="convertDept" class="form-control" placeholder="e.g. Engineering"></div>
+        <div class="mb-3"><label class="form-label">Designation</label><input id="convertDesig" class="form-control" placeholder="e.g. Software Engineer"></div>
+        <div class="mb-3"><label class="form-label">Date of Joining</label><input id="convertDoj" class="form-control" type="date"></div>
+        <div class="mb-3"><label class="form-label">Manager</label><select id="convertManager" class="form-select"><option value="">-- None --</option></select></div>
+    </div>
+    <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-success" onclick="doConvert()"><i class="bi bi-person-check me-1"></i>Convert to Employee</button>
+    </div>
+</div></div></div>
+
+<div class="toast-container" id="toastContainer"></div>
+
 <script>
+let convertCandidates = [];
+
 document.addEventListener('DOMContentLoaded', async () => {
     const r = await fetch('/api/jobs');
     const jobs = await r.json();
@@ -101,13 +104,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const o = document.createElement('option'); o.value = ''; o.textContent = '-- None --'; sel.appendChild(o);
     jobs.forEach(j => { const opt = document.createElement('option'); opt.value = j.id; opt.textContent = j.title; sel.appendChild(opt); });
     loadCandidates();
+    loadManagers();
 });
+async function loadManagers() {
+    const r = await fetch('/api/users?per_page=200');
+    const d = await r.json();
+    const users = d.data || [];
+    const sel = document.getElementById('convertManager');
+    sel.innerHTML = '<option value="">-- None --</option>' + users.map(u => `<option value="${u.emp_id}">${esc(u.name)} (${u.emp_id})</option>`).join('');
+}
 async function loadCandidates() {
     const r = await fetch('/api/candidates');
-    const data = await r.json();
+    convertCandidates = await r.json();
     const tbody = document.getElementById('candTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No candidates</td></tr>'; return; }
-    tbody.innerHTML = data.map(c => `<tr>
+    if (!convertCandidates.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No candidates</td></tr>'; return; }
+    tbody.innerHTML = convertCandidates.map(c => `<tr>
         <td><strong>${c.name}</strong></td><td>${c.email}</td><td>${c.phone || '-'}</td>
         <td>${c.job_title}</td>
         <td><span class="status-${c.status}">${c.status}</span></td>
@@ -121,9 +132,41 @@ async function loadCandidates() {
                 <option value="Hired" ${c.status==='Hired'?'selected':''}>Hired</option>
                 <option value="Rejected" ${c.status==='Rejected'?'selected':''}>Rejected</option>
             </select>
+            ${c.status === 'Hired' ? `<button class="btn btn-primary btn-sm ms-1" onclick="openConvertModal(${c.id})"><i class="bi bi-person-check"></i></button>` : ''}
         </td>
     </tr>`).join('');
 }
+function openConvertModal(cid) {
+    const c = convertCandidates.find(x => x.id === cid);
+    if (!c) return;
+    document.getElementById('convertCandidateId').value = cid;
+    document.getElementById('convertName').value = c.name;
+    document.getElementById('convertEmail').value = c.email;
+    document.getElementById('convertPhone').value = c.phone || '';
+    document.getElementById('convertDept').value = '';
+    document.getElementById('convertDesig').value = '';
+    document.getElementById('convertDoj').value = new Date().toISOString().split('T')[0];
+    new bootstrap.Modal(document.getElementById('convertModal')).show();
+}
+async function doConvert() {
+    const cid = parseInt(document.getElementById('convertCandidateId').value);
+    const body = {
+        department: document.getElementById('convertDept').value,
+        designation: document.getElementById('convertDesig').value,
+        date_of_joining: document.getElementById('convertDoj').value,
+        manager_emp_id: document.getElementById('convertManager').value || undefined
+    };
+    const r = await fetch('/api/candidates/' + cid + '/convert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (r.ok) {
+        showToast('Employee ' + d.emp_id + ' created - pre-hire onboarding started', 'success');
+        bootstrap.Modal.getInstance(document.getElementById('convertModal')).hide();
+        loadCandidates();
+    } else {
+        showToast(d.error || 'Conversion failed', 'error');
+    }
+}
+
 async function addCandidate() {
     const body = { name: document.getElementById('cname').value, email: document.getElementById('cemail').value, phone: document.getElementById('cphone').value, job_id: document.getElementById('cjob').value || null };
     if (!body.name || !body.email) return alert('Name and email required');

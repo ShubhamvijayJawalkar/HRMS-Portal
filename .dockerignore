@@ -1,0 +1,39 @@
+# Environment & secrets
+.env
+.env.*
+
+# Database
+*.duckdb
+*.duckdb.wal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Tests
+tests/
+
+# Dev tools & docs
+generate_ppt.py
+ppt_screenshots/
+HRMS_Deployment_Guide.docx
+AGENTS.md
+
+# Deployment configs (not needed inside image)
+deploy/
+.github/
+.opencode/
+.pytest_cache/
+
+# Generated uploads (use persistent volume instead)
+uploads/*
+!uploads/.gitkeep
+
+# IDE
+.DS_Store
+.vscode/
+.idea/

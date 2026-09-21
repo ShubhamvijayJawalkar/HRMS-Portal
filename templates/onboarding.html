@@ -1,94 +1,668 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Onboarding</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
-        .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
-        .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
-        .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
-        .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
-        .navbar-nav .nav-link i { margin-right: 6px; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
-        .card-body { padding: 16px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
-        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
-        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
-        .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
-        .table tbody tr:hover { background: #FAFBFC; }
-        .logout-btn { color: #94A3B8; font-weight: 600; text-decoration: none; padding: 8px 16px; border-radius: 8px; }
-        .logout-btn:hover { color: white; background: rgba(255,255,255,0.1); }
-        .user-info { display: flex; align-items: center; gap: 12px; color: #CBD5E1; }
-        .status-badge { padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
-        .status-Pending { background: #FEFCE8; color: #92400E; }
-        .status-Approved { background: #F0FDF4; color: #166534; }
-        .status-Rejected { background: #FEF2F2; color: #991B1B; }
-        .btn-sm { border-radius: 8px; font-weight: 600; padding: 5px 14px; font-size: 12px; }
-        .alert { border-radius: 10px; border: none; }
-        .status-Completed { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        {% include "_shared_css.html" %}
+        .page-title{font-size:22px;font-weight:800;color:var(--text);letter-spacing:-.3px;margin-bottom:20px}
+        .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--card-radius);box-shadow:var(--shadow-sm);margin-bottom:20px}
+        .card-header{background:var(--primary);color:white;border-radius:var(--card-radius) var(--card-radius) 0 0!important;padding:12px 16px;font-weight:700;font-size:13px;border:none}
+        .card-header i{margin-right:8px;color:#94A3B8}
+        .card-body{padding:16px}
+        .form-label{font-weight:600;color:var(--text);font-size:12px;margin-bottom:4px}
+        .form-control,.form-select{border:1.5px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12px;background:var(--background)}
+        .form-control:focus,.form-select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(71,85,105,.12);background:var(--surface)}
+        .btn-primary{background:var(--primary);border:none;border-radius:var(--button-radius);font-weight:700;padding:7px 14px;font-size:12px}
+        .btn-primary:hover{background:#334155;transform:translateY(-1px);box-shadow:0 4px 12px rgba(15,23,42,.2)}
+        .btn-success{background:var(--success);border:none;border-radius:var(--button-radius);font-weight:600}
+        .btn-danger{background:var(--destructive);border:none;border-radius:var(--button-radius);font-weight:600}
+        .btn-outline-secondary{border-color:var(--border);color:var(--text-muted);font-weight:600;font-size:12px;border-radius:var(--button-radius)}
+        .btn-outline-secondary:hover{background:var(--muted);color:var(--text);border-color:var(--border)}
+        .table th{color:var(--text);font-weight:600;border:none;padding:8px 10px;background:#F8FAFC;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+        .table td{vertical-align:middle;border-color:var(--border);padding:7px 10px;font-size:12px}
+        .table tbody tr:hover{background:#FAFBFC}
+        .btn-sm{border-radius:6px;font-weight:600;padding:3px 10px;font-size:11px}
+        .status-badge{padding:4px 10px;border-radius:16px;font-size:11px;font-weight:600;display:inline-block}
+        .status-Pending{background:#FEFCE8;color:#92400E}
+        .status-InProgress,.status-InProgress2{background:#F1F5F9;color:#334155}
+        .status-Uploaded{background:#F1F5F9;color:#334155}
+        .status-Approved{background:#F0FDF4;color:#166534}
+        .status-Rejected{background:#FEF2F2;color:#991B1B}
+        .status-Completed{background:#F0FDF4;color:#166534}
+        .stat-card{padding:10px 12px;border-radius:var(--card-radius);border:1px solid var(--border);background:var(--surface);transition:var(--transition-base)}
+        .stat-card:hover{box-shadow:var(--shadow);transform:translateY(-2px)}
+        .stat-icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;margin-bottom:6px}
+        .stat-value{font-size:17px;font-weight:800;color:var(--text);letter-spacing:-.5px}
+        .stat-label{color:var(--text-muted);font-size:10px;font-weight:500}
+        .empty-state{text-align:center;padding:40px 20px;color:var(--text-muted)}
+        .empty-state i{font-size:36px;margin-bottom:10px;display:block}
+        .empty-state p{font-size:13px;margin:0}
+        .employee-card{border:1px solid var(--border);border-radius:var(--card-radius);padding:12px 14px;background:var(--surface);cursor:pointer;transition:var(--transition-fast);margin-bottom:8px}
+        .employee-card:hover{border-color:var(--accent);box-shadow:var(--shadow)}
+        .employee-card.active{border-color:var(--accent);background:var(--primary);color:white}
+        .employee-card.active .emp-name{color:white}
+        .employee-card.active .emp-id{color:#94A3B8}
+        .employee-card .emp-name{font-weight:700;font-size:13px;color:var(--text)}
+        .employee-card .emp-id{font-size:11px;color:var(--text-muted)}
+        .upload-zone{border:2px dashed var(--border);border-radius:10px;padding:16px;text-align:center;cursor:pointer;transition:var(--transition-fast);font-size:12px;color:var(--text-muted);margin-bottom:12px;position:relative}
+        .upload-zone:hover{border-color:var(--accent);background:var(--accent-light)}
+        .upload-zone.has-file{border-color:var(--success);background:#F0FDF4;color:#166534;cursor:default}
+        .upload-zone.submitted{border-color:var(--info);background:#F1F5F9;color:#334155;cursor:default}
+        .upload-zone .file-info{margin-top:6px;font-size:11px}
+        .upload-zone .submit-row{margin-top:8px;display:flex;gap:6px;justify-content:center}
+        .checklist-step{display:flex;align-items:flex-start;gap:12px;padding:12px 14px;border-radius:10px;margin-bottom:8px;transition:var(--transition-fast)}
+        .checklist-step.completed{background:#F0FDF4;border:1px solid #BBF7D0}
+        .checklist-step.active{background:#F1F5F9;border:1px solid #CBD5E1}
+        .checklist-step.pending{background:#F8FAFC;border:1px solid var(--border)}
+        .checklist-step .step-num{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+        .checklist-step.completed .step-num{background:#22C55E;color:white}
+        .checklist-step.active .step-num{background:#64748B;color:white}
+        .checklist-step.pending .step-num{background:#E2E8F0;color:#94A3B8}
+        .checklist-step .step-text .step-label{font-weight:700;font-size:12px;color:var(--text)}
+        .checklist-step.completed .step-text .step-label{color:#166534}
+        .checklist-step.active .step-text .step-label{color:#334155}
+        .checklist-step .step-text .step-desc{font-size:11px;color:var(--text-muted);margin-top:2px}
+        .checklist-step .step-status{margin-left:auto;font-size:11px;font-weight:600;flex-shrink:0}
+        .progress-bar-wrap{background:var(--border);border-radius:99px;height:6px;overflow:hidden;width:100%}
+        .progress-bar-fill{height:100%;border-radius:99px;background:var(--success);transition:width .4s ease}
+        .toast-container{position:fixed;top:20px;right:20px;z-index:9999}
+        .status-Onboarding{background:#F1F5F9;color:#334155}
     </style>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
 </head>
 <body>
 {% include "_navbar.html" %}
 
 <div class="container-fluid p-4">
-    <h2 class="page-title">Onboarding Tasks</h2>
-    <div class="card">
-        <div class="card-header"><h5 class="mb-0">My Tasks</h5></div>
-        <div class="card-body">
-            <div class="table-responsive">
-                <table class="table table-hover">
-                    <thead><tr><th>Task</th><th>Assigned To</th><th>Due Date</th><th>Status</th><th>Completed At</th></tr></thead>
-                    <tbody id="tasksTable"><tr><td colspan="5" class="text-center text-muted">Loading...</td></tr></tbody>
-                </table>
+    <div class="d-flex align-items-center justify-content-between mb-4">
+        <h2 class="page-title mb-0">Employee Onboarding</h2>
+        {% if is_admin or is_hr %}
+        <div class="d-flex align-items-center gap-2">
+            <button class="btn btn-sm btn-outline-success" onclick="downloadExcel()" title="Download Excel"><i class="bi bi-file-earmark-excel me-1"></i>Download</button>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if is_admin or is_hr %}
+    <div class="row g-2 mb-3">
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-hourglass-split"></i></div><div class="stat-value" id="countPending">-</div><div class="stat-label">Pending</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F1F5F9;color:#334155;"><i class="bi bi-upload"></i></div><div class="stat-value" id="countUploaded">-</div><div class="stat-label">Uploaded</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:#16A34A;"><i class="bi bi-check-circle"></i></div><div class="stat-value" id="countApproved">-</div><div class="stat-label">Approved</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F1F5F9;color:#475569;"><i class="bi bi-people"></i></div><div class="stat-value" id="countEmployees">-</div><div class="stat-label">Employees</div></div></div>
+    </div>
+
+    <div class="d-flex align-items-center gap-2 mb-3">
+        <button class="btn btn-primary" onclick="openOnboardingModal()"><i class="bi bi-people-fill me-1"></i>View Onboarding Employees</button>
+        <button class="btn btn-outline-info" onclick="showPreHires()"><i class="bi bi-person-clock me-1"></i>Pending Pre-hires</button>
+    </div>
+
+    <div id="preHirePanel" style="display:none;" class="mb-3">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-person-clock"></i>Pending Pre-hires (awaiting onboarding)</h5>
+                <button class="btn btn-sm btn-outline-light" onclick="document.getElementById('preHirePanel').style.display='none'"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="card-body">
+                <div id="preHireList"><div class="empty-state"><p>Loading...</p></div></div>
             </div>
         </div>
     </div>
+
+    <div id="detailPlaceholder" class="card"><div class="card-body"><div class="empty-state"><i class="bi bi-arrow-left"></i><p>Click "View Onboarding Employees" to see active onboarding status</p></div></div></div>
+    <div id="detailPanel" style="display:none;">
+        <div class="card mb-3">
+            <div class="card-header d-flex align-items-center justify-content-between">
+                <h5 class="mb-0"><i class="bi bi-person-badge"></i> <span id="detailName"></span> <small class="text-muted" id="detailEmpId"></small></h5>
+                <button class="btn btn-sm btn-outline-light" onclick="closeDetail()"><i class="bi bi-x-lg"></i></button>
+            </div>
+            <div class="card-body">
+                <h6 class="fw-bold mb-2" style="font-size:13px;"><i class="bi bi-file-earmark-text me-1"></i>Document Review</h6>
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead><tr><th>Document</th><th>Status</th><th>File</th><th>Reviewed By</th><th>Actions</th></tr></thead>
+                        <tbody id="docTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <div id="proceedArea" style="display:none;" class="mb-3">
+            <div class="card border-success">
+                <div class="card-body d-flex align-items-center justify-content-between py-3">
+                    <div><i class="bi bi-arrow-right-circle text-success me-2" style="font-size:18px;"></i><strong id="proceedText">Ready for next step</strong><br><small class="text-muted" id="proceedDesc"></small></div>
+                    <button class="btn btn-success" id="proceedBtn" onclick="proceedToNext()"><i class="bi bi-arrow-right-circle me-1"></i><span id="proceedBtnText">Proceed</span></button>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="card-header"><h5 class="mb-0"><i class="bi bi-clipboard-check"></i>Tasks</h5></div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead><tr><th>Task</th><th>Assigned To</th><th>Due Date</th><th>Status</th><th>Actions</th></tr></thead>
+                        <tbody id="taskTable"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="onboardingModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title fw-bold"><i class="bi bi-people-fill me-2"></i>Active Onboarding</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <div id="activeList"><div class="empty-state"><p>Loading...</p></div></div>
+        </div>
+    </div></div></div>
+
+    <div class="modal fade" id="initModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title fw-bold">Initiate Onboarding</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <div class="mb-3"><label class="form-label">Select Employee</label><select id="initEmpId" class="form-select"></select><div class="form-text">Only employees without active onboarding are shown</div></div>
+            <div class="mb-3"><label class="form-label">Required Documents</label><div class="small text-muted">ID Proof, Address Proof, Photo, Previous Organisation Documents, Qualification Documents</div></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" onclick="initOnboarding()">Initiate</button></div>
+    </div></div></div>
+
+    {% else %}
+
+    <div class="row">
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0"><i class="bi bi-file-earmark-arrow-up"></i>Upload Documents</h5></div>
+                <div class="card-body" id="employeeDocs"><div class="empty-state"><i class="bi bi-hourglass-split"></i><p>Loading...</p></div></div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header"><h5 class="mb-0"><i class="bi bi-list-check"></i>Onboarding Checklist</h5></div>
+                <div class="card-body" id="employeeChecklist"><div class="empty-state"><p>Loading...</p></div></div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
 </div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<div class="modal fade" id="rejectModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+    <div class="modal-header" style="background:var(--destructive);color:white;"><h5 class="modal-title fw-bold"><i class="bi bi-exclamation-triangle me-2"></i>Reject Document</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+    <div class="modal-body">
+        <label class="form-label">Rejection Reason *</label>
+        <textarea id="rejectReason" class="form-control" rows="3" placeholder="Describe the issue with the document..."></textarea>
+        <div id="rejectError" class="text-danger small mt-1" style="display:none;">Reason is required to reject a document.</div>
+        <div class="form-text">The employee will be notified to re-upload.</div>
+    </div>
+    <div class="modal-footer">
+        <button class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger" onclick="submitReject()"><i class="bi bi-x-lg me-1"></i>Reject & Notify</button>
+    </div>
+</div></div></div>
+
 <script>
-document.addEventListener('DOMContentLoaded', loadTasks);
-async function loadTasks() {
+const IS_MANAGER = {{ 'true' if is_admin or is_hr else 'false' }};
+let selectedEmp = null;
+let allData = [];
+let onboardingData = { active: [], completed: [] };
+
+document.addEventListener('DOMContentLoaded', () => {
+    if (IS_MANAGER) loadChecklist();
+    else loadEmployeeView();
+});
+
+async function loadChecklist() {
+    const r = await fetch('/api/onboarding-checklist');
+    allData = await r.json();
+    let totalPending = 0, totalUploaded = 0, totalApproved = 0;
+    allData.forEach(e => {
+        e.docs.forEach(d => {
+            if (d.status === 'Pending') totalPending++;
+            else if (d.status === 'Uploaded') totalUploaded++;
+            else if (d.status === 'Approved') totalApproved++;
+        });
+    });
+    document.getElementById('countPending').textContent = totalPending;
+    document.getElementById('countUploaded').textContent = totalUploaded;
+    document.getElementById('countApproved').textContent = totalApproved;
+    document.getElementById('countEmployees').textContent = allData.length;
+    if (selectedEmp) {
+        const emp = allData.find(e => e.emp_id === selectedEmp);
+        if (emp) renderDetail(emp);
+    }
+}
+
+async function openOnboardingModal() {
+    const r = await fetch('/api/onboarding-status');
+    onboardingData = await r.json();
+    renderActiveList(onboardingData.active);
+    new bootstrap.Modal(document.getElementById('onboardingModal')).show();
+}
+
+function renderActiveList(employees) {
+    const list = document.getElementById('activeList');
+    if (!employees.length) { list.innerHTML = '<div class="empty-state"><i class="bi bi-check-circle"></i><p>No active onboarding in progress</p></div>'; return; }
+    list.innerHTML = employees.map(e => {
+        const pct = Math.round((e.progress / 5) * 100);
+        const currentStep = e.steps.find(s => s.status !== 'Completed');
+        return `<div class="employee-card" onclick="selectEmployeeFromModal('${e.emp_id}')" style="cursor:pointer;">
+            <div class="d-flex justify-content-between align-items-start">
+                <div><div class="emp-name">${esc(e.name)}</div><div class="emp-id">${esc(e.emp_id)} &middot; ${esc(e.department)}</div></div>
+                <span class="status-badge status-Onboarding" style="font-size:10px;">Step ${e.current_step}/5</span>
+            </div>
+            <div class="mt-2"><div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div></div>
+            <div class="mt-1" style="font-size:11px;color:var(--text-muted);">Current: ${currentStep ? esc(currentStep.label) : 'Done'}</div>
+        </div>`;
+    }).join('');
+}
+
+async function selectEmployeeFromModal(empId) {
+    bootstrap.Modal.getInstance(document.getElementById('onboardingModal')).hide();
+    await selectEmployee(empId);
+}
+
+function closeDetail() {
+    selectedEmp = null;
+    document.getElementById('detailPlaceholder').style.display = '';
+    document.getElementById('detailPanel').style.display = 'none';
+}
+
+async function selectEmployee(empId) {
+    selectedEmp = empId;
+    document.getElementById('detailPlaceholder').style.display = 'none';
+    document.getElementById('detailPanel').style.display = '';
+    const emp = allData.find(e => e.emp_id === empId);
+    if (emp) renderDetail(emp);
+    else {
+        const r = await fetch('/api/onboarding-checklist?emp_id=' + empId);
+        const data = await r.json();
+        renderDetail(data[0] || { emp_id: empId, employee: empId, docs: [], progress: { uploaded: 0, approved: 0, total: 0 }, workflow: { current_step: 0, steps: [] } });
+    }
+    loadTasksForEmp(empId);
+    updateProceedArea(empId);
+}
+
+async function updateProceedArea(empId) {
+    const area = document.getElementById('proceedArea');
+    const statusR = await fetch('/api/onboarding-status');
+    const statusData = await statusR.json();
+    const emp = (statusData.active || []).find(e => e.emp_id === empId);
+    if (!emp) { area.style.display = 'none'; return; }
+    const step2Done = emp.steps[1] && emp.steps[1].status === 'Completed';
+    const step3Done = emp.steps[2] && emp.steps[2].status === 'Completed';
+    const step4Done = emp.steps[3] && emp.steps[3].status === 'Completed';
+    const step5Done = emp.steps[4] && emp.steps[4].status === 'Completed';
+    if (emp.current_step === 2 && step2Done) {
+        area.style.display = '';
+        document.getElementById('proceedText').textContent = 'Documents Verified - Ready for System Allocation';
+        document.getElementById('proceedDesc').textContent = 'All documents are approved. Click to create the System Allocation task.';
+        document.getElementById('proceedBtnText').textContent = 'Proceed to System Allocation';
+        document.getElementById('proceedBtn').className = 'btn btn-success';
+    } else if (emp.current_step === 3 && step3Done) {
+        area.style.display = '';
+        document.getElementById('proceedText').textContent = 'System Allocation Complete - Ready for Desk & ID Card';
+        document.getElementById('proceedDesc').textContent = 'System has been allocated. Click to create the Desk & ID Card task.';
+        document.getElementById('proceedBtnText').textContent = 'Proceed to Desk & ID Card';
+        document.getElementById('proceedBtn').className = 'btn btn-success';
+    } else if (emp.current_step === 4 && step4Done) {
+        area.style.display = '';
+        document.getElementById('proceedText').textContent = 'Desk & ID Card Complete - Ready for Team Introduction';
+        document.getElementById('proceedDesc').textContent = 'Click to proceed to team introduction (employee action).';
+        document.getElementById('proceedBtnText').textContent = 'Proceed to Team Introduction';
+        document.getElementById('proceedBtn').className = 'btn btn-success';
+    } else {
+        area.style.display = 'none';
+    }
+}
+
+async function proceedToNext() {
+    if (!selectedEmp) return;
+    if (!confirm('Proceed to the next onboarding step?')) return;
+    const r = await fetch('/api/onboarding-proceed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: selectedEmp }) });
+    const d = await r.json();
+    showToast(r.ok ? d.message : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) { loadChecklist().then(() => selectEmployee(selectedEmp)); }
+}
+
+function renderDetail(emp) {
+    document.getElementById('detailName').textContent = emp.employee;
+    document.getElementById('detailEmpId').textContent = emp.emp_id;
+    const tbody = document.getElementById('docTable');
+    if (!emp.docs.length) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No documents requested yet</td></tr>';
+    } else {
+        tbody.innerHTML = emp.docs.map(d => `<tr>
+            <td><strong>${esc(d.doc_type)}</strong></td>
+            <td><span class="status-badge status-${d.status.replace(' ', '')}">${d.status}</span></td>
+            <td>${d.file_name ? `<a href="/api/onboarding-checklist/${d.id}/file" target="_blank" class="btn btn-outline-info btn-sm"><i class="bi bi-eye"></i> View</a> <span class="text-muted" style="font-size:11px">${esc(d.file_name)}</span>` : '<span class="text-muted">-</span>'}</td>
+            <td>${d.reviewed_by ? esc(d.reviewed_by) : '<span class="text-muted">-</span>'}</td>
+            <td>${d.status === 'Uploaded' ? `<button class="btn btn-success btn-sm me-1" onclick="reviewDoc(${d.id},'Approved')"><i class="bi bi-check-lg"></i> Approve</button><button class="btn btn-danger btn-sm" onclick="openRejectModal(${d.id})"><i class="bi bi-x-lg"></i> Reject</button>` : d.status === 'Rejected' ? `<button class="btn btn-outline-secondary btn-sm" onclick="reviewDoc(${d.id},'Approved')"><i class="bi bi-check-lg"></i> Override</button>` : '<span class="text-muted">-</span>'}</td>
+        </tr>`).join('');
+    }
+}
+
+async function loadTasksForEmp(empId) {
     const r = await fetch('/api/onboarding-tasks');
     const data = await r.json();
-    const tbody = document.getElementById('tasksTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No tasks</td></tr>'; return; }
-    tbody.innerHTML = data.map(t => `<tr>
-        <td>${t.task}</td><td>${t.assigned_to}</td>
-        <td>${t.due_date || '-'}</td>
-        <td><span class="status-${t.status}">${t.status}</span></td>
-        <td>${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
+    const tasks = (Array.isArray(data) ? data : data.tasks || []).filter(t => t.emp_id === empId);
+    const tbody = document.getElementById('taskTable');
+    if (!tasks.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No tasks yet</td></tr>'; return; }
+    tbody.innerHTML = tasks.map(t => `<tr>
+        <td><strong>${esc(t.task)}</strong></td>
+        <td>${esc(t.assigned_to)}</td>
+        <td>${fmtDate(t.due_date)}</td>
+        <td><span class="status-badge status-${t.status.replace(' ', '')}">${t.status}</span></td>
+        <td>${t.status !== 'Completed' ? `<button class="btn btn-success btn-sm" onclick="completeTask(${t.id})"><i class="bi bi-check-lg"></i></button>` : '-'}</td>
     </tr>`).join('');
+}
+
+async function showPreHires() {
+    const panel = document.getElementById('preHirePanel');
+    panel.style.display = panel.style.display === 'none' ? '' : 'none';
+    if (panel.style.display !== 'none') {
+        const r = await fetch('/api/users?per_page=200');
+        const d = await r.json();
+        const users = d.data || [];
+        const preHires = users.filter(u => u.status === 'Pre-hire');
+        const list = document.getElementById('preHireList');
+        if (!preHires.length) {
+            list.innerHTML = '<div class="empty-state"><i class="bi bi-check-circle"></i><p>No pending pre-hires</p></div>';
+        } else {
+            list.innerHTML = preHires.map(u => `<div class="employee-card" onclick="initFromPreHire('${esc(u.emp_id)}')" style="cursor:pointer;">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div><div class="emp-name">${esc(u.name)}</div><div class="emp-id">${esc(u.emp_id)} &middot; ${esc(u.department||'N/A')} &middot; ${esc(u.designation||'N/A')}</div></div>
+                    <span class="status-badge status-Pending" style="font-size:10px;">Pre-hire</span>
+                </div>
+            </div>`).join('');
+        }
+    }
+}
+
+async function initFromPreHire(empId) {
+    if (!confirm('Initiate onboarding for this pre-hire employee?')) return;
+    const r = await fetch('/api/onboarding-checklist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: empId }) });
+    const d = await r.json();
+    showToast(r.ok ? 'Onboarding initiated' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) { document.getElementById('preHirePanel').style.display = 'none'; loadChecklist().then(() => selectEmployee(empId)); }
+}
+
+let pendingRejectCid = null;
+
+function openRejectModal(cid) {
+    pendingRejectCid = cid;
+    document.getElementById('rejectReason').value = '';
+    document.getElementById('rejectError').style.display = 'none';
+    new bootstrap.Modal(document.getElementById('rejectModal')).show();
+}
+
+async function submitReject() {
+    const notes = document.getElementById('rejectReason').value.trim();
+    if (!notes) {
+        document.getElementById('rejectError').style.display = 'block';
+        return;
+    }
+    document.getElementById('rejectError').style.display = 'none';
+    const r = await fetch(`/api/onboarding-checklist/${pendingRejectCid}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'Rejected', notes }) });
+    const d = await r.json();
+    showToast(r.ok ? 'Document rejected' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    bootstrap.Modal.getInstance(document.getElementById('rejectModal')).hide();
+    if (r.ok) loadChecklist().then(() => { if (selectedEmp) selectEmployee(selectedEmp); });
+}
+
+async function reviewDoc(cid, action) {
+    const r = await fetch(`/api/onboarding-checklist/${cid}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, notes: '' }) });
+    const d = await r.json();
+    showToast(r.ok ? `Document ${action.toLowerCase()}` : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) loadChecklist().then(() => { if (selectedEmp) selectEmployee(selectedEmp); });
+}
+
+async function completeTask(id) {
+    const r = await fetch(`/api/onboarding-tasks/${id}/complete`, { method: 'POST' });
+    const d = await r.json();
+    showToast(r.ok ? 'Task completed' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) { loadChecklist().then(() => { if (selectedEmp) { selectEmployee(selectedEmp); loadTasksForEmp(selectedEmp); } }); }
+}
+
+async function loadEmployeeView() {
+    const r = await fetch('/api/onboarding-checklist');
+    const data = await r.json();
+    const emp = data[0];
+    const container = document.getElementById('employeeDocs');
+    const checklistContainer = document.getElementById('employeeChecklist');
+    if (!emp || !emp.docs.length) {
+        container.innerHTML = '<div class="empty-state"><i class="bi bi-inbox"></i><p>No onboarding checklist assigned yet</p></div>';
+        checklistContainer.innerHTML = '<div class="empty-state"><i class="bi bi-inbox"></i><p>No onboarding in progress</p></div>';
+        return;
+    }
+    const wf = emp.workflow || { current_step: 0, steps: [] };
+    const canUpload = wf.current_step <= 1 && wf.current_step > 0;
+    const allUploaded = emp.docs.every(d => d.status === 'Uploaded' || d.status === 'Approved');
+    const p = emp.progress || {};
+    const pct = p.total ? Math.round((p.approved / p.total) * 100) : 0;
+
+    if (canUpload) {
+        let html = `<div class="mb-3"><div class="d-flex justify-content-between mb-1"><small class="fw-bold">Progress</small><small class="text-muted">${p.uploaded || 0}/${p.total || 0} uploaded &middot; ${p.approved || 0} approved</small></div><div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div></div>`;
+        emp.docs.forEach(d => {
+            const isUploaded = d.status === 'Uploaded' || d.status === 'Approved';
+            const isApproved = d.status === 'Approved';
+            const isRejected = d.status === 'Rejected';
+            const isSubmitted = wf.current_step >= 2;
+            if (isApproved || (isSubmitted && (d.status === 'Uploaded'))) {
+                html += `<div class="upload-zone submitted">
+                    <i class="bi bi-check-circle-fill" style="font-size:24px;margin-bottom:6px;display:block;"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <span class="status-badge status-${d.status.replace(' ', '')} mt-2">${d.status}</span>
+                    ${d.file_name ? `<div class="file-info">${esc(d.file_name)}</div>` : ''}
+                </div>`;
+            } else if (isUploaded && !isSubmitted) {
+                html += `<div class="upload-zone has-file" id="zone-${d.id}">
+                    <i class="bi bi-check-circle-fill" style="font-size:24px;margin-bottom:6px;display:block;"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <span class="status-badge status-Uploaded mt-2">Uploaded</span>
+                    ${d.file_name ? `<div class="file-info">${esc(d.file_name)}</div>` : ''}
+                </div>`;
+            } else if (isRejected) {
+                html += `<div class="upload-zone" id="zone-${d.id}" data-doc-type="${esc(d.doc_type)}" onclick="triggerUpload(${d.id})" ondragover="event.preventDefault();this.style.borderColor='var(--accent)'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();handleDrop(event,${d.id})">
+                    <input type="file" id="file-${d.id}" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onchange="handleFileSelected(${d.id})">
+                    <i class="bi bi-arrow-repeat" style="font-size:24px;margin-bottom:6px;display:block;color:var(--destructive);"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <span class="status-badge status-Rejected mt-2">Rejected</span>
+                    ${d.notes ? `<div class="file-info" style="color:var(--destructive);">Reason: ${esc(d.notes)}</div>` : ''}
+                    <div class="file-info" style="color:var(--text-muted);margin-top:4px;">Accepted: PDF, JPG, PNG, DOC | Max: ${d.doc_type === 'Photo' ? '1 MB' : '250 KB'}</div>
+                    <div class="file-info">Click or drag to re-upload</div>
+                    <div id="filename-${d.id}" style="display:none;margin-top:6px;"></div>
+                    <div id="submit-area-${d.id}" style="display:none" class="submit-row">
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();doSubmitSingle(${d.id})"><i class="bi bi-send me-1"></i>Submit</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="event.stopPropagation();cancelFile(${d.id})">Cancel</button>
+                    </div>
+                </div>`;
+            } else {
+                html += `<div class="upload-zone" id="zone-${d.id}" data-doc-type="${esc(d.doc_type)}" onclick="triggerUpload(${d.id})" ondragover="event.preventDefault();this.style.borderColor='var(--accent)'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();handleDrop(event,${d.id})">
+                    <input type="file" id="file-${d.id}" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onchange="handleFileSelected(${d.id})">
+                    <i class="bi bi-cloud-arrow-up" style="font-size:24px;margin-bottom:6px;display:block;"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <div class="file-info" style="color:var(--text-muted);margin-top:4px;">Accepted: PDF, JPG, PNG, DOC | Max: ${d.doc_type === 'Photo' ? '1 MB' : '250 KB'}</div>
+                    <span class="status-badge status-Pending mt-2">${d.status}</span>
+                    <div id="filename-${d.id}" style="display:none;margin-top:6px;"></div>
+                    <div id="submit-area-${d.id}" style="display:none" class="submit-row">
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();doSubmitSingle(${d.id})"><i class="bi bi-send me-1"></i>Submit</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="event.stopPropagation();cancelFile(${d.id})">Cancel</button>
+                    </div>
+                </div>`;
+            }
+        });
+        if (allUploaded && emp.docs.length > 0 && wf.current_step === 1) {
+            html += `<div class="mt-3 text-center"><button class="btn btn-primary" onclick="submitAllDocs()"><i class="bi bi-send me-1"></i>Submit All for Approval</button></div>`;
+        }
+        container.innerHTML = html;
+    } else if (wf.current_step >= 2) {
+        let html = `<div class="mb-3"><div class="d-flex justify-content-between mb-1"><small class="fw-bold">Documents submitted for HR approval</small><small class="text-muted">${p.approved || 0}/${p.total || 0} approved</small></div><div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div></div>`;
+        emp.docs.forEach(d => {
+            const isApproved = d.status === 'Approved';
+            const isRejected = d.status === 'Rejected';
+            if (isRejected) {
+                html += `<div class="upload-zone" id="zone-${d.id}" data-doc-type="${esc(d.doc_type)}" onclick="triggerUpload(${d.id})" ondragover="event.preventDefault();this.style.borderColor='var(--accent)'" ondragleave="this.style.borderColor=''" ondrop="event.preventDefault();handleDrop(event,${d.id})">
+                    <input type="file" id="file-${d.id}" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx" onchange="handleFileSelected(${d.id})">
+                    <i class="bi bi-arrow-repeat" style="font-size:24px;margin-bottom:6px;display:block;color:var(--destructive);"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <span class="status-badge status-Rejected mt-2">Rejected</span>
+                    ${d.notes ? `<div class="file-info" style="color:var(--destructive);">Reason: ${esc(d.notes)}</div>` : ''}
+                    <div class="file-info" style="color:var(--text-muted);margin-top:4px;">Accepted: PDF, JPG, PNG, DOC | Max: ${d.doc_type === 'Photo' ? '1 MB' : '250 KB'}</div>
+                    <div class="file-info">Click or drag to re-upload</div>
+                    <div id="filename-${d.id}" style="display:none;margin-top:6px;"></div>
+                    <div id="submit-area-${d.id}" style="display:none" class="submit-row">
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();doSubmitSingle(${d.id})"><i class="bi bi-send me-1"></i>Submit</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="event.stopPropagation();cancelFile(${d.id})">Cancel</button>
+                    </div>
+                </div>`;
+            } else {
+                html += `<div class="upload-zone submitted">
+                    <i class="bi bi-${isApproved ? 'check-circle-fill' : 'hourglass-split'}" style="font-size:24px;margin-bottom:6px;display:block;${isApproved ? '' : 'color:var(--info);'}"></i>
+                    <strong>${esc(d.doc_type)}</strong><br>
+                    <span class="status-badge status-${d.status.replace(' ', '')} mt-2">${d.status}</span>
+                    ${d.file_name ? `<div class="file-info"><a href="/api/onboarding-checklist/${d.id}/file" target="_blank" style="color:var(--accent);" onclick="event.stopPropagation()"><i class="bi bi-eye"></i> View file</a> ${esc(d.file_name)}</div>` : ''}
+                </div>`;
+            }
+        });
+        container.innerHTML = html;
+    } else {
+        container.innerHTML = '<div class="empty-state"><i class="bi bi-inbox"></i><p>No onboarding checklist assigned yet</p></div>';
+    }
+
+    renderChecklistSteps(emp);
+}
+
+function renderChecklistSteps(emp) {
+    const wf = emp.workflow || { current_step: 0, steps: [] };
+    const steps = wf.steps || [];
+    const container = document.getElementById('employeeChecklist');
+    if (!steps.length) {
+        container.innerHTML = '<div class="empty-state"><i class="bi bi-inbox"></i><p>No onboarding in progress</p></div>';
+        return;
+    }
+    const stepDescs = [
+        'Upload your documents and submit for approval',
+        'HR/Admin is reviewing your documents',
+        'IT team is setting up your system',
+        'Admin is preparing your desk & ID card',
+        'Mark introduction as done when complete'
+    ];
+    const stepIcons = ['bi-cloud-arrow-up', 'bi-person-check', 'bi-pc-display', 'bi-person-badge', 'bi-people'];
+    let html = '';
+    steps.forEach((s, i) => {
+        const statusClass = s.status === 'Completed' ? 'completed' : s.status === 'InProgress' ? 'active' : 'pending';
+        const icon = s.status === 'Completed' ? 'bi-check-circle-fill' : stepIcons[i];
+        const statusText = s.status === 'Completed' ? '<span class="text-success fw-bold">Completed</span>' : s.status === 'InProgress' ? '<span class="text-primary fw-bold">In Progress</span>' : '<span class="text-muted">Pending</span>';
+        html += `<div class="checklist-step ${statusClass}">
+            <div class="step-num">${s.status === 'Completed' ? '<i class="bi bi-check-lg"></i>' : i + 1}</div>
+            <div class="step-text">
+                <div class="step-label">${esc(s.label)}</div>
+                <div class="step-desc">${stepDescs[i] || ''}</div>
+            </div>
+            <div class="step-status">${statusText}</div>
+        </div>`;
+        if (i === 3 && s.status === 'Completed' && steps[4] && steps[4].status !== 'Completed') {
+            html += `<div class="text-center mt-2 mb-2"><button class="btn btn-primary btn-sm" onclick="completeIntro()"><i class="bi bi-check2-all me-1"></i>Mark Introduction Done</button></div>`;
+        }
+    });
+    container.innerHTML = html;
+}
+
+function triggerUpload(cid) {
+    const zone = document.getElementById('zone-' + cid);
+    if (zone && (zone.classList.contains('has-file') || zone.classList.contains('submitted'))) return;
+    document.getElementById('file-' + cid).click();
+}
+
+function handleFileSelected(cid) {
+    const input = document.getElementById('file-' + cid);
+    if (!input.files.length) return;
+    const file = input.files[0];
+    const zone = document.getElementById('zone-' + cid);
+    const docType = zone ? zone.getAttribute('data-doc-type') : '';
+    const maxBytes = docType === 'Photo' ? 1048576 : 256000;
+    if (file.size > maxBytes) {
+        const label = docType === 'Photo' ? '1 MB' : '250 KB';
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        showToast(`${docType} must be under ${label}. Your file is ${sizeMB} MB`, 'error');
+        input.value = '';
+        return;
+    }
+    const fnEl = document.getElementById('filename-' + cid);
+    if (fnEl) {
+        const sizeKB = file.size < 1024000 ? (file.size / 1024).toFixed(0) + ' KB' : (file.size / (1024 * 1024)).toFixed(1) + ' MB';
+        fnEl.innerHTML = `<i class="bi bi-file-earmark"></i> <strong>${esc(file.name)}</strong> <span class="text-muted">(${sizeKB})</span>`;
+        fnEl.style.display = 'block';
+    }
+    const area = document.getElementById('submit-area-' + cid);
+    if (area) area.style.display = 'flex';
+}
+
+function cancelFile(cid) {
+    const input = document.getElementById('file-' + cid);
+    input.value = '';
+    const fnEl = document.getElementById('filename-' + cid);
+    if (fnEl) { fnEl.innerHTML = ''; fnEl.style.display = 'none'; }
+    const area = document.getElementById('submit-area-' + cid);
+    if (area) area.style.display = 'none';
+}
+
+function doSubmitSingle(cid) {
+    const input = document.getElementById('file-' + cid);
+    if (!input.files.length) return;
+    const fd = new FormData();
+    fd.append('file', input.files[0]);
+    fetch(`/api/onboarding-checklist/${cid}/upload`, { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+        showToast(d.message || d.error, d.message ? 'success' : 'error');
+        if (d.message) loadEmployeeView();
+    });
+}
+
+function handleDrop(e, cid) {
+    e.preventDefault();
+    const zone = document.getElementById('zone-' + cid);
+    if (zone && (zone.classList.contains('has-file') || zone.classList.contains('submitted'))) return;
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    const docType = zone ? zone.getAttribute('data-doc-type') : '';
+    const maxBytes = docType === 'Photo' ? 1048576 : 256000;
+    if (file.size > maxBytes) {
+        const label = docType === 'Photo' ? '1 MB' : '250 KB';
+        const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+        showToast(`${docType} must be under ${label}. Your file is ${sizeMB} MB`, 'error');
+        return;
+    }
+    const fnEl = document.getElementById('filename-' + cid);
+    if (fnEl) {
+        const sizeKB = file.size < 1024000 ? (file.size / 1024).toFixed(0) + ' KB' : (file.size / (1024 * 1024)).toFixed(1) + ' MB';
+        fnEl.innerHTML = `<i class="bi bi-file-earmark"></i> <strong>${esc(file.name)}</strong> <span class="text-muted">(${sizeKB})</span>`;
+        fnEl.style.display = 'block';
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    fetch(`/api/onboarding-checklist/${cid}/upload`, { method: 'POST', body: fd }).then(r => r.json()).then(d => {
+        showToast(d.message || d.error, d.message ? 'success' : 'error');
+        if (d.message) loadEmployeeView();
+    });
+}
+
+async function submitAllDocs() {
+    const r = await fetch('/api/onboarding-checklist/submit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json();
+    showToast(r.ok ? 'Documents submitted for HR approval' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) loadEmployeeView();
+}
+
+async function completeIntro() {
+    if (!confirm('Mark team introduction as complete?')) return;
+    const r = await fetch('/api/onboarding/complete-intro', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const d = await r.json();
+    showToast(r.ok ? 'Introduction completed!' : (d.error || 'Failed'), r.ok ? 'success' : 'error');
+    if (r.ok) loadEmployeeView();
+}
+
+function downloadExcel() { window.location.href = '/api/onboarding-tasks/export'; }
+function fmtDate(iso) { if (!iso) return '-'; return new Date(iso + 'T00:00:00').toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }); }
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+function showToast(msg, type) {
+    const c = document.getElementById('toastContainer'); const id = 'toast_' + Date.now();
+    const bg = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : 'bg-info';
+    c.insertAdjacentHTML('beforeend', `<div id="${id}" class="toast align-items-center text-white ${bg} border-0 show" role="alert"><div class="d-flex"><div class="toast-body">${esc(msg)}</div><button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div></div>`);
+    setTimeout(() => { const el = document.getElementById(id); if (el) el.remove(); }, 3000);
 }
 </script>
 </body>

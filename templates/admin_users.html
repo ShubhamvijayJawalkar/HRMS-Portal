@@ -1,45 +1,21 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - User Management</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 12px; padding: 12px 10px !important; }
         .navbar-nav .nav-link:hover { color: white !important; background: rgba(255,255,255,0.06); }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
         .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 6px; color: #60A5FA; font-size: 13px; }
+        .card-header i { margin-right: 6px; color: #94A3B8; font-size: 13px; }
         .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
         .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 12px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 14px; font-size: 12px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
@@ -50,6 +26,7 @@
         .status-badge { padding: 4px 8px; border-radius: 16px; font-size: 11px; font-weight: 600; }
         .status-active { background: #d4edda; color: #155724; }
         .status-blocked { background: #f8d7da; color: #721c24; }
+        .status-onboarding { background: #e2e8f0; color: #334155; }
         .permission-badge { padding: 3px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; margin: 1px; display: inline-block; }
         .permission-allowed { background: #d1e7dd; color: #0f5132; }
         .permission-denied { background: #f8d7da; color: #842029; }
@@ -77,7 +54,7 @@
         .pagination-btn:disabled:hover { background: var(--surface); color: var(--text-muted); border-color: var(--border); }
         .role-badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
         .role-admin { background: #EDE9FE; color: #6D28D9; }
-        .role-team-leader { background: #DBEAFE; color: #1D4ED8; }
+        .role-team-leader { background: #E2E8F0; color: #334155; }
         .role-employee { background: #F1F5F9; color: #475569; }
         .empty-state { text-align: center; padding: 32px 16px; color: var(--text-muted); }
         .empty-state i { font-size: 32px; margin-bottom: 8px; display: block; opacity: 0.4; }
@@ -140,6 +117,7 @@
                 <select id="filterStatus" onchange="applyFilters()">
                     <option value="">All Status</option>
                     <option value="Active">Active</option>
+                    <option value="Onboarding">Onboarding</option>
                     <option value="Blocked">Blocked</option>
                 </select>
                 <button class="filter-reset" onclick="clearFilters()"><i class="bi bi-x-lg"></i> Clear</button>
@@ -352,7 +330,7 @@ function loadUsers(page) {
                 <td>${esc(u.department||'N/A')}</td>
                 <td><span class="role-badge role-${u.role.toLowerCase().replace(' ','-')}">${esc(u.role)}</span></td>
                 <td>${shiftTxt}</td>
-                <td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td>
+                <td>${u.status === 'Onboarding' && u.onboarding_status ? `<span class="status-badge status-onboarding" title="Onboarding in progress"><i class="bi bi-hourglass-split me-1"></i>${esc(u.onboarding_status)}</span>` : `<span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span>`}</td>
                 <td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td>
                 <td><div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button> <button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button> <button class="btn btn-outline-danger btn-sm" onclick="deleteUser('${u.emp_id}','${esc(u.name)}')" title="Delete"><i class="bi bi-trash"></i></button></div></td>
             </tr>`;
@@ -443,6 +421,6 @@ function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&
 
 document.addEventListener('DOMContentLoaded', () => loadUsers(1));
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>

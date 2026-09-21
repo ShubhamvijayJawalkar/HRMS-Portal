@@ -9,12 +9,13 @@ RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r re
 
 COPY . .
 
-RUN mkdir -p /data /app/uploads
+RUN mkdir -p /data /data/uploads
 
 ENV FLASK_DEBUG=0
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 ENV DB_FILE=/data/hrms.duckdb
+ENV UPLOAD_FOLDER=/data/uploads
 ENV PORT=10000
 
 EXPOSE 10000

@@ -1,28 +1,7 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Salary Structures</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .navbar { background: var(--primary) !important; box-shadow: 0 2px 16px rgba(15,23,42,0.2); }
         .navbar-brand { font-weight: 800; color: white !important; letter-spacing: -0.3px; }
         .navbar-nav .nav-link { color: #94A3B8 !important; font-weight: 500; font-size: 13px; padding: 16px 14px !important; }
@@ -30,17 +9,17 @@
         .navbar-nav .nav-link i { margin-right: 6px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 20px; }
         .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 12px 16px; font-weight: 700; font-size: 13px; border: none; }
-        .card-header i { margin-right: 8px; color: #60A5FA; }
+        .card-header i { margin-right: 8px; color: #94A3B8; }
         .card-body { padding: 16px; }
         .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
         .form-label { font-weight: 600; color: var(--text); font-size: 13px; margin-bottom: 6px; }
         .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; background: var(--background); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
+        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
         .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 10px 20px; font-size: 14px; }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
         .btn-success { background: var(--success); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
-        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #1E293B; }
+        .btn-warning { background: var(--warning); border: none; border-radius: var(--button-radius); font-weight: 600; color: #334155; }
         .table th { color: var(--text); font-weight: 600; border: none; padding: 12px 14px; background: #F8FAFC; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
         .table td { vertical-align: middle; border-color: var(--border); padding: 10px 14px; font-size: 13px; }
         .table tbody tr:hover { background: #FAFBFC; }
@@ -75,6 +54,11 @@
                 <div class="col-md-2"><label class="form-label">Allowances</label><input id="allowances" class="form-control" type="number" step="0.01" value="0"></div>
                 <div class="col-md-2"><label class="form-label">Deductions</label><input id="deductions" class="form-control" type="number" step="0.01" value="0"></div>
                 <div class="col-md-1"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="saveSalary()">Save</button></div>
+                <div class="col-md-1"><label class="form-label">&nbsp;</label><button class="btn btn-outline-primary w-100" onclick="previewPayslip()">Preview</button></div>
+            </div>
+            <div id="previewBox" class="mt-3 p-3" style="background:#F8FAFC;border:1px solid var(--border);border-radius:10px;display:none;">
+                <h6 style="font-weight:700;margin-bottom:12px;"><i class="bi bi-receipt me-2"></i>Payslip Preview</h6>
+                <div class="row g-2" id="previewContent"></div>
             </div>
         </div>
     </div>
@@ -111,6 +95,33 @@ async function loadSalaries() {
         <td>${s.effective_from || '-'}</td>
     </tr>`).join('');
 }
+async function previewPayslip() {
+    const body = {
+        basic: parseFloat(document.getElementById('basic').value) || 0,
+        hra: parseFloat(document.getElementById('hra').value) || 0,
+        allowances: parseFloat(document.getElementById('allowances').value) || 0,
+        deductions: parseFloat(document.getElementById('deductions').value) || 0
+    };
+    if (!body.basic) return alert('Enter basic salary first');
+    const r = await fetch('/api/salary-structures/preview', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) return alert(d.error);
+    const box = document.getElementById('previewBox');
+    const content = document.getElementById('previewContent');
+    box.style.display = 'block';
+    const items = [
+        ['Basic', d.basic], ['HRA', d.hra], ['Allowances', d.allowances],
+        ['Gross', d.gross, true], ['PF', '-'+d.pf], ['ESI', '-'+d.esi],
+        ['Professional Tax', '-'+d.pt], ['Other Deductions', '-'+d.other_deductions],
+        ['Total Deductions', '-'+d.total_deductions, true],
+        ['Net Salary', d.net, true, '#22C55E'],
+        ['Annual Gross', d.annual_gross], ['Est. Annual TDS', d.annual_tds],
+        ['Est. Monthly TDS', d.monthly_tds],
+    ];
+    content.innerHTML = items.map(([label, val, bold, color]) =>
+        `<div class="col-4"><span style="font-size:11px;color:var(--text-muted);">${label}</span><div style="font-weight:${bold?'800':'600'};font-size:14px;${color?'color:'+color:''};">₹${val.toFixed(2)}</div></div>`
+    ).join('');
+}
 async function saveSalary() {
     const body = {
         emp_id: document.getElementById('empSelect').value,
@@ -123,7 +134,7 @@ async function saveSalary() {
     if (!body.basic) return alert('Basic salary required');
     const r = await fetch('/api/salary-structures', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const res = await r.json();
-    if (r.ok) { loadSalaries(); document.querySelectorAll('#basic,#hra,#allowances,#deductions').forEach(e => e.value = ''); } else alert(res.error);
+    if (r.ok) { loadSalaries(); document.querySelectorAll('#basic,#hra,#allowances,#deductions').forEach(e => e.value = ''); document.getElementById('previewBox').style.display = 'none'; } else alert(res.error);
 }
 </script>
 </body>

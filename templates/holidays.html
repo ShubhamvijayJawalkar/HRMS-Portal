@@ -1,52 +1,22 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Holiday Calendar</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 14px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); color: var(--text); }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
+        {% include "_shared_css.html" %}
         .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 12px; box-shadow: var(--shadow-sm); transition: transform var(--transition-base), box-shadow var(--transition-base); height: 100%; }
         .stat-card:hover { transform: translateY(-2px) scale(1.01); box-shadow: var(--shadow); }
         .stat-icon { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 14px; margin-bottom: 6px; }
         .stat-value { font-size: 16px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
         .stat-label { color: var(--text-muted); font-size: 10px; font-weight: 500; display: flex; align-items: center; gap: 4px; }
-        .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); box-shadow: var(--shadow-sm); margin-bottom: 10px; }
-        .card-header { background: var(--primary); color: white; border-radius: var(--card-radius) var(--card-radius) 0 0 !important; padding: 8px 12px; font-weight: 700; font-size: 12px; border: none; }
-        .card-header i { margin-right: 5px; color: #60A5FA; font-size: 12px; }
-        .card-body { padding: 12px; }
         .page-title { font-size: 18px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 12px; }
         .form-label { font-weight: 600; color: var(--text); font-size: 12px; margin-bottom: 4px; }
-        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--background); transition: all var(--transition-fast); }
-        .form-control:focus, .form-select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(3,105,161,0.12); background: var(--surface); }
-        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 16px; font-size: 13px; transition: all var(--transition-fast); }
-        .btn-primary:hover { background: #1E293B; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(15,23,42,0.2); }
-        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; transition: all var(--transition-fast); }
+        .form-control, .form-select { border: 1.5px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 13px; background: var(--background); }
+        .form-control:focus, .form-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(71,85,105,0.12); background: var(--surface); }
+        .btn-primary { background: var(--primary); border: none; border-radius: var(--button-radius); font-weight: 700; padding: 7px 16px; font-size: 13px; }
+        .btn-primary:hover { background: #334155; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(71,85,105,0.2); }
+        .btn-danger { background: var(--destructive); border: none; border-radius: var(--button-radius); font-weight: 600; }
         .btn-danger:hover { transform: translateY(-1px); box-shadow: 0 2px 8px rgba(220,38,38,0.3); }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 7px 10px; background: #F8FAFC; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
-        .table tbody tr { transition: background var(--transition-fast); }
-        .table tbody tr:nth-child(even) { background: #FAFBFD; }
-        .table tbody tr:hover { background: #F1F5F9 !important; }
-        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
         .badge-type { padding: 3px 8px; border-radius: 16px; font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; gap: 3px; }
-        .badge-national { background: var(--success-light); color: #166534; }
+        .badge-national { background: var(--success-light); color: #065F46; }
         .badge-optional { background: var(--warning-light); color: #92400E; }
         .status-badge { padding: 2px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; display: inline-block; }
         .status-Pending { background: #FEFCE8; color: #92400E; }
@@ -78,34 +48,6 @@
     <div class="row g-2 mb-2">
         <div class="col-sm-6 col-lg-3">
             <div class="stat-card">
-                <div class="stat-icon" style="background:rgba(3,105,161,0.1);color:var(--accent);"><i class="bi bi-calendar-event-fill"></i></div>
-                <div class="stat-value" id="statTotal">0</div>
-                <div class="stat-label">Total Holidays</div>
-            </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-            <div class="stat-card">
-                <div class="stat-icon" style="background:var(--success-light);color:var(--success);"><i class="bi bi-flag-fill"></i></div>
-                <div class="stat-value" id="statNational">0</div>
-                <div class="stat-label">National</div>
-            </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-            <div class="stat-card">
-                <div class="stat-icon" style="background:var(--warning-light);color:var(--warning);"><i class="bi bi-star-fill"></i></div>
-                <div class="stat-value" id="statOptional">0</div>
-                <div class="stat-label">Optional</div>
-            </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-            <div class="stat-card">
-                <div class="stat-icon" style="background:rgba(124,58,237,0.1);color:#7C3AED;"><i class="bi bi-clock-fill"></i></div>
-                <div class="stat-value" id="statRemaining">0</div>
-                <div class="stat-label">Remaining This Year</div>
-            </div>
-        </div>
-        <div class="col-sm-6 col-lg-3">
-            <div class="stat-card">
                 <div class="stat-icon" style="background:#FEF3C7;color:#D97706;"><i class="bi bi-hourglass-split"></i></div>
                 <div class="stat-value" id="statPendingLeaves">0</div>
                 <div class="stat-label">Pending Leaves</div>
@@ -127,7 +69,7 @@
         </div>
         <div class="col-sm-6 col-lg-3">
             <div class="stat-card">
-                <div class="stat-icon" style="background:#DBEAFE;color:#2563EB;"><i class="bi bi-calendar-check"></i></div>
+                <div class="stat-icon" style="background:#E2E8F0;color:#475569;"><i class="bi bi-calendar-check"></i></div>
                 <div class="stat-value" id="statTotalLeaves">0</div>
                 <div class="stat-label">Total Leave Requests</div>
             </div>
@@ -135,7 +77,7 @@
     </div>
 
     <div class="row g-2">
-        <div class="col-lg-6">
+        <div class="col-lg-8">
             <div class="card">
                 <div class="card-header d-flex align-items-center justify-content-between flex-wrap gap-1">
                     <span><i class="bi bi-calendar-check"></i>Leave Requests</span>
@@ -162,7 +104,7 @@
             </div>
         </div>
 
-        <div class="col-lg-6">
+        <div class="col-lg-4">
             <div class="card">
                 <div class="card-header d-flex align-items-center justify-content-between">
                     <span><i class="bi bi-calendar3"></i>Holidays</span>
@@ -200,7 +142,7 @@
     <div class="modal-dialog modal-dialog-centered modal-sm">
         <div class="modal-content" style="border-radius:var(--card-radius);border:none;">
             <div class="modal-header" style="background:var(--primary);color:white;border-radius:var(--card-radius) var(--card-radius) 0 0;padding:10px 16px;">
-                <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-1" style="color:#60A5FA;"></i>Add Holiday</h6>
+                <h6 class="modal-title fw-bold"><i class="bi bi-plus-circle me-1" style="color:#94A3B8;"></i>Add Holiday</h6>
                 <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body" style="padding:16px;">
@@ -263,16 +205,7 @@ async function loadHolidays() {
     renderNextHoliday();
 }
 
-function renderStats() {
-    const now = new Date();
-    const national = allHolidays.filter(h => h.type === 'National').length;
-    const optional = allHolidays.filter(h => h.type === 'Optional').length;
-    const remaining = allHolidays.filter(h => new Date(h.date) >= now).length;
-    document.getElementById('statTotal').textContent = allHolidays.length;
-    document.getElementById('statNational').textContent = national;
-    document.getElementById('statOptional').textContent = optional;
-    document.getElementById('statRemaining').textContent = remaining;
-}
+function renderStats() {}
 
 function renderTable() {
     const tbody = document.getElementById('holidaysTable');
@@ -406,6 +339,6 @@ function showToast(type, msg) {
 
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>

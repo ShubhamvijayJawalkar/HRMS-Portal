@@ -1,150 +1,220 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+{% include "_base_start.html" %}
     <title>HRMS - Admin Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --primary: #0F172A; --primary-light: #1E293B; --secondary: #334155;
-            --accent: #0369A1; --accent-light: #E0F2FE; --background: #F1F5F9;
-            --surface: #FFFFFF; --text: #020617; --text-muted: #64748B;
-            --muted: #E8ECF1; --border: #E2E8F0; --destructive: #DC2626;
-            --success: #22C55E; --success-light: #F0FDF4; --warning: #EAB308;
-            --warning-light: #FEFCE8; --info: #0369A1; --card-radius: 10px;
-            --button-radius: 8px; --shadow-sm: 0 1px 3px rgba(0,0,0,0.06);
-            --shadow: 0 2px 12px rgba(0,0,0,0.06); --shadow-lg: 0 8px 30px rgba(0,0,0,0.12);
-            --transition-fast: 150ms ease; --transition-base: 250ms ease;
-        }
-        *, *::before, *::after { box-sizing: border-box; }
-        a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-        @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }
-        * { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
-        body { background: var(--background); }
+        {% include "_shared_css.html" %}
         .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 16px; box-shadow: var(--shadow-sm); transition: all 0.2s; height: 100%; }
         .stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
-        .stat-icon { width: 38px; height: 38px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 8px; }
+        .stat-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 17px; margin-bottom: 8px; }
         .stat-value { font-size: 20px; font-weight: 800; color: var(--text); letter-spacing: -0.5px; }
         .stat-label { color: var(--text-muted); font-size: 11px; font-weight: 500; }
         .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; }
         .live-dot.green { background: var(--success); }
         .live-dot.yellow { background: var(--warning); }
         .live-dot.red { background: var(--destructive); }
-        .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 8px 14px; border-radius: 8px; transition: all 0.2s; font-size: 12px; }
-        .nav-pills .nav-link:hover { background: #E2E8F0; color: var(--text); }
-        .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 12px rgba(15,23,42,0.25); }
-        .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 14px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
-        .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 14px 12px; box-shadow: var(--shadow-sm); transition: all 0.25s; cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
+        .nav-pills .nav-link { color: var(--text-muted); font-weight: 600; padding: 9px 16px; border-radius: 10px; transition: all var(--transition-fast); font-size: 12px; border: 1.5px solid transparent; }
+        .nav-pills .nav-link:hover { background: var(--muted); color: var(--text); }
+        .nav-pills .nav-link.active { background: var(--primary); color: white; box-shadow: 0 4px 14px rgba(71,85,105,0.3); }
+        .tab-content { background: var(--surface); border-radius: 0 0 var(--card-radius) var(--card-radius); padding: 16px; box-shadow: var(--shadow-sm); border: 1px solid var(--border); border-top: none; }
+        .module-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--card-radius); padding: 14px 12px; box-shadow: var(--shadow-sm); transition: transform var(--transition-base), box-shadow var(--transition-base); cursor: pointer; height: 100%; text-decoration: none; display: block; position: relative; overflow: hidden; }
         .module-card:hover { transform: translateY(-3px); box-shadow: var(--shadow-lg); }
-        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
-        .module-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; margin-bottom: 8px; }
+        .module-card:active { transform: translateY(-1px) scale(0.98); }
+        .module-card::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--primary); }
+        .module-icon { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 17px; margin-bottom: 8px; transition: transform var(--transition-fast); }
+        .module-card:hover .module-icon { transform: scale(1.1); }
         .module-title { font-size: 12px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
         .module-desc { font-size: 10px; color: var(--text-muted); line-height: 1.3; }
+        .notification-item { border-left: 3px solid var(--primary); padding: 8px 10px; margin-bottom: 5px; background: var(--muted); border-radius: 8px; transition: background var(--transition-fast); font-size: 12px; }
+        .notification-item:hover { background: #F1F5F9; }
+        .notifications-card .card-header-custom { padding: 6px 12px; font-size: 12px; }
+        .notifications-card .card-body { padding: 8px 10px; }
+        .notifications-card .notification-item { padding: 5px 8px; margin-bottom: 4px; font-size: 11px; }
+        .notifications-card .notification-item:last-child { margin-bottom: 0; }
+        .status-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 99px; font-size: 9px; font-weight: 700; white-space: nowrap; }
+        .status-chip.approved { background: #F0FDF4; color: #166534; }
+        .status-chip.pending { background: #FEF3C7; color: #92400E; }
+        .status-chip.rejected { background: #FEF2F2; color: #991B1B; }
+        .status-chip.none { background: var(--muted); color: var(--text-muted); }
         .card-header-custom { background: var(--primary); color: white; padding: 10px 14px; border-radius: 8px 8px 0 0; font-weight: 700; font-size: 13px; }
-        .card-header-custom i { margin-right: 6px; color: #60A5FA; font-size: 13px; }
-        .table th { color: var(--text); font-weight: 600; border: none; padding: 8px 10px; background: #F8FAFC; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .table td { vertical-align: middle; border-color: var(--border); padding: 7px 10px; font-size: 12px; }
-        .table tbody tr { transition: background 0.15s ease; }
-        .table tbody tr:nth-child(even) { background: #FAFBFD; }
-        .table tbody tr:hover { background: #F1F5F9 !important; }
-        .btn-sm { border-radius: 6px; font-weight: 600; padding: 3px 10px; font-size: 11px; }
-        .page-title { font-size: 22px; font-weight: 800; color: var(--text); letter-spacing: -0.3px; margin-bottom: 20px; }
-        .badge { font-weight: 600; font-size: 10px; padding: 3px 8px; border-radius: 16px; }
-        .bg-soft-success { background: #F0FDF4; color: #166534; }
-        .bg-soft-warning { background: #FEFCE8; color: #92400E; }
-        .bg-soft-danger { background: #FEF2F2; color: #991B1B; }
-        .bg-soft-info { background: #EFF6FF; color: #1E40AF; }
+        .card-header-custom i { margin-right: 6px; color: #CBD5E1; font-size: 13px; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
         .pulse { animation: pulse 2s infinite; }
+
+        /* Calendar Styles */
+        .cal-nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .cal-nav-btn { width: 26px; height: 26px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.15s ease; font-size: 11px; }
+        .cal-nav-btn:hover { border-color: var(--primary); color: var(--primary); background: rgba(15,23,42,0.04); }
+        .cal-today-btn { padding: 3px 10px; border-radius: 6px; border: 1.5px solid var(--primary); background: rgba(15,23,42,0.04); color: var(--primary); font-weight: 600; font-size: 10px; cursor: pointer; transition: all 0.15s ease; }
+        .cal-today-btn:hover { background: var(--primary); color: white; }
+        .cal-month-label { font-size: 13px; font-weight: 700; color: white; min-width: 120px; text-align: center; letter-spacing: -0.2px; }
+        .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); grid-template-rows: auto repeat(6, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; transition: opacity 0.25s ease; flex-grow: 1; }
+        .cal-grid.loading { opacity: 0.3; pointer-events: none; }
+        .cal-header-cell { background: var(--primary); color: white; font-weight: 600; font-size: 9px; padding: 5px 3px; text-align: center; text-transform: uppercase; letter-spacing: 0.5px; }
+        .cal-header-cell.weekend { background: #334155; }
+        .cal-day-cell { background: var(--surface); min-height: 52px; padding: 4px; cursor: pointer; transition: all 0.15s ease; position: relative; border: 1px solid transparent; overflow: hidden; }
+        .cal-day-cell:hover { background: rgba(15,23,42,0.03); border-color: rgba(15,23,42,0.1); z-index: 1; }
+        .cal-day-cell.today { background: rgba(15,23,42,0.04); border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+        .cal-day-cell.selected { background: rgba(15,23,42,0.06); border-color: var(--primary); }
+        .cal-day-cell.empty { background: var(--muted); opacity: 0.4; cursor: default; }
+        .cal-day-cell.empty:hover { background: var(--muted); border-color: transparent; }
+        .cal-day-cell.has-leave-approved { background: #DCFCE7; border-left: 3px solid #16A34A; }
+        .cal-day-cell.has-leave-pending { background: #FEF3C7; border-left: 3px solid #D97706; }
+        .cal-day-cell.has-holiday { background: #E0F2FE; border-left: 3px solid var(--info); }
+        .cal-day-cell.has-session { background: #F0FDF4; border-left: 3px solid var(--success); }
+        .cal-day-number { font-size: 11px; font-weight: 700; color: var(--text); margin-bottom: 2px; display: flex; align-items: center; gap: 3px; }
+        .cal-day-cell.today .cal-day-number { color: var(--primary); }
+        .cal-day-cell.empty .cal-day-number { color: var(--text-muted); }
+        .cal-today-badge { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: var(--primary); color: white; font-size: 9px; font-weight: 700; }
+        .cal-info-row { display: flex; align-items: center; gap: 2px; font-size: 8px; line-height: 1.2; margin-bottom: 1px; padding: 1px 3px; border-radius: 3px; }
+        .cal-info-row.hours { background: rgba(71,85,105,0.1); color: #475569; font-weight: 700; }
+        .cal-info-row.leave-approved { background: rgba(22,163,74,0.12); color: #166534; font-weight: 600; }
+        .cal-info-row.leave-pending { background: rgba(217,119,6,0.15); color: #92400E; font-weight: 600; }
+        .cal-info-row.holiday { background: rgba(71,85,105,0.1); color: #475569; font-weight: 600; }
+        .cal-info-row i { font-size: 8px; flex-shrink: 0; }
+        .cal-legend { display: flex; gap: 8px; flex-wrap: wrap; }
+        .cal-legend-item { display: flex; align-items: center; gap: 3px; font-size: 10px; color: var(--text-muted); font-weight: 500; }
+        .cal-legend-dot { width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0; }
+
+        /* Side Panel / Offcanvas */
+        .side-panel { background: var(--surface); border-left: 1px solid var(--border); }
+        .side-panel .offcanvas-header { background: var(--primary); color: white; }
+        .side-panel .offcanvas-title { font-weight: 700; font-size: 16px; }
+        .side-panel .module-card { padding: 12px 10px; }
+        .side-panel .module-icon { width: 32px; height: 32px; font-size: 14px; margin-bottom: 6px; }
+        .side-panel .module-title { font-size: 11px; }
+        .side-panel .module-desc { font-size: 9px; }
+
     </style>
 </head>
 <body>
 {% include "_navbar.html" %}
 
-
 <div class="container-fluid px-4 py-3">
     <!-- Stats -->
     <div class="row g-2 mb-3">
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#EFF6FF;color:var(--accent);"><i class="bi bi-people-fill"></i></div><div class="stat-value" id="totalEmployees">-</div><div class="stat-label"><span class="live-dot green"></span>Total Employees</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="loggedInToday">-</div><div class="stat-label"><span class="live-dot green pulse"></span>Logged In Today</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="onBreakCount">-</div><div class="stat-label"><span class="live-dot yellow"></span>On Break</div></div></div>
-        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEF2F2;color:var(--destructive);"><i class="bi bi-shield-exclamation"></i></div><div class="stat-value" id="blockedCount">-</div><div class="stat-label"><span class="live-dot red"></span>Blocked</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F1F5F9;color:var(--accent);"><i class="bi bi-people-fill"></i></div><div class="stat-value" id="totalEmployees">{{ stats.total_employees if stats else '-' }}</div><div class="stat-label"><span class="live-dot green"></span>Total Employees</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#F0FDF4;color:var(--success);"><i class="bi bi-person-check-fill"></i></div><div class="stat-value" id="loggedInToday">{{ stats.logged_in_today if stats else '-' }}</div><div class="stat-label"><span class="live-dot green pulse"></span>Logged In Today</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEFCE8;color:#CA8A04;"><i class="bi bi-cup-hot-fill"></i></div><div class="stat-value" id="onBreakCount">{{ stats.on_break if stats else '-' }}</div><div class="stat-label"><span class="live-dot yellow"></span>On Break</div></div></div>
+        <div class="col-md-3"><div class="stat-card"><div class="stat-icon" style="background:#FEF2F2;color:var(--destructive);"><i class="bi bi-shield-exclamation"></i></div><div class="stat-value" id="blockedCount">{{ stats.blocked_users if stats else '-' }}</div><div class="stat-label"><span class="live-dot red"></span>Blocked</div></div></div>
     </div>
 
     <!-- Tabs -->
     <ul class="nav nav-pills mb-0" id="dashTabs" role="tablist" style="gap:4px;">
         <li class="nav-item"><button class="nav-link active" id="modules-tab" data-bs-toggle="pill" data-bs-target="#modules" type="button"><i class="bi bi-grid-3x3-gap-fill me-2"></i>Modules</button></li>
         <li class="nav-item"><button class="nav-link" id="productivity-tab" data-bs-toggle="pill" data-bs-target="#productivity" type="button"><i class="bi bi-activity me-2"></i>Agent Productivity</button></li>
+        <li class="nav-item"><button class="nav-link" id="reviews-tab" data-bs-toggle="pill" data-bs-target="#reviews" type="button"><i class="bi bi-star-fill me-2"></i>Reviews</button></li>
     </ul>
 
     <div class="tab-content" id="dashTabContent">
-        <!-- Modules -->
+        <!-- Modules + Calendar -->
         <div class="tab-pane fade show active" id="modules" role="tabpanel">
             <div class="row g-2">
-                {% if session.get('role') == 'Admin' %}
-                <div class="col-md-3"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
-                {% endif %}
-                <div class="col-md-3"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday Calendar</div><div class="module-desc">Company holidays & events</div></a></div>
-                <div class="col-md-3"><a href="/admin/holidays" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-calendar-check-fill"></i></div><div class="module-title">Leave Management</div><div class="module-desc">Approve/reject leave requests</div></a></div>
-                <div class="col-md-3"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
-                <div class="col-md-3"><a href="/admin/assets" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-laptop-fill"></i></div><div class="module-title">Asset Management</div><div class="module-desc">Issue & track company assets</div></a></div>
-                <div class="col-md-3"><a href="/admin/jobs" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-briefcase-fill"></i></div><div class="module-title">Job Postings</div><div class="module-desc">Create & manage job openings</div></a></div>
-                {% if session.get('role') == 'Admin' or session.get('department') == 'HR' %}
-                <div class="col-md-3"><a href="/admin/candidates" class="module-card" style="--accent:#E11D48;"><div class="module-icon" style="background:#FFF1F2;color:#E11D48;"><i class="bi bi-person-lines-fill"></i></div><div class="module-title">Candidates</div><div class="module-desc">Hiring pipeline management</div></a></div>
-                <div class="col-md-3"><a href="/admin/payroll" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-cash-stack"></i></div><div class="module-title">Payroll</div><div class="module-desc">Monthly payroll with auto-deductions</div></a></div>
-                <div class="col-md-3"><a href="/admin/salary-structures" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-wallet-fill"></i></div><div class="module-title">Salary Structures</div><div class="module-desc">Configure CTC components</div></a></div>
-                <div class="col-md-3"><a href="/admin/documents" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-file-earmark-fill"></i></div><div class="module-title">Documents</div><div class="module-desc">Employee document manager</div></a></div>
-                {% endif %}
-                <div class="col-md-3"><a href="/admin/goals" class="module-card" style="--accent:#65A30D;"><div class="module-icon" style="background:#F7FEE7;color:#65A30D;"><i class="bi bi-bullseye"></i></div><div class="module-title">Performance Goals</div><div class="module-desc">Set & rate employee goals</div></a></div>
-                <div class="col-md-3"><a href="/admin/reviews" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-star-fill"></i></div><div class="module-title">Performance Reviews</div><div class="module-desc">Review cycles & feedback</div></a></div>
-                <div class="col-md-3"><a href="/admin/expenses" class="module-card" style="--accent:#D9770C;"><div class="module-icon" style="background:#FFFBEB;color:#D9770C;"><i class="bi bi-receipt"></i></div><div class="module-title">Expense Management</div><div class="module-desc">Approve/reject claims</div></a></div>
-                <div class="col-md-3"><a href="/admin/tickets" class="module-card" style="--accent:#0284C7;"><div class="module-icon" style="background:#F0F9FF;color:#0284C7;"><i class="bi bi-ticket-fill"></i></div><div class="module-title">Help Desk</div><div class="module-desc">Support ticket management</div></a></div>
-                <div class="col-md-3"><a href="/admin/analytics" class="module-card" style="--accent:#0D9488;"><div class="module-icon" style="background:#F0FDFA;color:#0D9488;"><i class="bi bi-graph-up"></i></div><div class="module-title">Analytics</div><div class="module-desc">Charts & attrition insights</div></a></div>
-                <div class="col-md-3"><a href="/admin/audit" class="module-card" style="--accent:#6366F1;"><div class="module-icon" style="background:#EEF2FF;color:#6366F1;"><i class="bi bi-journal-text"></i></div><div class="module-title">Audit Log</div><div class="module-desc">User action history</div></a></div>
-                <div class="col-md-3"><a href="/admin/reports" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-file-spreadsheet-fill"></i></div><div class="module-title">Reports</div><div class="module-desc">Export data & efficiency metrics</div></a></div>
-                <div class="col-md-3"><a href="/onboarding" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-rocket-takeoff-fill"></i></div><div class="module-title">Onboarding</div><div class="module-desc">Track employee onboarding</div></a></div>
-                <div class="col-md-3"><a href="/offboarding" class="module-card" style="--accent:#DC2626;"><div class="module-icon" style="background:#FEF2F2;color:#DC2626;"><i class="bi bi-box-arrow-right"></i></div><div class="module-title">Offboarding</div><div class="module-desc">Manage exit process</div></a></div>
+                <div class="col-lg-6 d-flex flex-column gap-2">
+                    <div class="row g-2 align-content-start">
+                        <!-- 4 Main Modules -->
+                        <div class="col-md-6"><a href="/admin/users" class="module-card" style="--accent:#7C3AED;"><div class="module-icon" style="background:#F5F3FF;color:#7C3AED;"><i class="bi bi-people-fill"></i></div><div class="module-title">Employee Master</div><div class="module-desc">Manage users, departments & designations</div></a></div>
+                        <div class="col-md-6"><a href="/admin/holidays" class="module-card" style="--accent:#059669;"><div class="module-icon" style="background:#ECFDF5;color:#059669;"><i class="bi bi-calendar-event-fill"></i></div><div class="module-title">Holiday's</div><div class="module-desc">Company holidays & events</div></a></div>
+                        <div class="col-md-6"><a href="/regularization" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-pencil-square"></i></div><div class="module-title">Regularization</div><div class="module-desc">Attendance correction requests</div></a></div>
+                        <div class="col-md-6"><a href="/admin/reports" class="module-card" style="--accent:#0891B2;"><div class="module-icon" style="background:#ECFEFF;color:#0891B2;"><i class="bi bi-file-spreadsheet-fill"></i></div><div class="module-title">Reports</div><div class="module-desc">Export data & efficiency metrics</div></a></div>
+                    </div>
+                    <div class="card border-0 shadow-sm notifications-card">
+                        <div class="card-header-custom"><i class="bi bi-bell-fill"></i>Notifications</div>
+                        <div class="card-body"><div id="notificationsHome"><p class="text-muted mb-0">Loading...</p></div></div>
+                    </div>
+                </div>
+                <!-- Calendar -->
+                <div class="col-lg-6 d-flex">
+                    <div class="card border-0 shadow-sm d-flex flex-column" style="border-radius:var(--card-radius);overflow:hidden;flex:1;">
+                        <div class="card-header-custom d-flex justify-content-between align-items-center">
+                            <span><i class="bi bi-calendar3"></i>Calendar</span>
+                            <div class="d-flex align-items-center gap-1">
+                                <button class="cal-nav-btn" id="calPrev" aria-label="Previous month"><i class="bi bi-chevron-left"></i></button>
+                                <span class="cal-month-label" id="calMonthLabel"></span>
+                                <button class="cal-nav-btn" id="calNext" aria-label="Next month"><i class="bi bi-chevron-right"></i></button>
+                                <button class="cal-today-btn" id="calToday">Today</button>
+                            </div>
+                        </div>
+                        <div class="card-body p-2 d-flex flex-column flex-grow-1">
+                            <div class="cal-legend mb-2">
+                                <div class="cal-legend-item"><div class="cal-legend-dot" style="background:var(--success);"></div>Present</div>
+                                <div class="cal-legend-item"><div class="cal-legend-dot" style="background:#16A34A;"></div>Leave (Approved)</div>
+                                <div class="cal-legend-item"><div class="cal-legend-dot" style="background:#D97706;"></div>Leave (Pending)</div>
+                                <div class="cal-legend-item"><div class="cal-legend-dot" style="background:var(--info);"></div>Holiday</div>
+                            </div>
+                            <div class="cal-grid" id="calendarGrid"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Review Cycle Progress -->
+        <div class="tab-pane fade" id="reviews" role="tabpanel">
+            <div class="stat-card p-3" id="reviewProgressCard">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong><i class="bi bi-star-fill me-2" style="color:#6366F1;"></i>Review Cycle Progress</strong>
+                    <span class="text-muted" style="font-size:12px;" id="reviewCyclePeriod">-</span>
+                </div>
+                <div class="d-flex align-items-center gap-3">
+                    <div style="flex:1;">
+                        <div class="progress" style="height:10px;border-radius:99px;">
+                            <div class="progress-bar" id="reviewProgressBar" role="progressbar" style="width:0%;background:#6366F1;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                    </div>
+                    <div style="font-size:13px;font-weight:600;white-space:nowrap;" id="reviewProgressText">0 / 0</div>
+                </div>
             </div>
         </div>
 
         <!-- Productivity -->
         <div class="tab-pane fade" id="productivity" role="tabpanel">
-            <div class="row g-2 mb-3">
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Active Breaks</small><div class="stat-value" id="activeBreakCount" style="font-size:16px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Today's Disposed</small><div class="stat-value" id="disposedCount" style="font-size:16px;">0</div></div></div>
-                <div class="col-md-4"><div class="stat-card p-2"><small class="text-muted" style="font-size:10px;">Avg Break Duration</small><div class="stat-value" id="avgDuration" style="font-size:16px;">0 min</div></div></div>
-            </div>
             <div class="d-flex justify-content-end mb-2"><button class="btn btn-sm" style="background:var(--primary);color:white;" onclick="refreshData()"><i class="bi bi-arrow-clockwise me-1"></i>Refresh</button></div>
-            <div class="row g-2">
-                <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody id="liveBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr></tbody></table></div></div></div></div>
-                <div class="col-lg-6"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-check-circle-fill"></i>Today's Disposed Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>End Time</th></tr></thead><tbody id="disposedBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No disposed breaks</td></tr></tbody></table></div></div></div></div>
+            <div class="row g-2 mb-2">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-patch-check-fill"></i>Break Approvals</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Date</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead><tbody id="breakApprovalsBody"><tr><td colspan="6" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
             </div>
-            <div class="row g-2 mt-2">
-                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-bar-chart-fill"></i>Break Summary by Type</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Type</th><th>Total</th><th>Avg Duration</th><th>Max Duration</th><th>Employees</th></tr></thead><tbody id="breakSummaryBody"><tr><td colspan="5" class="text-center text-muted py-4">Loading...</td></tr></tbody></table></div></div></div></div>
+            <div class="row g-2">
+                <div class="col-12"><div class="card border-0 shadow-sm"><div class="card-header-custom"><i class="bi bi-play-circle-fill"></i>Active Breaks</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-hover mb-0"><thead><tr><th>Employee</th><th>Type</th><th>Duration</th><th>Action</th></tr></thead><tbody id="liveBreaksBody"><tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr></tbody></table></div></div></div></div>
             </div>
         </div>
     </div>
 </div>
 
+<!-- More Options Side Panel (defined in _navbar.html) -->
+
 <script>
+let calMonth = new Date().getMonth() + 1, calYear = new Date().getFullYear(), calData = {};
+
 document.addEventListener('DOMContentLoaded', () => {
-    loadUserInfo(); loadStats(); refreshData();
+    loadStats(); refreshData();
+    loadCalendar(); loadNotifications();
+    document.getElementById('calPrev').addEventListener('click', () => { calMonth--; if (calMonth < 1) { calMonth = 12; calYear--; } loadCalendar(); });
+    document.getElementById('calNext').addEventListener('click', () => { calMonth++; if (calMonth > 12) { calMonth = 1; calYear++; } loadCalendar(); });
+    document.getElementById('calToday').addEventListener('click', () => { calMonth = new Date().getMonth() + 1; calYear = new Date().getFullYear(); loadCalendar(); });
     const tab = document.querySelector('#productivity-tab');
     if (tab) tab.addEventListener('shown.bs.tab', () => refreshData());
+    document.querySelector('#reviews-tab')?.addEventListener('shown.bs.tab', loadReviewProgress);
+    loadReviewProgress();
     setInterval(loadStats, 5000);
+    setInterval(loadNotifications, 30000);
 });
-function loadUserInfo() {
-    fetch('/api/profile').then(r => r.json()).then(d => {
-        localStorage.setItem('userName', d.name);
-    }).catch(() => {
-        localStorage.setItem('userName', localStorage.getItem('userName') || 'Admin');
-    });
+
+async function loadNotifications() {
+    try {
+        const r = await fetch('/api/notifications');
+        const data = await r.json();
+        const b = document.getElementById('notifBadge');
+        if (b) {
+            if (data && data.unread > 0) { b.style.display = 'flex'; b.textContent = data.unread > 9 ? '9+' : data.unread; } else { b.style.display = 'none'; }
+        }
+        const c = document.getElementById('notificationsHome');
+        if (!c) return;
+        const items = (data && data.data) ? data.data.slice(0, 3) : [];
+        if (!items.length) { c.innerHTML = '<p class="text-muted mb-0">No notifications</p>'; return; }
+        c.innerHTML = items.map(n => `<div class="notification-item ${n.is_read ? '' : 'fw-bold'}" style="${n.is_read ? '' : 'border-left-color:#4F46E5'}"><small class="text-muted">${n.type.replace('_',' ')}</small><br>${esc(n.message)}</div>`).join('');
+        if (data.unread > 0) fetch('/api/notifications/read', { method: 'POST' });
+    } catch (e) {}
 }
+function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+
 async function loadStats() {
     try {
         const r = await fetch('/api/dashboard-stats');
@@ -155,38 +225,132 @@ async function loadStats() {
         document.getElementById('blockedCount').textContent = d.blocked_users || 0;
     } catch(e) {}
 }
+
 async function refreshData() {
     try {
         const r = await fetch('/api/admin/breaks');
         const d = await r.json();
         const active = d.active_breaks || [];
-        const disposed = d.disposed_breaks || [];
-        const summary = d.break_summary || [];
-        document.getElementById('activeBreakCount').textContent = active.length;
-        document.getElementById('disposedCount').textContent = disposed.length;
-        const avg = summary.reduce((s,b) => s + b.avg_duration, 0) / (summary.length || 1);
-        document.getElementById('avgDuration').textContent = Math.round(avg) + ' min';
-
         const ab = document.getElementById('liveBreaksBody');
         if (!active.length) ab.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No active breaks</td></tr>';
         else ab.innerHTML = active.map(b => `<tr><td><strong>${b.emp_name}</strong></td><td><span class="badge bg-soft-warning">${b.break_type}</span></td><td>${b.duration || '...'} min</td><td><button class="btn btn-sm" style="background:#DC2626;color:white;" onclick="disposeBreak(${b.break_id})"><i class="bi bi-stop-circle me-1"></i>End</button></td></tr>`).join('');
-
-        const db = document.getElementById('disposedBreaksBody');
-        if (!disposed.length) db.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No disposed breaks</td></tr>';
-        else db.innerHTML = disposed.map(b => `<tr><td><strong>${b.emp_name}</strong></td><td><span class="badge bg-soft-success">${b.break_type}</span></td><td>${b.duration} min</td><td>${b.end_time}</td></tr>`).join('');
-
-        const sb = document.getElementById('breakSummaryBody');
-        if (!summary.length) sb.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">No data</td></tr>';
-        else sb.innerHTML = summary.map(b => `<tr><td><strong>${b.break_type}</strong></td><td>${b.count}</td><td>${Math.round(b.avg_duration)} min</td><td>${Math.round(b.max_duration)} min</td><td>${b.employees || '-'}</td></tr>`).join('');
+        loadBreakApprovals();
     } catch(e) {}
     setTimeout(refreshData, 5000);
 }
+
+async function loadBreakApprovals() {
+    try {
+        const r = await fetch('/api/break-approvals');
+        const rows = await r.json();
+        const tb = document.getElementById('breakApprovalsBody');
+        if (!tb) return;
+        const list = Array.isArray(rows) ? rows : [];
+        if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">No break approval requests</td></tr>'; return; }
+        tb.innerHTML = list.map(a => `<tr><td><strong>${esc(a.emp_name)}</strong></td><td><span class="status-chip ${a.break_type === 'Lunch' ? 'pending' : 'none'}">${esc(a.break_type)}</span></td><td>${esc(a.break_date)}</td><td class="text-truncate" style="max-width:200px;" title="${esc(a.reason || '')}">${esc(a.reason || '-')}</td><td><span class="status-chip ${String(a.status).toLowerCase()}">${esc(a.status)}</span></td><td>${a.status === 'Pending' ? `<button class="btn btn-sm" style="background:#16A34A;color:white;" onclick="approveBreak(${a.approval_id})" title="Approve"><i class="bi bi-check-lg"></i></button> <button class="btn btn-sm" style="background:#DC2626;color:white;" onclick="rejectBreak(${a.approval_id})" title="Reject"><i class="bi bi-x-lg"></i></button>` : '-'}</td></tr>`).join('');
+    } catch (e) {}
+}
+async function approveBreak(id) {
+    try {
+        const r = await fetch('/api/break-approvals/' + id + '/approve', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) loadBreakApprovals(); else alert(d.error || 'Failed to approve');
+    } catch (e) {}
+}
+async function rejectBreak(id) {
+    try {
+        const r = await fetch('/api/break-approvals/' + id + '/reject', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) loadBreakApprovals(); else alert(d.error || 'Failed to reject');
+    } catch (e) {}
+}
+
+async function loadReviewProgress() {
+    try {
+        const r = await fetch('/api/review-cycle-progress');
+        const d = await r.json();
+        document.getElementById('reviewCyclePeriod').textContent = d.period || '-';
+        const total = d.total || 0;
+        const completed = d.completed || 0;
+        const pct = total > 0 ? Math.round(completed / total * 100) : 0;
+        document.getElementById('reviewProgressBar').style.width = pct + '%';
+        document.getElementById('reviewProgressBar').setAttribute('aria-valuenow', pct);
+        document.getElementById('reviewProgressText').textContent = completed + ' / ' + total;
+    } catch(e) {}
+}
+
 async function disposeBreak(id) {
     if (!confirm('End this break?')) return;
     await fetch('/api/admin/dispose-break/' + id, { method: 'POST' });
     refreshData();
 }
+
+// ── Calendar ─────────────────────────────────────────────────
+const MONTHS = ['', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+async function loadCalendar() {
+    const grid = document.getElementById('calendarGrid');
+    if (!grid) return;
+    grid.classList.add('loading');
+    document.getElementById('calMonthLabel').textContent = MONTHS[calMonth] + ' ' + calYear;
+    try {
+        const r = await fetch(`/api/user/calendar?month=${calMonth}&year=${calYear}`);
+        const d = await r.json();
+        calData = d;
+    } catch(e) { calData = { sessions: {}, breaks: {}, leaves: {}, holidays: {} }; }
+    renderCalendar(grid);
+}
+
+function renderCalendar(grid) {
+    const today = new Date();
+    const first = new Date(calYear, calMonth - 1, 1);
+    const last = new Date(calYear, calMonth, 0);
+    const startPad = (first.getDay() + 6) % 7;
+    const totalDays = last.getDate();
+    const weeks = Math.ceil((startPad + totalDays) / 7);
+    let html = '';
+    for (let d = 0; d < 7; d++) {
+        const isWeekend = d >= 5;
+        html += `<div class="cal-header-cell${isWeekend ? ' weekend' : ''}">${DAY_NAMES[d].charAt(0)}</div>`;
+    }
+    let day = 1;
+    for (let w = 0; w < weeks; w++) {
+        for (let d = 0; d < 7; d++) {
+            const idx = w * 7 + d;
+            if (idx < startPad || day > totalDays) {
+                html += '<div class="cal-day-cell empty"><div class="cal-day-number">&nbsp;</div></div>';
+            } else {
+                const dateStr = `${calYear}-${String(calMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                const isToday = today.getFullYear() === calYear && today.getMonth() + 1 === calMonth && today.getDate() === day;
+                const isWeekend = d >= 5;
+                const holiday = calData.holidays && calData.holidays[dateStr];
+                const leave = calData.leaves && calData.leaves[dateStr];
+                const sess = (calData.sessions && calData.sessions[dateStr]) || [];
+                let cls = 'cal-day-cell';
+                if (isWeekend) cls += ' weekend';
+                if (isToday) cls += ' today';
+                if (holiday) cls += ' has-holiday';
+                else if (leave && leave.status === 'Approved') cls += ' has-leave-approved';
+                else if (leave && leave.status === 'Pending') cls += ' has-leave-pending';
+                else if (sess.length) cls += ' has-session';
+                let info = '';
+                if (sess.length) {
+                    const totalHrs = sess.reduce((s, x) => s + (x.hours || 0), 0).toFixed(1);
+                    info += `<div class="cal-info-row hours"><i class="bi bi-clock-fill"></i>${totalHrs}h</div>`;
+                }
+                if (leave && leave.status === 'Approved') info += `<div class="cal-info-row leave-approved"><i class="bi bi-check-circle-fill"></i>Leave</div>`;
+                else if (leave && leave.status === 'Pending') info += `<div class="cal-info-row leave-pending"><i class="bi bi-hourglass-split"></i>Pending</div>`;
+                if (holiday) info += `<div class="cal-info-row holiday"><i class="bi bi-moon-stars"></i>${holiday}</div>`;
+                html += `<div class="${cls}"><div class="cal-day-number">${isToday ? `<span class="cal-today-badge">${day}</span>` : day}</div>${info}</div>`;
+                day++;
+            }
+        }
+    }
+    grid.innerHTML = html;
+    grid.classList.remove('loading');
+}
 </script>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 </body>
 </html>
