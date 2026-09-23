@@ -7,12 +7,19 @@ from functools import wraps
 from io import BytesIO
 
 import duckdb
-import bcrypt
 import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+
+from security import (
+    hash_password,
+    check_password,
+    needs_rehash,
+    init_csrf,
+    maybe_enable_redis_sessions,
+)
 
 from flasgger import Swagger, swag_from
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -47,6 +54,12 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 if os.getenv('FLASK_ENV') == 'production':
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# ── Phase 3a (SRS CC-06): Argon2id hashing, CSRF guard, Redis sessions ─
+# Security lives in the request pipeline above the DB layer, so it applies
+# to both the DuckDB and PostgreSQL backends unchanged.
+init_csrf(app)
+maybe_enable_redis_sessions(app)
 
 DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
 
@@ -627,7 +640,7 @@ def init_db():
     ''')
 
     # ── Seed Data ──────────────────────────────────────────────────
-    pwd_hash = bcrypt.hashpw(b'pass123', bcrypt.gensalt()).decode()
+    pwd_hash = hash_password('pass123')
     result = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
     if result == 0:
         conn.execute(
@@ -668,9 +681,11 @@ def init_db():
              [6, 'Other', 'Miscellaneous expenses']]
         )
 
-    # ── Normalize all passwords to bcrypt ─────────────────────────
+    # ── Normalize any passwords still stored in plain/legacy format ──
+    # Prefix check ($2 = bcrypt, $a = Argon2id) — avoids LIKE/% patterns,
+    # which the PG adapter would double-escape differently between stacks.
     conn.execute(
-        "UPDATE users SET password = ? WHERE password NOT LIKE '$2%'",
+        "UPDATE users SET password = ? WHERE SUBSTR(password, 1, 2) NOT IN ('$2', '$a')",
         [pwd_hash]
     )
 
@@ -993,9 +1008,12 @@ init_db()
 
 if os.getenv('FLASK_ENV') == 'production':
     _conn = get_db()
-    _seed_check = _conn.execute("SELECT COUNT(*) FROM users WHERE password = ?", [bcrypt.hashpw(b'pass123', bcrypt.gensalt()).decode()]).fetchone()[0]
+    _seed_hashes = [r[0] for r in _conn.execute(
+        "SELECT password FROM users WHERE emp_id IN ('EMP001', 'EMP002')"
+    ).fetchall()]
     _conn.close()
-    if _seed_check > 0:
+    # Verify rather than string-compare: Argon2id re-hashes on every boot.
+    if any(check_password('pass123', h) for h in _seed_hashes):
         logger.warning("⚠️  SEED USERS WITH DEFAULT PASSWORDS DETECTED — Change all passwords before use!")
 
 
@@ -1086,17 +1104,6 @@ def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
         except Exception:
             pass
     return shift_start_dt + timedelta(days=1)
-
-
-def hash_password(password):
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-
-
-def check_password(password, hashed):
-    try:
-        return bcrypt.checkpw(password.encode(), hashed.encode())
-    except Exception:
-        return False
 
 
 def get_user(emp_id):
@@ -1203,7 +1210,7 @@ def get_credentials():
 
 
 @app.route('/login', methods=['GET', 'POST'])
-@limiter.limit("20 per minute")
+@limiter.limit(os.getenv('LOGIN_RATE_LIMIT', '20 per minute'))
 def login():
     """User login
     ---
@@ -1244,6 +1251,15 @@ def login():
     stored_hash = row[3]
     if not check_password(password, stored_hash):
         return jsonify({'error': 'Invalid Password'}), 401
+
+    # Phase 3a (CC-06): transparently upgrade legacy bcrypt hashes to Argon2id
+    if needs_rehash(stored_hash):
+        hconn = get_db()
+        hconn.execute(
+            "UPDATE users SET password = ? WHERE emp_id = ?",
+            [hash_password(password), emp_id]
+        )
+        hconn.close()
 
     if not row[5]:
         return jsonify({'error': 'Login is not allowed for this user'}), 403
@@ -4363,22 +4379,16 @@ def set_security_headers(response):
 # ══════════════════════════════════════════════════════════════════════
 
 @app.route('/api/csrf-token', methods=['GET'])
-@login_required
 def get_csrf_token():
-    token = secrets.token_hex(32)
+    """Return the session's CSRF token, creating it on demand.
+
+    Anonymous by design: the login page and programmatic clients (test
+    harness) need the token before they have any other session state.
+    Global enforcement itself lives in security.init_csrf().
+    """
+    token = session.get('csrf_token') or secrets.token_urlsafe(32)
     session['csrf_token'] = token
     return jsonify({'csrf_token': token})
-
-
-def csrf_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
-            token = request.headers.get('X-CSRF-Token') or (request.get_json(silent=True) or {}).get('csrf_token')
-            if not token or token != session.get('csrf_token'):
-                return jsonify({'error': 'CSRF token missing or invalid'}), 403
-        return f(*args, **kwargs)
-    return decorated
 
 
 # ══════════════════════════════════════════════════════════════════════

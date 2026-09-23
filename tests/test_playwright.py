@@ -4,6 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
+os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
 os.environ.setdefault('APP_DB', 'duckdb')
 if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     import db_backend
@@ -65,8 +66,6 @@ def test_admin_sees_user_tab(page):
     page.wait_for_timeout(2000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(2000)
-    page.click('#manage-tab')
-    page.wait_for_timeout(2000)
     tbody = page.locator('#usersTableBody')
     assert tbody.is_visible()
     page.wait_for_timeout(1000)
@@ -90,7 +89,7 @@ def test_admin_create_user(page):
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(1000)
-    page.click('#create-tab')
+    page.click('.create-user-btn')
     page.wait_for_timeout(500)
     page.fill('#empId', 'TEST01')
     page.fill('#name', 'Test User')
@@ -98,11 +97,9 @@ def test_admin_create_user(page):
     page.select_option('#department', 'MIS')
     page.select_option('#role', 'Employee')
     with page.expect_response(lambda r: r.url.endswith('/api/users') and r.request.method == 'POST') as resp:
-        page.click('button[type="submit"]')
+        page.click('#createUserModal .btn-primary')
     assert resp.value.ok, f'Create user failed: {resp.value.status}'
-    page.wait_for_timeout(1000)
-    page.click('#manage-tab')
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(1500)
     body = page.text_content('#usersTableBody')
     assert 'TEST01' in body, f'TEST01 not found in {body}'
 

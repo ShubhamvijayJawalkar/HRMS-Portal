@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast, 24 tests)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 14 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast, 29 tests)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,8 +28,8 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (24 tests)
-- `tests/test_playwright.py` — Playwright browser tests (14 tests)
+- `tests/test_app.py` — Flask unit tests (29 tests)
+- `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
@@ -69,6 +69,18 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ### Admin Dashboard
 - Fixed JSON key mismatches (`online_count` → `online`)
 - Added `/api/admin/breaks` and `/api/admin/dispose-break/<id>` endpoints
+
+## Phase 3a (Auth hardening — CC-06)
+- Argon2id password hashing (`security.py`); legacy bcrypt hashes verify and
+  are re-hashed to Argon2id on next login
+- Global CSRF enforcement on POST/PUT/PATCH/DELETE; the injected
+  `window.fetch` wrapper auto-attaches `X-CSRF-Token`; native forms carry a
+  hidden `csrf_token` field; `GET /api/csrf-token` serves programmatic clients
+- Server-side Redis sessions when `REDIS_URL` is set (default: signed cookies;
+  dev/CI needs no Redis)
+- `LOGIN_RATE_LIMIT` env override on the login route (default `20 per minute`)
+- Unit tests attach the CSRF token via the `client` fixture wrapper
+  (`_attach_csrf`); Playwright runs the real browser flow (forms + fetch)
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

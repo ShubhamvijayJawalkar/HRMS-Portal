@@ -73,6 +73,7 @@
                 <div class="card-header"><h5 class="mb-0">Apply for Leave</h5></div>
                 <div class="card-body">
                     <form id="leaveForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3">
                             <label class="form-label">Leave Type</label>
                             <select id="leaveType" class="form-select" required>

@@ -1,4 +1,4 @@
-# HRMS v2.0 — Migration Runbook (Phases 0–2)
+# HRMS v2.0 — Migration Runbook (Phases 0–3)
 
 This runbook covers **Phase 0 (freeze & inventory)**, **Phase 1 (one-time ETL:
 DuckDB → PostgreSQL)** and **Phase 2 (service-layer cutover: the existing app
@@ -186,8 +186,8 @@ the new stack with `APP_DB=postgres python app.py`.
 
 ### Exit criteria (§14 Phase 2)
 
-- [x] Existing unit suite (24 tests) passes on PostgreSQL — **24/24**
-- [x] DuckDB suite still passes (24/24) — no regression
+- [x] Existing unit suite (29 tests) passes on PostgreSQL — **29/29**
+- [x] DuckDB suite still passes (29/29) — no regression
 - [x] Playwright browser suite runs on PostgreSQL (parity with DuckDB baseline)
 - [x] Rollback: unset `APP_DB` → DuckDB path untouched (the adapter only
       activates under `APP_DB=postgres`)
@@ -203,7 +203,59 @@ the new stack with `APP_DB=postgres python app.py`.
 
 ---
 
-## 5. Fresh-environment alternative (Alembic)
+## 5. Phase 3a — Auth hardening (SRS CC-06)
+
+Security lives in the Flask request pipeline (`security.py`), so it applies
+identically on DuckDB and PostgreSQL; nothing here depends on the DB backend.
+
+### Password hashing (Argon2id)
+
+- New hashes use Argon2id (`m=19456 KiB, t=2, p=1` — OWASP floor).
+- Legacy v1.0 bcrypt hashes still verify and are transparently re-hashed to
+  Argon2id on the next successful login (`needs_rehash()` in the login route).
+- The production boot-time seed check now *verifies* `pass123` against the two
+  seed users instead of a never-matching string compare.
+
+### CSRF
+
+- A per-session token is issued on the first safe request and enforced on every
+  POST/PUT/PATCH/DELETE via the `X-CSRF-Token` header, a `csrf_token` form
+  field, or a JSON body key. A request is accepted without a token only while
+  the session has none yet (bootstrap — nothing established to protect).
+- `init_csrf()` injects a small `window.fetch` wrapper into every HTML response
+  so browser AJAX sends the header automatically; native `<form>` elements
+  carry a hidden `{{ csrf_token() }}` field.
+- `GET /api/csrf-token` returns the session token for programmatic clients
+  (anonymous by design; used by the test harness).
+- Known trade-off: Swagger UI "Try it out" state-changing calls carry no token
+  and return 403 — use the app UI instead.
+- Login rate limit is now `LOGIN_RATE_LIMIT` (default `20 per minute`); the
+  Playwright suite sets `60 per minute` so the green suite doesn't trip it.
+
+### Server-side sessions (Redis)
+
+- Set `REDIS_URL` (e.g. `redis://localhost:56379/0`) to store Flask sessions in
+  Redis; the cookie then holds only an opaque session id. Default (unset) keeps
+  signed cookies, so dev/CI needs no Redis.
+- TTL = `PERMANENT_SESSION_LIFETIME` (8 h); logout deletes the server copy.
+
+### Run it
+
+```bash
+REDIS_URL=redis://localhost:56379/0 python -m pytest tests/test_app.py -v  # unit on Redis sessions
+```
+
+### Exit criteria (§14 CC-06)
+
+- [x] Unit suite (29 tests) green on DuckDB, PostgreSQL, and with Redis sessions
+- [x] Playwright browser suite 15/15 on PostgreSQL (incl. the admin create-user flow)
+- [x] Session lifecycle proof: token seeded → login stored in Redis → cookie is
+      opaque → logout deletes the server-side session
+- [x] Default path unchanged when `REDIS_URL` / `APP_DB` are unset
+
+---
+
+## 6. Fresh-environment alternative (Alembic)
 
 To build the target schema from scratch (e.g. a preview/staging DB with no
 legacy data):
@@ -215,7 +267,7 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_fresh \
 
 ---
 
-## 6. Rollback
+## 7. Rollback
 
 - **Before** `--apply-cleanup` was run on your migration copy: drop the target
   schema (`DROP SCHEMA public CASCADE`) and re-run `--reset`.
@@ -225,7 +277,7 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_fresh \
 
 ---
 
-## 7. Known v1.0 → v2.0 mapping decisions
+## 8. Known v1.0 → v2.0 mapping decisions
 
 - `users.shift_start/shift_end` → one `shift_assignments` row per employee,
   `effective_from = 1970-01-01`, weekly-off default `Sat,Sun`. Collect real
@@ -241,11 +293,11 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_fresh \
   the v2.0 workflow tables (`onboarding_workflow`, `onboarding_checklist`,
   `resignations`, `offboarding_workflow`) are created empty for Phase 4.
 
-## 8. Next steps (Phase 3 →)
+## 9. Next steps (Phase 3b →)
 
-1. Phase 3 — CC rules: `setval`→`GENERATED ALWAYS` identity (CC-01), Argon2id +
-   CSRF + server-side sessions (CC-06), outbox (CC-09), idempotency (CC-07);
-   the phase flips the service layer onto the v2.0 `public` schema.
+1. Phase 3b — remaining CC rules: CC-01 (`setval` → `GENERATED ALWAYS` identity
+   + flip the service layer onto the v2.0 `public` schema), outbox (CC-09),
+   idempotency (CC-07).
 2. Phase 4 — new capabilities: attendance finalisation job (FR-JOB-01),
    maker-checker payroll (FR-PAY-06), corrected ATS/onboarding/offboarding flows.
 3. Phase 5 — cutover; Phase 6 — decommission DuckDB.

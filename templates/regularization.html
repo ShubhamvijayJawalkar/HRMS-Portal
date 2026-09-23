@@ -70,6 +70,7 @@
                 <div class="card-header"><h5 class="mb-0">New Request</h5></div>
                 <div class="card-body">
                     <form id="regForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3"><label class="form-label">Date</label><input type="date" id="regDate" class="form-control" required></div>
                         <div class="mb-3"><label class="form-label">Reason</label><textarea id="regReason" class="form-control" rows="3" placeholder="Explain the discrepancy" required></textarea></div>
                         <button type="submit" class="btn btn-primary">Submit Request</button>

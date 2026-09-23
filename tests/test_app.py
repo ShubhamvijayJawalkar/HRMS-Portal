@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import tempfile
-import bcrypt
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -16,7 +15,32 @@ if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     db_backend.reset_schema()
 
 import pytest
-from app import app, get_db, hash_password, gen_id
+from app import app, get_db, hash_password, check_password, gen_id
+
+
+def _attach_csrf(c):
+    """Attach a valid X-CSRF-Token to every state-changing test request.
+
+    Phase 3a (CC-06) enforces CSRF globally. Browsers normally pick the
+    token up from the page; the test client fetches it via GET
+    /api/csrf-token instead (the exact token the session will validate).
+    """
+    def _bind(method):
+        orig = getattr(c, method)
+
+        def wrapped(*args, **kwargs):
+            tok = c.get('/api/csrf-token')
+            if tok.status_code == 200:
+                headers = dict(kwargs.get('headers') or {})
+                headers.setdefault('X-CSRF-Token', tok.get_json()['csrf_token'])
+                kwargs['headers'] = headers
+            return orig(*args, **kwargs)
+
+        setattr(c, method, wrapped)
+
+    for method in ('post', 'put', 'patch', 'delete'):
+        _bind(method)
+    return c
 
 
 @pytest.fixture
@@ -24,6 +48,7 @@ def client():
     app.config['TESTING'] = True
     app.config['SERVER_NAME'] = 'localhost'
     with app.test_client() as c:
+        _attach_csrf(c)
         with app.app_context():
             yield c
 
@@ -149,8 +174,80 @@ def test_seed_data_has_multiple_entries_per_model(client):
 
 def test_password_hashing():
     h = hash_password('test123')
-    assert h.startswith('$2')
-    assert bcrypt.checkpw(b'test123', h.encode())
+    assert h.startswith('$argon2id$')
+    assert check_password('test123', h)
+    assert not check_password('wrong-password', h)
+
+
+def test_legacy_bcrypt_hash_still_verifies():
+    """v1.0 bcrypt hashes must keep working until re-hashed on login (CC-06)."""
+    import bcrypt
+    from security import needs_rehash
+    legacy = bcrypt.hashpw(b'test123', bcrypt.gensalt()).decode()
+    assert check_password('test123', legacy)
+    assert not check_password('wrong-password', legacy)
+    assert needs_rehash(legacy)
+    assert not needs_rehash(hash_password('test123'))
+
+
+def test_csrf_guard_enforced_and_accepts_valid_token(client):
+    """CC-06: unsafe requests need the session's CSRF token."""
+    raw = app.test_client()  # unwrapped client — no automatic token
+
+    # Prime the session so a token exists (no bootstrap exemption left).
+    tok = raw.get('/api/csrf-token').get_json()['csrf_token']
+
+    # Without the token the request is rejected...
+    r = raw.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+    assert r.status_code == 403
+
+    # ...with it, the same request goes through.
+    r = raw.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'},
+                 headers={'X-CSRF-Token': tok})
+    assert r.status_code == 200
+
+
+def test_csrf_bootstrap_first_request_allowed(client):
+    """A session with no token yet has nothing to protect — first request passes."""
+    raw = app.test_client()
+    r = raw.post('/login', json={'emp_id': 'nobody', 'password': 'x'})
+    assert r.status_code == 401  # Invalid Employee ID, not 403
+
+
+def test_login_rehashes_legacy_bcrypt_to_argon2(client):
+    """CC-06: a legacy bcrypt hash is transparently upgraded on successful login."""
+    import bcrypt
+    legacy = bcrypt.hashpw(b'pass123', bcrypt.gensalt()).decode()
+    conn = get_db()
+    conn.execute("UPDATE users SET password = ? WHERE emp_id = 'EMP001'", [legacy])
+    conn.close()
+    assert check_password('pass123', legacy)
+
+    r = client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+    assert r.status_code == 200, r.get_json()
+
+    conn = get_db()
+    upgraded = conn.execute("SELECT password FROM users WHERE emp_id = 'EMP001'").fetchone()[0]
+    conn.close()
+    assert upgraded.startswith('$argon2id$')
+    assert upgraded != legacy
+    assert check_password('pass123', upgraded)
+
+
+def test_plaintext_password_normalized_on_boot():
+    """init_db rewrites rows whose hash is neither bcrypt nor Argon2id."""
+    conn = get_db()
+    conn.execute("UPDATE users SET password = 'plaintext-secret' WHERE emp_id = 'EMP002'")
+    conn.close()
+
+    import app as app_module
+    app_module.init_db()  # re-run boot-time init: normalize step must catch it
+
+    conn = get_db()
+    fixed = conn.execute("SELECT password FROM users WHERE emp_id = 'EMP002'").fetchone()[0]
+    conn.close()
+    assert fixed.startswith('$argon2id$')
+    assert check_password('pass123', fixed)
 
 
 # ── Authenticated API Tests (use session_transaction) ──────────

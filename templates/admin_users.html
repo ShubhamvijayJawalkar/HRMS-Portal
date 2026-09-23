@@ -166,6 +166,7 @@
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus-fill me-2"></i>Create New User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
                 <form id="createUserForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="row">
                         <div class="col-md-6 mb-3"><label for="empId" class="form-label">Employee ID *</label><input type="text" id="empId" class="form-control" placeholder="e.g., EMP003" required></div>
                         <div class="col-md-6 mb-3"><label for="name" class="form-label">Full Name *</label><input type="text" id="name" class="form-control" placeholder="John Doe" required></div>
@@ -216,6 +217,7 @@
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit User</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
                 <form id="editUserForm">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <input type="hidden" id="editEmpId">
                     <div class="row">
                         <div class="col-md-6 mb-3"><label class="form-label">Full Name</label><input type="text" id="editName" class="form-control" required></div>

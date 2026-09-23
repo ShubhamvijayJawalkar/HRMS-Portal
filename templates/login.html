@@ -83,6 +83,7 @@
         <p class="subtitle">Sign in to your account</p>
 
         <form id="loginForm" autocomplete="off">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <div class="mb-3">
                 <label for="empId" class="form-label">Employee ID</label>
                 <div class="input-group">
