@@ -11,3 +11,7 @@ sentry-sdk>=2.0
 reportlab>=4.0
 python-pptx>=0.6.21
 gunicorn>=22.0
+# ── Phase 0-1 migration tooling (DuckDB → Postgres) ──
+alembic>=1.13
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1

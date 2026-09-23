@@ -19,6 +19,7 @@ uploads/*
 generate_ppt.py
 ppt_screenshots/
 HRMS_Deployment_Guide.docx
+reports/
 
 # IDE / Config
 .DS_Store
