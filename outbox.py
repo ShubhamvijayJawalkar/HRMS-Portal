@@ -130,8 +130,8 @@ def _handle_payroll_finalized(conn, row) -> bool:
         now = datetime.now()
         for i, (emp_id, name, net) in enumerate(employees):
             conn.execute(
-                "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, created_at) "
-                "VALUES (?, ?, 'Payroll', ?, '/my-payslips', ?)",
+                "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
+                "VALUES (?, ?, 'Payroll', 'Payroll', ?, '/my-payslips', ?)",
                 [gen_id(), emp_id, f'Salary for run {run_id} credited: Rs.{float(net):,.2f}', now],
             )
         return True
@@ -168,8 +168,8 @@ def _handle_offer_accepted(conn, row) -> bool:
     cid = payload.get('candidate_id')
     try:
         conn.execute(
-            "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, created_at) "
-            "VALUES (?, 'EMP001', 'Onboarding', ?, '/onboarding', ?)",
+            "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
+            "VALUES (?, 'EMP001', 'Onboarding', 'Onboarding', ?, '/onboarding', ?)",
             [gen_id(), f'Candidate {cid} accepted — start onboarding', datetime.now()],
         )
         return True

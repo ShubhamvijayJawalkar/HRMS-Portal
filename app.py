@@ -9,7 +9,7 @@ from io import BytesIO
 import duckdb
 import pandas as pd
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file
+from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, g
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
@@ -242,9 +242,15 @@ def init_db():
         CREATE TABLE IF NOT EXISTS audit_log (
             log_id INTEGER PRIMARY KEY,
             emp_id VARCHAR,
+            actor VARCHAR,
             action VARCHAR NOT NULL,
+            entity VARCHAR,
+            entity_id VARCHAR,
             details VARCHAR,
+            "before" TEXT,
+            "after" TEXT,
             ip_address VARCHAR,
+            request_id VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -356,6 +362,7 @@ def init_db():
             notification_id INTEGER PRIMARY KEY,
             emp_id VARCHAR NOT NULL,
             type VARCHAR NOT NULL,
+            category VARCHAR DEFAULT 'General',
             message VARCHAR NOT NULL,
             related_link VARCHAR,
             is_read INTEGER DEFAULT 0,
@@ -1060,14 +1067,38 @@ if os.getenv('FLASK_ENV') == 'production':
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════
 
-def audit_log(emp_id, action, details=None):
+def audit_log(emp_id, action, details=None, *, actor=None, entity=None, entity_id=None, before=None, after=None):
+    """Write an audit trail row (v2.0 shape: actor/entity/entity_id/before/after/request_id).
+
+    CC-13: every request gets a trace ``request_id`` (honours an inbound
+    ``X-Request-ID`` header so gateways can correlate; otherwise a fresh
+    ``req-`` token is minted per request). ``actor`` defaults to the session
+    user's name. ``before``/``after`` accept dicts and are stored as JSON.
+    """
     conn = None
     try:
         conn = get_db()
         log_id = int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
+        if actor is None:
+            actor = session.get('name') or session.get('emp_id') or emp_id
+        request_id = getattr(g, '_hrms_request_id', None)
+        if request_id is None:
+            request_id = request.headers.get('X-Request-ID') or f"req-{secrets.token_hex(8)}"
+            g._hrms_request_id = request_id
+
+        def _json(v):
+            if v is None:
+                return None
+            if isinstance(v, dict):
+                return json.dumps(v, default=str)
+            return str(v) if not isinstance(v, str) else v
+
         conn.execute(
-            "INSERT INTO audit_log (log_id, emp_id, action, details, ip_address, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [log_id, emp_id, action, details, request.remote_addr, datetime.now()]
+            'INSERT INTO audit_log (log_id, emp_id, actor, action, entity, entity_id, details, '
+            '"before", "after", ip_address, request_id, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [log_id, emp_id, actor, action, entity, entity_id, details,
+             _json(before), _json(after), request.remote_addr, request_id, datetime.now()]
         )
     except Exception as e:
         logger.warning("audit_log failed: %s", e)
@@ -1321,7 +1352,7 @@ def login():
     )
     conn.close()
 
-    audit_log(row[0], 'LOGIN', f'User {row[1]} logged in')
+    audit_log(row[0], 'LOGIN', f'User {row[1]} logged in', entity='Auth', entity_id=row[0])
     return jsonify({'message': 'Login successful', 'redirect': '/dashboard'}), 200
 
 
@@ -1353,7 +1384,7 @@ def logout():
                 [logout_time, hours, curr_sid]
             )
         conn.close()
-        audit_log(emp_id, 'LOGOUT', 'User logged out')
+        audit_log(emp_id, 'LOGOUT', 'User logged out', entity='Auth', entity_id=emp_id)
     session.clear()
     return redirect(url_for('login'))
 
@@ -1424,7 +1455,7 @@ def profile_api():
     )
     conn.close()
     session['name'] = data.get('name')
-    audit_log(emp_id, 'PROFILE_UPDATE', 'Profile updated')
+    audit_log(emp_id, 'PROFILE_UPDATE', 'Profile updated', entity='users', entity_id=emp_id)
     return jsonify({'message': 'Profile updated'}), 200
 
 
@@ -1469,7 +1500,7 @@ def change_password():
 
     conn.execute("UPDATE users SET password = ? WHERE emp_id = ?", [hash_password(new_pwd), emp_id])
     conn.close()
-    audit_log(emp_id, 'PASSWORD_CHANGE', 'Password changed')
+    audit_log(emp_id, 'PASSWORD_CHANGE', 'Password changed', entity='users', entity_id=emp_id)
     return jsonify({'message': 'Password changed successfully'}), 200
 
 
@@ -1557,7 +1588,7 @@ def reset_password():
     conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE token_id = ?", [row[0]])
     conn.execute("UPDATE users SET password = ? WHERE emp_id = ?", [hash_password(new_pwd), row[1]])
     conn.close()
-    audit_log(row[1], 'PASSWORD_RESET', 'Password reset via token')
+    audit_log(row[1], 'PASSWORD_RESET', 'Password reset via token', entity='users', entity_id=row[1])
     return jsonify({'message': 'Password reset successfully'}), 200
 
 
@@ -1683,13 +1714,31 @@ def delete_holiday(hid):
 #  NOTIFICATIONS
 # ══════════════════════════════════════════════════════════════════════
 
-def add_notification(emp_id, ntype, message, link=None):
+def _notification_category(ntype):
+    """FR-NOT-03 preference category derived from the notification type."""
+    t = (ntype or '').upper()
+    if 'LEAVE' in t:
+        return 'Leave'
+    if 'PAYROLL' in t:
+        return 'Payroll'
+    if 'ONBOARDING' in t:
+        return 'Onboarding'
+    if 'BREAK' in t:
+        return 'Break'
+    if 'OFFER' in t:
+        return 'Offer'
+    return 'General'
+
+
+def add_notification(emp_id, ntype, message, link=None, category=None):
     conn = None
     try:
         conn = get_db()
+        if category is None:
+            category = _notification_category(ntype)
         conn.execute(
-            "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [gen_id(), emp_id, ntype, message, link, datetime.now()]
+            "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [gen_id(), emp_id, ntype, category, message, link, datetime.now()]
         )
     except Exception as e:
         logger.warning("Notification failed: %s", e)
@@ -1705,14 +1754,14 @@ def add_notification(emp_id, ntype, message, link=None):
 def get_notifications():
     conn = get_db()
     rows = conn.execute(
-        "SELECT notification_id, type, message, related_link, is_read, created_at FROM notifications WHERE emp_id = ? ORDER BY created_at DESC LIMIT 50",
+        "SELECT notification_id, type, category, message, related_link, is_read, created_at FROM notifications WHERE emp_id = ? ORDER BY created_at DESC LIMIT 50",
         [session['emp_id']]
     ).fetchall()
     unread = conn.execute("SELECT COUNT(*) FROM notifications WHERE emp_id = ? AND is_read = 0", [session['emp_id']]).fetchone()[0]
     conn.close()
     return jsonify({
         'unread': unread,
-        'data': [{'id': r[0], 'type': r[1], 'message': r[2], 'link': r[3], 'is_read': bool(r[4]), 'created_at': r[5].isoformat() if r[5] else None} for r in rows]
+        'data': [{'id': r[0], 'type': r[1], 'category': r[2], 'message': r[3], 'link': r[4], 'is_read': bool(r[5]), 'created_at': r[6].isoformat() if r[6] else None} for r in rows]
     }), 200
 
 
@@ -3129,7 +3178,7 @@ def leaves_api():
         [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', '')]
     )
     conn.close()
-    audit_log(emp_id, 'LEAVE_APPLY', f'{lt} leave {sd} to {ed}')
+    audit_log(emp_id, 'LEAVE_APPLY', f'{lt} leave {sd} to {ed}', entity='leave_requests', entity_id=leave_id)
     add_notification(session['emp_id'], 'LEAVE_APPLIED', f'Your {lt} leave ({sd} to {ed}) has been submitted.', '/leaves')
     return jsonify({'message': 'Leave application submitted', 'leave_id': leave_id}), 201
 
@@ -3211,7 +3260,7 @@ def approve_leave(leave_id):
         [days, row[0], row[1], row[2].year]
     )
     conn.close()
-    audit_log(session['emp_id'], 'LEAVE_APPROVE', f'Leave {leave_id} approved')
+    audit_log(session['emp_id'], 'LEAVE_APPROVE', f'Leave {leave_id} approved', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_APPROVED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been approved.', '/leaves')
     return jsonify({'message': 'Leave approved'}), 200
 
@@ -3234,7 +3283,7 @@ def reject_leave(leave_id):
         [session['emp_id'], datetime.now(), leave_id]
     )
     conn.close()
-    audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected')
+    audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_REJECTED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been rejected.', '/leaves')
     return jsonify({'message': 'Leave rejected'}), 200
 
@@ -3277,7 +3326,7 @@ def get_audit_log():
     offset = request.args.get('offset', 0, type=int)
     conn = get_db()
     rows = conn.execute(
-        "SELECT log_id, emp_id, action, details, ip_address, created_at FROM audit_log ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT log_id, emp_id, actor, action, entity, entity_id, details, \"before\", \"after\", ip_address, request_id, created_at FROM audit_log ORDER BY created_at DESC LIMIT ? OFFSET ?",
         [limit, offset]
     ).fetchall()
     total = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
@@ -3285,9 +3334,11 @@ def get_audit_log():
     return jsonify({
         'total': total,
         'data': [{
-            'log_id': r[0], 'emp_id': r[1], 'action': r[2],
-            'details': r[3], 'ip_address': r[4],
-            'created_at': r[5].isoformat() if r[5] else None
+            'log_id': r[0], 'emp_id': r[1], 'actor': r[2], 'action': r[3],
+            'entity': r[4], 'entity_id': r[5], 'details': r[6],
+            'before': r[7], 'after': r[8], 'ip_address': r[9],
+            'request_id': r[10],
+            'created_at': r[11].isoformat() if r[11] else None
         } for r in rows]
     }), 200
 
@@ -4151,7 +4202,8 @@ def add_user():
          data.get('shift_start', ''), data.get('shift_end', '')]
     )
     conn.close()
-    audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}')
+    audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}',
+              entity='users', entity_id=data['emp_id'], after={'role': data.get('role'), 'department': data.get('department')})
 
     admin_name = session.get('name', 'Admin')
     creds_body = f"""<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;">
@@ -4201,7 +4253,7 @@ def update_user(emp_id):
          int(data.get('allow_breaks', 1)), data.get('shift_start', ''), data.get('shift_end', ''), emp_id]
     )
     conn.close()
-    audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}')
+    audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}', entity='users', entity_id=emp_id)
     return jsonify({'message': 'User updated'}), 200
 
 
@@ -4211,7 +4263,7 @@ def block_user(emp_id):
     conn = get_db()
     conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = ?", [emp_id])
     conn.close()
-    audit_log(session['emp_id'], 'USER_BLOCK', f'Blocked user {emp_id}')
+    audit_log(session['emp_id'], 'USER_BLOCK', f'Blocked user {emp_id}', entity='users', entity_id=emp_id)
     return jsonify({'message': 'User blocked'}), 200
 
 
@@ -4221,7 +4273,7 @@ def unblock_user(emp_id):
     conn = get_db()
     conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = ?", [emp_id])
     conn.close()
-    audit_log(session['emp_id'], 'USER_UNBLOCK', f'Unblocked user {emp_id}')
+    audit_log(session['emp_id'], 'USER_UNBLOCK', f'Unblocked user {emp_id}', entity='users', entity_id=emp_id)
     return jsonify({'message': 'User unblocked'}), 200
 
 
@@ -4256,7 +4308,7 @@ def delete_user(emp_id):
             pass
     conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
     conn.close()
-    audit_log(session['emp_id'], 'USER_DELETE', f'Deleted user {emp_id} ({user[0]})')
+    audit_log(session['emp_id'], 'USER_DELETE', f'Deleted user {emp_id} ({user[0]})', entity='users', entity_id=emp_id)
     return jsonify({'message': f'User {emp_id} deleted permanently'}), 200
 
 

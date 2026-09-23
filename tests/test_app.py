@@ -695,5 +695,113 @@ def test_idempotency_keys_expired_cleaned_by_job(client):
     assert n_val == 1
 
 
+# ── Service-layer rewrite inc 1 (expanded audit_log + notifications.category) ──
+
+def test_audit_log_expanded_fields(client):
+    """CC-13: LOGIN audits actor/entity/entity_id and honours X-Request-ID."""
+    resp = client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'},
+                       headers={'X-Request-ID': 'trace-abc-123'})
+    assert resp.status_code == 200, resp.get_json()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT actor, entity, entity_id, request_id FROM audit_log "
+        "WHERE action = 'LOGIN' AND emp_id = 'EMP001' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert row, 'no LOGIN audit row'
+    assert row[1] == 'Auth'
+    assert row[2] == 'EMP001'
+    assert row[3] == 'trace-abc-123'  # gateway correlation id passed through
+
+def test_audit_log_api_exposes_expanded_fields(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99010
+    resp = client.get('/api/audit-log')
+    assert resp.status_code == 200
+    data = resp.get_json()['data']
+    assert data
+    first = data[0]
+    for key in ('actor', 'entity', 'entity_id', 'request_id', 'before', 'after'):
+        assert key in first, f'missing {key} in audit-log payload'
+
+def test_audit_log_entity_before_after_written(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99011
+    client.post('/api/users', json={
+        'emp_id': 'XQ8', 'name': 'Audit Subject', 'email': 'xq8@company.com',
+        'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+    })
+    conn = get_db()
+    row = conn.execute(
+        'SELECT entity, entity_id, "after" FROM audit_log '
+        "WHERE action = 'USER_CREATE' AND entity_id = 'XQ8' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    assert row is not None, 'no USER_CREATE audit row'
+    assert row[0] == 'users'
+    assert row[1] == 'XQ8'
+    after = json.loads(row[2])
+    assert after['role'] == 'Employee'
+    assert after['department'] == 'MIS'
+
+def test_notification_category_derived_on_write(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99012
+    client.post('/api/leaves', json={
+        'leave_type': 'Casual', 'start_date': '2026-12-01',
+        'end_date': '2026-12-02', 'reason': 'category probe',
+    })
+    conn = get_db()
+    row = conn.execute(
+        "SELECT type, category FROM notifications WHERE type = 'LEAVE_APPLIED'"
+        " ORDER BY created_at DESC LIMIT 1").fetchone()
+    conn.close()
+    assert row and row[0] == 'LEAVE_APPLIED'
+    assert row[1] == 'Leave'
+
+def test_notification_category_db_default(client):
+    """Legacy/`legacy` DDL default applies when category is omitted (outbox path)."""
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO notifications (notification_id, emp_id, type, message, created_at) VALUES (?, 'EMP001', 'X_TYPE', 'x', ?)",
+        [gen_id(), datetime.now()],
+    )
+    row = conn.execute("SELECT category FROM notifications WHERE type = 'X_TYPE'").fetchone()
+    conn.close()
+    assert row and row[0] == 'General'
+
+def test_outbox_payroll_notification_category(client):
+    """payroll.finalized dispatching writes category='Payroll'."""
+    import outbox
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99013
+    client.post('/api/payroll-runs', json={'month': 12, 'year': 2098})
+    conn = get_db()
+    rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2098").fetchone()[0]
+    conn.close()
+    client.post(f'/api/payroll-runs/{rid}/finalize')
+    conn = get_db()
+    outbox.dispatch_once(conn)
+    conn.close()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT category FROM notifications WHERE type = 'Payroll'"
+        " ORDER BY created_at DESC LIMIT 1").fetchone()
+    conn.close()
+    assert row and row[0] == 'Payroll'
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
