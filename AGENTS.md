@@ -10,12 +10,25 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast, 26 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast, 24 tests)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 14 tests)
 ```
 
+### Running the suite against PostgreSQL (Phase 2)
+The app runs on either backend via `APP_DB` (`duckdb` default, `postgres` for
+the Phase-2 cutover). On the Postgres backend the tests drop/recreate the
+`legacy` schema before importing `app`, so each run starts clean (the v2.0
+target schema in `public` is never touched). Requires the `hrms-pg` container
+(see `docs/MIGRATION.md`).
+```bash
+APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
+  python -m pytest tests/test_app.py -v
+APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
+  python -m pytest tests/test_playwright.py -v
+```
+
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (26 tests)
+- `tests/test_app.py` — Flask unit tests (24 tests)
 - `tests/test_playwright.py` — Playwright browser tests (14 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 

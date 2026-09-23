@@ -98,6 +98,9 @@ STARTED = False
 # ══════════════════════════════════════════════════════════════════════
 
 def get_db():
+    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
+        import db_backend
+        return db_backend.connect()
     conn = duckdb.connect(DB_FILE)
     try:
         conn.execute("PRAGMA enable_progress_bar")

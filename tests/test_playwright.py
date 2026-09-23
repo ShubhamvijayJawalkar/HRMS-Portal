@@ -4,6 +4,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
+os.environ.setdefault('APP_DB', 'duckdb')
+if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
+    import db_backend
+    db_backend.reset_schema()
 
 import pytest
 from app import app
@@ -141,7 +145,8 @@ def test_login_hours_display(page):
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
     total = page.locator('#totalLoginHours')
-    txt = total.text_content()
+    # The widget renders "0h" / "7.5h" (toFixed(1)+'h'); parse the numeric part.
+    txt = (total.text_content() or '').replace('h', '').strip()
     val = float(txt)
     assert val >= 0, f'Login hours should be >= 0, got {val}'
 

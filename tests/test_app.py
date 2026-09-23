@@ -10,6 +10,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_test_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
+os.environ.setdefault('APP_DB', 'duckdb')
+if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
+    import db_backend
+    db_backend.reset_schema()
 
 import pytest
 from app import app, get_db, hash_password, gen_id
