@@ -250,6 +250,64 @@ def test_plaintext_password_normalized_on_boot():
     assert check_password('pass123', fixed)
 
 
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+    reason='CC-01 inspects the v2.0 target schema on PostgreSQL',
+)
+def test_cc01_surrogate_keys_are_identity():
+    """CC-01: every surrogate PK is an identity column; only natural keys differ."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT t.relname, a.attname, a.attidentity "
+        "FROM pg_class t JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = 'public' "
+        "JOIN pg_index i ON i.indrelid = t.oid AND i.indisprimary "
+        "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey) "
+        "WHERE t.relkind = 'r'"
+    ).fetchall()
+    conn.close()
+
+    natural = {('users', 'emp_id'), ('break_types', 'break_type'), ('idempotency_keys', 'key')}
+    framework = {'alembic_version'}
+    bad = [
+        (t, c) for t, c, ident in rows
+        if ident not in ('a', 'd') and (t, c) not in natural and t not in framework
+    ]
+    assert not bad, f'non-identity surrogate PKs: {bad}'
+    assert len(rows) >= 49, f'expected the 49-table target schema, found {len(rows)} PKs'
+
+
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+    reason='the boolean rewrite snoops information_schema on PostgreSQL',
+)
+def test_boolean_flag_rewrite_public_and_inert_legacy():
+    """Phase-3b flip compat: v2.0 BOOLEAN flags accept legacy 0/1 predicates.
+
+    The adapter rewrites ``col = 0|1|?`` into boolean literals/casts only for
+    columns that are *actually* boolean in the connected schema; the legacy
+    schema (no boolean columns) must stay byte-identical.
+    """
+    from db_backend import translate
+
+    sel = "SELECT COUNT(*) FROM notifications WHERE emp_id = ? AND is_read = 0"
+    assert translate(sel, ['EMP001'], 'public') == \
+        "SELECT COUNT(*) FROM notifications WHERE emp_id = %s AND is_read = false"
+
+    upd = "UPDATE notifications SET is_read = 1 WHERE emp_id = ?"
+    assert translate(upd, ['EMP001'], 'public') == \
+        "UPDATE notifications SET is_read = true WHERE emp_id = %s"
+
+    param = "UPDATE notifications SET is_read = ? WHERE emp_id = ?"
+    assert translate(param, [1, 'EMP001'], 'public') == \
+        "UPDATE notifications SET is_read = %s::boolean WHERE emp_id = %s"
+
+    legacy = "SELECT * FROM users WHERE allow_login = 1 AND allow_breaks = 0"
+    assert translate(legacy, ['EMP001', 'x'], 'legacy') == legacy.replace('?', '%s')
+
+    numeric = "SELECT * FROM leave_balance WHERE used_days = 0 AND reserved = 10 LIMIT 50"
+    assert translate(numeric, None, 'public') == numeric
+
+
 # ── Authenticated API Tests (use session_transaction) ──────────
 
 def test_profile_api(client):

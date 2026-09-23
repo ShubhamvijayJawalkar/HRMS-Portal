@@ -123,9 +123,65 @@ def _translate_date_fn(sql: str) -> str:
     return _DATE_FN_CALL.sub(_repl, sql)
 
 
-def translate(sql: str, params) -> str:
+_BOOLEAN_COL_CACHE: dict[str, frozenset[str]] = {}
+
+
+def _boolean_columns(schema: str) -> frozenset[str]:
+    """Boolean column names in ``schema``, introspected once per process."""
+    if schema not in _BOOLEAN_COL_CACHE:
+        cols: set[str] = set()
+        try:
+            with psycopg.connect(database_url(), autocommit=True) as ic:
+                rows = ic.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = %s AND data_type = 'boolean'",
+                    (schema,),
+                ).fetchall()
+                cols = {r[0] for r in rows}
+        except Exception:
+            cols = set()
+        _BOOLEAN_COL_CACHE[schema] = frozenset(cols)
+    return _BOOLEAN_COL_CACHE[schema]
+
+
+def _rewrite_boolean_literals(sql: str, schema: str | None) -> str:
+    """Coerce legacy smallint (0/1) predicates for schema BOOLEAN columns.
+
+    The v2.0 target schema normalises flag columns to ``BOOLEAN`` (SRS CC-02)
+    while the v1.0 app layer still compares/assigns ``0``/``1``. PostgreSQL
+    rejects ``boolcol = 0`` outright, so for columns that are *actually*
+    ``boolean`` in the connected schema we rewrite:
+
+    * ``col = 0``      -> ``col = false``   (also ``col=1`` -> ``true``)
+    * ``col = ?``      -> ``col = ?::boolean``  (int params 0/1 cast fine)
+
+    This is a strict no-op everywhere else -- the ``legacy`` schema has no
+    boolean columns, so Phase-2 behaviour is byte-identical.
+    """
+    if not schema:
+        return sql
+    bool_cols = _boolean_columns(schema)
+    if not bool_cols:
+        return sql
+    for col in bool_cols:
+        pattern = re.compile(
+            rf"(?<!\w)({re.escape(col)})(?!\w)(\s*=\s*)([01](?!\d)|\?)", re.I
+        )
+
+        def _repl(m: re.Match) -> str:
+            name, op, rhs = m.group(1), m.group(2), m.group(3)
+            if rhs == "?":
+                return f"{name}{op}?::boolean"
+            return f"{name}{op}" + ("true" if rhs == "1" else "false")
+
+        sql = pattern.sub(_repl, sql)
+    return sql
+
+
+def translate(sql: str, params, schema: str | None = None) -> str:
     """Rewrite DuckDB SQL for psycopg. ``params is None`` -> no parameter
     processing, matching psycopg's behaviour (raw passthrough)."""
+    sql = _rewrite_boolean_literals(sql, schema)
     sql = _translate_date_fn(_translate_strftime(sql))
     if params is None:
         return sql
@@ -141,14 +197,14 @@ class DuckDBCompatConnection:
 
     def execute(self, sql, params=None):
         conn = self._conn
-        q = translate(sql, params)
+        q = translate(sql, params, app_schema())
         if params is None:
             return conn.execute(q)
         return conn.execute(q, params)
 
     def executemany(self, sql, seq_of_params):
         with self._conn.cursor() as cur:
-            return cur.executemany(translate(sql, True), seq_of_params)
+            return cur.executemany(translate(sql, True, app_schema()), seq_of_params)
 
     def commit(self):
         """Statements autocommit (DuckDB parity); commit() is a no-op."""
