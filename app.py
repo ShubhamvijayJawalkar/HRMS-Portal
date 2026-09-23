@@ -897,9 +897,12 @@ def init_db():
             "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [base_id + 35, 'EMP002', 30000.00, 9000.00, 4000.00, 1500.00, (now - timedelta(days=30)).date()]
         )
+        # Sample data must satisfy CC-05 (`no_overlapping_structure`): v2.0
+        # scopes salary ranges per employee, so two unbounded ranges on the
+        # same employee would overlap. Give the older structure to EMP001.
         conn.execute(
             "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 36, 'EMP002', 28000.00, 8400.00, 3200.00, 1200.00, (now - timedelta(days=60)).date()]
+            [base_id + 36, 'EMP001', 28000.00, 8400.00, 3200.00, 1200.00, (now - timedelta(days=60)).date()]
         )
 
     if conn.execute("SELECT COUNT(*) FROM payroll_runs").fetchone()[0] < 2:

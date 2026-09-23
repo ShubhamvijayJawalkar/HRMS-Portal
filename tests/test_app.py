@@ -308,6 +308,30 @@ def test_boolean_flag_rewrite_public_and_inert_legacy():
     assert translate(numeric, None, 'public') == numeric
 
 
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+    reason='the boolean coercion snoops information_schema on PostgreSQL',
+)
+def test_insert_boolean_param_coercion_public_and_inert_legacy():
+    """Phase-3b flip compat: INSERTs into v2.0 BOOLEAN flags accept int params."""
+    from db_backend import _coerce_insert_boolean_params
+
+    sql = ("INSERT INTO users (emp_id, name, email, password, role, department, designation, status, "
+           "first_login, created_at, allow_login, allow_breaks, shift_start, shift_end) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?)")
+    params = ['T1', 'N', 'e@e', 'h', 'Employee', 'MIS', 'D', 'x', 'y', 1, 1, '', '']
+    s_out, p_out = _coerce_insert_boolean_params(sql, params, 'public')
+    assert p_out[-4] is True and p_out[-3] is True
+    assert s_out == sql  # param-only coercion keeps the SQL byte-identical
+
+    s_lit, p_lit = _coerce_insert_boolean_params(
+        "INSERT INTO users (emp_id, allow_login) VALUES ('T1', 1)", None, 'public')
+    assert 'true' in s_lit and p_lit is None
+
+    s_leg, _ = _coerce_insert_boolean_params(
+        "INSERT INTO users (emp_id, allow_login) VALUES ('T1', 1)", None, 'legacy')
+    assert '1' in s_leg  # legacy is INTEGER: nothing rewritten
+
+
 # ── Authenticated API Tests (use session_transaction) ──────────
 
 def test_profile_api(client):

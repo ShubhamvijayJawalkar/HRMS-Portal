@@ -37,6 +37,7 @@ import os
 import re
 
 import psycopg
+from psycopg.rows import tuple_row
 
 DEFAULT_DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:55432/hrms"
@@ -126,6 +127,25 @@ def _translate_date_fn(sql: str) -> str:
 _BOOLEAN_COL_CACHE: dict[str, frozenset[str]] = {}
 
 
+def _naive_datetime_factory(cursor):
+    """Row factory: strip tzinfo from every returned datetime.
+
+    DuckDB has no aware datetimes — v1.0 app code does naive arithmetic
+    (``datetime.now() - row[2]``). The legacy schema stores ``TIMESTAMP`` so
+    psycopg already returns naive and this is a no-op; the v2.0 schema stores
+    ``TIMESTAMPTZ`` for the same columns, so this restores the v1.0 naive
+    round-trip contract there (Phase 3b flip compat).
+    """
+    from datetime import datetime
+
+    base = tuple_row(cursor)
+
+    def _naive(values):
+        return tuple(v.replace(tzinfo=None) if isinstance(v, datetime) else v for v in base(values))
+
+    return _naive
+
+
 def _boolean_columns(schema: str) -> frozenset[str]:
     """Boolean column names in ``schema``, introspected once per process."""
     if schema not in _BOOLEAN_COL_CACHE:
@@ -178,6 +198,86 @@ def _rewrite_boolean_literals(sql: str, schema: str | None) -> str:
     return sql
 
 
+def _split_top_level(s: str, sep=",") -> list[str]:
+    """Split on ``sep`` ignoring quoted strings and parenthesised groups."""
+    parts, depth, quote, cur = [], 0, None, ""
+    for ch in s:
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            cur += ch
+            continue
+        if ch == "(":
+            depth += 1
+            cur += ch
+            continue
+        if ch == ")":
+            depth -= 1
+            cur += ch
+            continue
+        if ch == sep and depth == 0:
+            parts.append(cur)
+            cur = ""
+            continue
+        cur += ch
+    parts.append(cur)
+    return parts
+
+
+def _coerce_insert_boolean_params(sql: str, params, schema: str | None):
+    """INSERT VALUES compat for v2.0 BOOLEAN flag columns.
+
+    v2.0 normalised flag columns to BOOLEAN (``allow_login``/``allow_breaks``,
+    ``is_read``, ``used``, ``payslip_generated``) while the v1.0 app inserts
+    ``0``/``1``. For single-row INSERTs into those columns:
+
+    * a ``?`` placeholder fed an ``int`` 0/1 -> param coerced to ``bool``
+    * a literal ``0``/``1``               -> literal rewritten to false/true
+
+    Inert on schemas with no boolean columns (``legacy``) and on non-INSERT
+    statements; multi-row VALUES lists are left untouched.
+    """
+    if not schema:
+        return sql, params
+    bool_cols = _boolean_columns(schema)
+    if not bool_cols or "),(" in sql:
+        return sql, params
+    m = re.match(r"(?is)^(INSERT\s+INTO\s+[\"`\w.]+)\s*\(([^)]*)\)\s+VALUES\s*\((.*)\)\s*;?\s*$", sql)
+    if not m:
+        return sql, params
+    table = m.group(1).rsplit(".", 1)[-1].strip("\"`")
+    cols = [c.strip().strip("\"`") for c in m.group(2).split(",")]
+    vals = [v.strip() for v in _split_top_level(m.group(3))]
+    if len(cols) != len(vals):
+        return sql, params
+    new_vals, new_params = list(vals), list(params) if params is not None else None
+    pi, sql_changed, params_changed = 0, False, False
+    for i, col in enumerate(cols):
+        v = vals[i]
+        if col not in bool_cols:
+            if "?" in v:
+                pi += 1
+            continue
+        if v in ("0", "1"):
+            new_vals[i] = "true" if v == "1" else "false"
+            sql_changed = True
+        elif v == "?":
+            if new_params is not None and pi < len(new_params) \
+                    and isinstance(new_params[pi], int) and new_params[pi] in (0, 1):
+                new_params[pi] = bool(new_params[pi])
+                params_changed = True
+            pi += 1
+        elif "?" in v:
+            pi += 1
+    sql_out = f"{m.group(1)} ({', '.join(cols)}) VALUES ({', '.join(new_vals)})" if sql_changed else sql
+    params_out = new_params if params_changed else params
+    return sql_out, params_out
+
+
 def translate(sql: str, params, schema: str | None = None) -> str:
     """Rewrite DuckDB SQL for psycopg. ``params is None`` -> no parameter
     processing, matching psycopg's behaviour (raw passthrough)."""
@@ -194,17 +294,23 @@ class DuckDBCompatConnection:
 
     def __init__(self, pg_conn: "psycopg.Connection"):
         self._conn = pg_conn
+        pg_conn.row_factory = _naive_datetime_factory
 
     def execute(self, sql, params=None):
         conn = self._conn
-        q = translate(sql, params, app_schema())
+        schema = app_schema()
+        sql, params = _coerce_insert_boolean_params(sql, params, schema)
+        q = translate(sql, params, schema)
         if params is None:
             return conn.execute(q)
         return conn.execute(q, params)
 
     def executemany(self, sql, seq_of_params):
         with self._conn.cursor() as cur:
-            return cur.executemany(translate(sql, True, app_schema()), seq_of_params)
+            schema = app_schema()
+            seq2 = [_coerce_insert_boolean_params(sql, sp, schema)[1] for sp in seq_of_params]
+            sql2, _ = _coerce_insert_boolean_params(sql, seq_of_params[0], schema) if seq_of_params else (sql, seq_of_params)
+            return cur.executemany(translate(sql2, True, schema), seq2)
 
     def commit(self):
         """Statements autocommit (DuckDB parity); commit() is a no-op."""

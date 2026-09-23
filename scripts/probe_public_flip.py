@@ -95,6 +95,115 @@ def _install_tolerant_boot() -> None:
     db_backend.connect = wrapped
 
 
+def _login(app_mod, emp_id: str):
+    cl = app_mod.test_client()
+    tok = cl.get("/api/csrf-token").get_json()["csrf_token"]
+    r = cl.post("/login", json={"emp_id": emp_id, "password": "pass123"},
+                headers={"X-CSRF-Token": tok})
+    return cl, tok, r.status_code
+
+
+def _post(cl, tok, url, body=None):
+    headers = {"X-CSRF-Token": tok}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    return cl.post(url, json=body, headers=headers)
+
+
+def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
+    """Fire the core state-changing flows against ``public`` exactly as the
+    legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
+    business rule fired) vs failed (5xx/EXC)."""
+    from datetime import date, timedelta
+
+    out: dict[str, tuple[str, str]] = {}
+    today = date.today()
+    state: dict = {}
+
+    # Clear residue from prior probe runs so dedupe guards don't mask results.
+    with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+        pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
+        pc.execute("DELETE FROM leave_requests WHERE reason = 'public write probe'")
+        pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
+        pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
+
+    def run(name, fn):
+        try:
+            status = fn()
+            label = "OK" if 200 <= status < 300 else ("GUARDED" if 400 <= status < 500 else "FAIL")
+            out[name] = (label, f"status={status}")
+        except Exception as exc:
+            out[name] = ("FAIL", f"{type(exc).__name__}: {str(exc).splitlines()[0][:220]}")
+
+    # ── employee flows ─────────────────────────────────────────────
+    cl, tok, lc = _login(app_mod, "EMP002")
+    if lc != 200:
+        out["login-EMP002"] = ("FAIL", f"login status={lc}")
+        return out
+    out["login-EMP002"] = ("OK", "status=200")
+
+    def start_tea():
+        r = _post(cl, tok, "/api/start-break", {"break_type": "Tea"})
+        if r.status_code == 201 and r.is_json:
+            state["break_id"] = (r.get_json() or {}).get("break_id")
+        return r.status_code
+    run("start-break(Tea)", start_tea)
+
+    def end_break():
+        bid = state.get("break_id")
+        if not bid:
+            return 409
+        return _post(cl, tok, f"/api/end-break/{bid}").status_code
+    run("end-break", end_break)
+
+    def regularization():
+        return _post(cl, tok, "/api/regularization",
+                     {"date": (today + timedelta(days=30)).isoformat(), "reason": "public write probe"}).status_code
+    run("regularization(submit)", regularization)
+
+    def leave_apply():
+        return _post(cl, tok, "/api/leaves",
+                     {"leave_type": "Casual",
+                      "start_date": (today + timedelta(days=30)).isoformat(),
+                      "end_date": (today + timedelta(days=31)).isoformat(),
+                      "reason": "public write probe"}).status_code
+    run("leaves(apply)", leave_apply)
+
+    run("notifications( read)", lambda: _post(cl, tok, "/api/notifications/read").status_code)
+
+    def lunch_request():
+        return _post(cl, tok, "/api/break-approvals",
+                     {"break_type": "Lunch", "reason": "public write probe"}).status_code
+    run("break-approvals(request Lunch)", lunch_request)
+
+    # ── admin flows ────────────────────────────────────────────────
+    cl_a, tok_a, lc_a = _login(app_mod, "EMP001")
+    if lc_a != 200:
+        out["login-EMP001"] = ("FAIL", f"login status={lc_a}")
+        return out
+    out["login-EMP001"] = ("OK", "status=200")
+
+    uniq = f"TEST{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+
+    def create_user():
+        return _post(cl_a, tok_a, "/api/users",
+                     {"emp_id": uniq, "name": "Probe Tester", "email": f"{uniq.lower()}@company.com",
+                      "department": "MIS", "role": "Employee", "password": "pass123"}).status_code
+    run("users(create)", create_user)
+
+    def approve_lunch():
+        rows = cl_a.get("/api/break-approvals").get_json() or []
+        target = next((r for r in rows if r.get("emp_id") == "EMP002" and r.get("status") == "Pending"), None)
+        if not target:
+            return 409
+        return _post(cl_a, tok_a, f"/api/break-approvals/{target['approval_id']}/approve").status_code
+    run("break-approvals(approve)", approve_lunch)
+
+    run("users(create) verify GETs", lambda: cl_a.get(f"/api/users/{uniq}").status_code)
+
+    return out
+
+
 def main() -> int:
     if os.getenv("APP_DB", "duckdb").lower() not in ("postgres", "postgresql", "pg"):
         print("should run with APP_DB=postgres and APP_DB_SCHEMA=public")
@@ -119,6 +228,18 @@ def main() -> int:
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 ["EMP001", "Probe Admin", "probe@company.com", ph, "Admin", "MIS", "Tech Lead",
                  "9876543210", "2024-01-01", "Active", True, True, "2024-01-01", "2024-01-01"],
+            )
+            # The app's init_db sample-seed writes rows for EMP001 *and* EMP002,
+            # and v2.0 enforces the FKs — seed both users here so the sample
+            # data can insert.
+            pconn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department,"
+                " designation, phone, date_of_joining, manager_emp_id, status, allow_login,"
+                " allow_breaks, first_login, created_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                ["EMP002", "Probe User", "probe2@company.com", ph, "Employee", "Operations",
+                 "Associate", "9876543211", "2024-01-01", "EMP001", "Active", True, True,
+                 "2024-01-01", "2024-01-01"],
             )
         if pconn.execute("SELECT count(*) FROM leave_balance").fetchone()[0] == 0:
             pconn.execute(
@@ -158,12 +279,24 @@ def main() -> int:
         except Exception:
             statuses[rule.rule] = "EXC"
 
+    write = _write_flows(app, dsn)
+
     by = Counter(statuses.values())
-    print("\n=== route status distribution ===")
+    by_w = Counter(v[0] for v in write.values())
+    print("\n=== GET route status distribution ===")
     for k, v in by.most_common():
         print(f"  {k}: {v}")
+    print("\n=== write-flow status distribution ===")
+    for k, v in by_w.most_common():
+        print(f"  {k}: {v}")
+    for name, (status, detail) in write.items():
+        if status != "OK":
+            print(f"  {name}: {status}  {detail}")
+
     fails = [u for u, s in statuses.items() if s != 200]
+    wfails = [n for n, (s, _) in write.items() if s != "OK"]
     print(f"\n{len(statuses) - len(fails)}/{len(statuses)} authenticated GET routes served from {schema}")
+    print(f"{len(write) - len(wfails)}/{len(write)} core write flows served from {schema}")
 
     print("\n=== seed-level deltas (init_db inserts still rejected by v2.0) ===")
     for sql, err in _SEED_FAILURES:
@@ -173,10 +306,14 @@ def main() -> int:
     print("\n=== unresolved route failures ===")
     for u in fails:
         print(f"  {u}  ({statuses[u]})")
+    print("\n=== unresolved write-flow failures ===")
+    for n, (s, detail) in write.items():
+        if s != "OK":
+            print(f"  {n}: {s}  {detail}")
 
-    if not fails:
-        print("\nREADINESS: all measured GET routes green on v2.0 public.")
-    return 0 if not fails else 2
+    if not fails and not wfails:
+        print("\nREADINESS: all measured GET routes and core write flows green on v2.0 public.")
+    return 0 if not (fails or wfails) else 2
 
 
 if __name__ == "__main__":

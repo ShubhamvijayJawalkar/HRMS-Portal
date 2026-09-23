@@ -326,37 +326,50 @@ APP_DB=postgres APP_DB_SCHEMA=public \
   python scripts/probe_public_flip.py
 ```
 
-**Result: 85/85 authenticated GET `/api/*` routes serve unmodified from
-`public`** (login + CSRF included). Bright spot: the feared rewrite is mostly
-not needed.
+**Result: 85/85 authenticated GET `/api/*` routes and 11/11 core write flows
+serve unmodified from `public`** (login + CSRF included; write flows cover
+start/end break, regularization, leave apply, notification read, Lunch break
+approval request + admin approve, and admin user creation). `init_db` boots and
+fully self-seeds against the v2.0 schema — **zero seed-time rejections**. That
+is a complete measured readiness picture, not a leap of faith.
 
 #### Adapter compat added this phase
-`db_backend.translate()` was the reason 2 GET routes failed — v2.0 normalized
-smallint flags to BOOLEAN and PostgreSQL rejects `boolcol = 0`. The adapter
-now rewrites `col = 0|1|?` into boolean literals / `?::boolean` casts **only
-for columns that are actually BOOLEAN in the connected schema** (introspected
-once per schema). Null-op on `legacy`, which has zero boolean columns, so all
+Three small, schema-scoped pieces in `db_backend.py` made the flip possible.
+All are strict no-ops on `legacy` (zero boolean columns, naive timestamps), so
 Phase-2 behaviour is byte-identical (verified by the full unit + browser
-suites on PostgreSQL).
+suites on PostgreSQL):
 
-#### Remaining flip backlog (seed-time only — no runtime route fails)
-| Delta | Cause |
-|---|---|
-| `password_reset_tokens.used` | seed INSERT passes `0` for BOOLEAN column |
-| `notifications.is_read` | same (seed) |
-| `payroll_items.payslip_generated` | same (seed) |
-| `salary_structures` ×2 | sample seeds violate the v2.0 `no_overlapping_structure` exclusion constraint (legacy seed data is invalid under CC-05) |
+1. `translate()` rewrites `col = 0|1|?` into boolean literals / `?::boolean`
+   casts for columns that are *actually* BOOLEAN in the connected schema
+   (introspected once per schema). Fixes e.g. `WHERE is_read = 0` and
+   `UPDATE ... SET is_read = 1`.
+2. `_coerce_insert_boolean_params()` co-ercies `int 0/1` params to `bool` for
+   INSERTs into v2.0 flag columns (and rewrites literal `0/1` values);
+   positionally maps the VALUES list to the column list.
+3. The row factory strips tzinfo from returned datetimes. v2.0 stores
+   `TIMESTAMPTZ` for columns v1.0 code reads back for naive arithmetic
+   (`datetime.now() - row[2]`); `legacy` already stores naive `TIMESTAMP`, so
+   this restores the v1.0 round-trip contract on v2.0.
 
-The INSERT-side literal co-ercion (positional `VALUES`) is not covered by the
-predicate rewrite above; those seeds are logged-and-skipped by the probe's
-tolerant boot. POST/PUT/DELETE write flows are the next measurement surface.
+#### Sample-seed correction
+`salary_structures` had two unbounded ranges on the same employee (EMP002),
+which violates the v2.0 CC-05 `no_overlapping_structure` exclusion constraint.
+The older sample structure now belongs to EMP001 — a data fix, not a schema one.
+
+#### Remaining flip backlog
+No seed-time or measured runtime failures remain on the GET + core-write
+surface. The remaining flip work is the actual service-layer rewrite: the
+renames below (§8), plus POST surfaces beyond the 11 core flows (forgot
+password, payroll run, ticket/ATS writes) — each measurable by extending the
+probe's write section.
 
 ## 10. Next steps
 
-1. Phase 3b — remaining CC-01 flip work: seed-time INSERT fixes + POST/PUT/
-   DELETE write-flow probe on `public`, then the service-layer rewrite
-   (notifications rename, `shift_assignments`, expanded `audit_log`), then
-   outbox (CC-09) and idempotency (CC-07).
+1. Phase 3b — remaining CC-01 flip work: the actual service-layer rewrite
+   onto `public` (notifications rename, `shift_assignments`, expanded
+   `audit_log`), extending the probe's write section to the remaining POST
+   surfaces (forgot password, payroll run, ticket/ATS), then outbox (CC-09)
+   and idempotency (CC-07).
 2. Phase 4 — new capabilities: attendance finalisation job (FR-JOB-01),
    maker-checker payroll (FR-PAY-06), corrected ATS/onboarding/offboarding flows.
 3. Phase 5 — cutover; Phase 6 — decommission DuckDB.

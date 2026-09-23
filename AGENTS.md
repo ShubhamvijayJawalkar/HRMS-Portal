@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 29 on DuckDB, 31 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 29 on DuckDB, 32 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
@@ -28,8 +28,8 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (29 on DuckDB, 31 on PostgreSQL; the
-  2 CC-01/boolean-rewrite tests are PG-gated and skip on DuckDB)
+- `tests/test_app.py` — Flask unit tests (29 on DuckDB, 32 on PostgreSQL; the
+  3 CC-01/boolean-compat tests are PG-gated and skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
@@ -90,18 +90,22 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   `test_cc01_surrogate_keys_are_identity` locks it in. Comment in
   `db/postgres_schema.sql` records the later flip to `GENERATED ALWAYS`.
 - Public-flip probe: `scripts/probe_public_flip.py` boots the app against the
-  pure v2.0 `public` schema on a throwaway DB and measures the GET route
-  surface. Result: **85/85 authenticated GET `/api/*` routes serve unmodified**.
-- Adapter boot compat: `db_backend.translate()` now rewrites `col = 0|1|?` into
-  boolean literals/casts for columns that are actually BOOLEAN in the connected
-  schema (v2.0 normalized smallint flags). Inert on `legacy` (zero boolean
-  columns), so Phase-2 runs are byte-identical. PG-gated test:
-  `test_boolean_flag_rewrite_public_and_inert_legacy`.
-- Remaining flip backlog (seed-time, not runtime): boolean-flag INSERT literals
-  (`password_reset_tokens.used`, `notifications.is_read`,
-  `payroll_items.payslip_generated`) and the `salary_structures`
-  `no_overlapping_structure` exclusions rejecting legacy sample seeds.
-- Full readiness detail in `docs/MIGRATION.md` §"Phase 3b".
+  pure v2.0 `public` schema on a throwaway DB and measures the API surface.
+  Result: **85/85 GET `/api/*` routes + 11/11 core write flows green, zero
+  seed-time rejections** — the v1.0 app boots and fully self-seeds on v2.0.
+- Adapter boot compat in `db_backend.py` (inert on `legacy`, zero boolean
+  columns, so Phase-2 runs stay byte-identical):
+  - `translate()` rewrites `col = 0|1|?` into boolean literals/casts only for
+    columns actually BOOLEAN in the connected schema
+  - `_coerce_insert_boolean_params()` turns `int 0/1` params into bool for
+    INSERTs into v2.0 flag columns (and rewrites literal `0/1` values)
+  - row factory strips tzinfo from returned datetimes — v2.0 stores
+    `TIMESTAMPTZ` where v1.0 code does naive arithmetic
+  - PG-gated tests: `test_boolean_flag_rewrite_public_and_inert_legacy`,
+    `test_insert_boolean_param_coercion_public_and_inert_legacy`
+- Sample-seed fix: `salary_structures` now spans EMP001/EMP002 (two unbounded
+  ranges on one employee violated the CC-05 `no_overlapping_structure`
+  exclusion). Full readiness detail in `docs/MIGRATION.md` §"Phase 3b".
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
