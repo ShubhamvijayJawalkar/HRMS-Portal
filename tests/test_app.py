@@ -2,7 +2,7 @@ import os
 import sys
 import json
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -565,6 +565,134 @@ def test_audit_log(client):
     data = resp.get_json()
     assert 'data' in data
     assert 'total' in data
+
+
+# ── Idempotency (CC-07) ────────────────────────────────────────
+
+def _idem_session(client, sid):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = sid
+
+
+def test_idempotent_leave_apply_replays_once(client):
+    """Same Idempotency-Key + same body replays the stored 201; only one
+    leave request is created (no double-apply)."""
+    _idem_session(client, 99001)
+    payload = {
+        'leave_type': 'Casual',
+        'start_date': '2026-08-10',
+        'end_date': '2026-08-11',
+        'reason': 'idempotent replay'
+    }
+    r1 = client.post('/api/leaves', json=payload, headers={'Idempotency-Key': 'ik-leave-1'})
+    assert r1.status_code == 201, r1.get_json()
+    r2 = client.post('/api/leaves', json=payload, headers={'Idempotency-Key': 'ik-leave-1'})
+    assert r2.status_code == 201, r2.get_json()
+    assert r2.get_json() == r1.get_json()
+    conn = get_db()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM leave_requests WHERE emp_id = 'EMP001' AND CAST(start_date AS VARCHAR) = '2026-08-10'"
+    ).fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_idempotent_key_reused_with_different_body_409(client):
+    """Reusing a key with a different payload is a conflict, not a replay."""
+    _idem_session(client, 99002)
+    r1 = client.post('/api/leaves', json={
+        'leave_type': 'Casual', 'start_date': '2026-09-01',
+        'end_date': '2026-09-01', 'reason': 'first',
+    }, headers={'Idempotency-Key': 'ik-leave-2'})
+    assert r1.status_code == 201, r1.get_json()
+    r2 = client.post('/api/leaves', json={
+        'leave_type': 'Casual', 'start_date': '2026-09-02',
+        'end_date': '2026-09-02', 'reason': 'different',
+    }, headers={'Idempotency-Key': 'ik-leave-2'})
+    assert r2.status_code == 409, r2.get_json()
+    assert 'different request' in r2.get_json()['error']
+
+
+def test_idempotent_header_absent_runs_normally(client):
+    """No Idempotency-Key header -> request passes straight through."""
+    _idem_session(client, 99003)
+    r = client.post('/api/leaves', json={
+        'leave_type': 'Casual', 'start_date': '2026-10-01',
+        'end_date': '2026-10-02', 'reason': 'no key',
+    })
+    assert r.status_code == 201, r.get_json()
+    conn = get_db()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM leave_requests WHERE emp_id = 'EMP001' AND CAST(start_date AS VARCHAR) = '2026-10-01'"
+    ).fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_idempotent_failed_request_releases_claim(client):
+    """A failed attempt (400) releases the claim so a retry with the same
+    key succeeds instead of replaying the error."""
+    _idem_session(client, 99004)
+    bad = {'start_date': '2026-11-01'}  # missing leave_type -> 400 inside handler
+    r1 = client.post('/api/leaves', json=bad, headers={'Idempotency-Key': 'ik-leave-4'})
+    assert r1.status_code == 400, r1.get_json()
+    good = {
+        'leave_type': 'Casual', 'start_date': '2026-11-01',
+        'end_date': '2026-11-01', 'reason': 'retry',
+    }
+    r2 = client.post('/api/leaves', json=good, headers={'Idempotency-Key': 'ik-leave-4'})
+    assert r2.status_code == 201, r2.get_json()
+
+
+def test_idempotent_payroll_finalize_single_outbox_event(client):
+    """Replayed finalize must not enqueue a second payroll.finalized event."""
+    _idem_session(client, 99005)
+    r = client.post('/api/payroll-runs', json={'month': 12, 'year': 2099},
+                    headers={'Idempotency-Key': 'ik-pr-1'})
+    assert r.status_code == 201, r.get_json()
+    conn = get_db()
+    rid = conn.execute(
+        "SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2099"
+    ).fetchone()[0]
+    conn.close()
+    hdrs = {'Idempotency-Key': 'ik-finalize-1'}
+    f1 = client.post(f'/api/payroll-runs/{rid}/finalize', headers=hdrs)
+    assert f1.status_code == 200, f1.get_json()
+    f2 = client.post(f'/api/payroll-runs/{rid}/finalize', headers=hdrs)
+    assert f2.status_code == 200, f2.get_json()
+    assert f2.get_json() == f1.get_json()
+    conn = get_db()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM outbox_events WHERE event_type = 'payroll.finalized' AND aggregate_id = ?",
+        [str(rid)]).fetchone()[0]
+    conn.close()
+    assert n == 1
+
+
+def test_idempotency_keys_expired_cleaned_by_job(client):
+    """The hourly cleanup purges expired idempotency claims and keeps live ones."""
+    import app as app_module
+    _idem_session(client, 99006)
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO idempotency_keys (key, route, request_hash, response_status, expires_at) VALUES (?, ?, ?, 0, ?)",
+        ['ik-expired', 'POST /api/leaves', 'hash-a', datetime(2020, 1, 1)],
+    )
+    conn.execute(
+        "INSERT INTO idempotency_keys (key, route, request_hash, response_status, expires_at) VALUES (?, ?, ?, 0, ?)",
+        ['ik-valid', 'POST /api/leaves', 'hash-b', datetime.now() + timedelta(hours=1)],
+    )
+    conn.close()
+    app_module.cleanup_expired_tokens()
+    conn = get_db()
+    n_exp = conn.execute("SELECT COUNT(*) FROM idempotency_keys WHERE key = 'ik-expired'").fetchone()[0]
+    n_val = conn.execute("SELECT COUNT(*) FROM idempotency_keys WHERE key = 'ik-valid'").fetchone()[0]
+    conn.close()
+    assert n_exp == 0
+    assert n_val == 1
 
 
 if __name__ == '__main__':

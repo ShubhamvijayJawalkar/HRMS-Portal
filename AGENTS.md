@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 34 on DuckDB, 37 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 40 on DuckDB, 43 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (34 on DuckDB, 37 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (40 on DuckDB, 43 on PostgreSQL; the
   3 CC-01/boolean-compat tests are PG-gated and skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -91,8 +91,11 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   `db/postgres_schema.sql` records the later flip to `GENERATED ALWAYS`.
 - Public-flip probe: `scripts/probe_public_flip.py` boots the app against the
   pure v2.0 `public` schema on a throwaway DB and measures the API surface.
-  Result: **86/86 GET `/api/*` routes + 11/11 core write flows green, zero
+  Result: **86/86 GET `/api/*` routes + 12/12 core write flows green, zero
   seed-time rejections** — the v1.0 app boots and fully self-seeds on v2.0.
+  The write surface includes the CC-07 idempotency replay check
+  (`Idempotency-Key` header → stored response replayed from the v2.0 JSONB
+  `idempotency_keys` table, no double-apply).
 - Adapter boot compat in `db_backend.py` (inert on `legacy`, zero boolean
   columns, so Phase-2 runs stay byte-identical):
   - `translate()` rewrites `col = 0|1|?` into boolean literals/casts only for
@@ -122,6 +125,26 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   dead-lettered after `MAX_ATTEMPTS = 5`.
 - `outbox_events` DDL added to `init_db` (no-op on v2.0 `public`, which has
   the identity/JSONB infrastructure table).
+
+## Phase 3b (CC-07 idempotent writes)
+- `idempotency.py`: `@idempotent` decorator for POST routes that carry an
+  `Idempotency-Key` header. A fresh key claims a row (`response_status = 0`
+  in-flight sentinel), the handler runs, and its JSON response is stored on
+  success; retries with the same key + payload replay the stored response
+  instead of re-running. Failed attempts release the claim; a key reused with
+  a *different* payload is a 409; concurrent duplicates get 409.
+- Wired on the dedup-relevant write routes: leaves apply, regularization,
+  breaks start + Lunch approval request, payroll run create + finalize,
+  offer create + accept, and user create. Header-less requests pass through
+  untouched (no behaviour change for existing callers).
+- `idempotency_keys` DDL added to `init_db` (TEXT/TIMESTAMP shape; no-op on
+  v2.0 `public`, which owns the natural-key/JSONB/TIMESTAMPTZ version). The
+  hourly `cleanup_expired_tokens` job also purges expired idempotency rows.
+- 6 unit tests cover replay-without-duplicate, different-payload 409,
+  header-less passthrough, failed-request claim release, single
+  `payroll.finalized` outbox event on replay, and expired-row cleanup. The
+  probe re-fires the leaves-apply twice with the same key on pure v2.0
+  `public` and asserts a single row.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

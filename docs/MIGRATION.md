@@ -326,12 +326,15 @@ APP_DB=postgres APP_DB_SCHEMA=public \
   python scripts/probe_public_flip.py
 ```
 
-**Result: 86/86 authenticated GET `/api/*` routes and 11/11 core write flows
+**Result: 86/86 authenticated GET `/api/*` routes and 12/12 core write flows
 serve unmodified from `public`** (login + CSRF included; write flows cover
 start/end break, regularization, leave apply, notification read, Lunch break
-approval request + admin approve, and admin user creation). `init_db` boots and
-fully self-seeds against the v2.0 schema — **zero seed-time rejections**. That
-is a complete measured readiness picture, not a leap of faith.
+approval request + admin approve, admin user creation, and the CC-07
+idempotency replay check — the same leave apply sent twice with the same
+`Idempotency-Key` replays the stored response and leaves exactly one row).
+`init_db` boots and fully self-seeds against the v2.0 schema — **zero
+seed-time rejections**. That is a complete measured readiness picture, not a
+leap of faith.
 
 #### Adapter compat added this phase
 Three small, schema-scoped pieces in `db_backend.py` made the flip possible.
@@ -359,9 +362,9 @@ The older sample structure now belongs to EMP001 — a data fix, not a schema on
 #### Remaining flip backlog
 No seed-time or measured runtime failures remain on the GET + core-write
 surface. The remaining flip work is the actual service-layer rewrite: the
-renames below (§8), plus POST surfaces beyond the 11 core flows (forgot
-password, payroll run, ticket/ATS writes) — each measurable by extending the
-probe's write section.
+renames below (§8), plus POST surfaces beyond the 12 core flows (forgot
+password, payroll bank-file/TDS export, ticket/ATS writes) — each measurable
+by extending the probe's write section.
 
 ### CC-09 — transactional outbox (implemented)
 `outbox.py` implements the outbox pattern against the v2.0 `outbox_events`
@@ -389,10 +392,36 @@ pending → delivered, or attempts + exponential backoff (30s base) →
   backend; on the v2.0 `public` schema it maps onto the existing
   infrastructure table untouched.
 
+### CC-07 — idempotent writes (implemented)
+`idempotency.py` exposes an `@idempotent` decorator for POST routes. Writes
+that carry an `Idempotency-Key` header get at-most-once semantics, and are
+verified against the *real* v2.0 `idempotency_keys` (`key` natural PK, `JSONB`
+`response_body`, `TIMESTAMPTZ` `expires_at`):
+
+- **Flow**: a fresh key claims a row (`response_status = 0` in-flight
+  sentinel with a NULL body) → the handler runs → on success its JSON response
+  is stored (`response_status` + `response_body`). A retry with the same key
+  and same payload finds the stored row and **replays the response without
+  re-running the handler** — a flaky client or job retry can no longer
+  double-apply (duplicate leave, double finalise, duplicate break, ...).
+- **Failure semantics**: failed attempts (4xx/5xx) release the claim so a
+  retry starts clean; reusing a key with a *different* payload is a 409
+  (client should mint a new key for new intent); concurrent duplicates hit
+  the PK and get a 409.
+- **Wired routes** (dedup-relevant POSTs): `/api/leaves`, `/api/regularization`,
+  `/api/start-break`, `/api/break-approvals` (Lunch request),
+  `/api/payroll-runs` (create) + `/finalize`, `/api/offers` + `/accept`,
+  `/api/users` (create). Header-less requests pass through unchanged.
+- **Lifecycle**: `init_db` adds `idempotency_keys` (`TEXT`/`TIMESTAMP`
+  shape; a no-op on `public`), and the hourly `cleanup_expired_tokens` job
+  now purges expired keys too (24h TTL).
+- **Verification**: 6 unit tests (DuckDB + PG + PG+Redis), and an idempotency
+  write-flow in the probe that replays the leave apply against pure v2.0
+  `public` and asserts exactly one row.
+
 ## 10. Next steps
 
-1. Phase 3b — remaining: idempotency (CC-07, `idempotency_keys` table already
-   in the schema) and the actual service-layer rewrite onto `public`
+1. Phase 3b — remaining: the service-layer rewrite onto `public`
    (notifications rename, `shift_assignments`, expanded `audit_log`),
    extending the probe's write section to the remaining POST surfaces
    (forgot password, payroll bank-file/TDS export, ticket/ATS writes).

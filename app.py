@@ -27,6 +27,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 load_dotenv()
 
 import outbox  # CC-09 transactional outbox (dispatcher job + enqueue helper)
+from idempotency import idempotent  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
 log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
@@ -296,6 +297,21 @@ def init_db():
             used INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
+    # ── Idempotency Keys (CC-07) ──────────────────────────────────
+    # Mirrors the v2.0 `public` shape (JSONB -> TEXT on DuckDB; no-op on
+    # `public`, which owns the JSONB/TIMESTAMPTZ version).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS idempotency_keys (
+            key VARCHAR PRIMARY KEY,
+            route VARCHAR NOT NULL,
+            request_hash VARCHAR NOT NULL,
+            response_status INTEGER NOT NULL,
+            response_body TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL
         )
     ''')
 
@@ -1717,6 +1733,7 @@ def mark_notifications_read():
 @app.route('/api/v1/regularization', methods=['GET', 'POST'])
 @app.route('/api/regularization', methods=['GET', 'POST'])
 @login_required
+@idempotent
 def regularization_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
@@ -2014,6 +2031,7 @@ def interview_feedback(iid):
 @app.route('/api/v1/offers', methods=['GET', 'POST'])
 @app.route('/api/offers', methods=['GET', 'POST'])
 @hr_or_admin_required
+@idempotent
 def offers_api():
     if request.method == 'GET':
         conn = get_db()
@@ -2042,6 +2060,7 @@ def offers_api():
 @app.route('/api/v1/offers/<int:oid>/accept', methods=['POST'])
 @app.route('/api/offers/<int:oid>/accept', methods=['POST'])
 @hr_or_admin_required
+@idempotent
 def accept_offer(oid):
     try:
         with outbox.transaction() as conn:
@@ -2215,6 +2234,7 @@ def calc_payroll_item(emp_id, basic, hra, allowances, deductions):
 @app.route('/api/v1/payroll-runs', methods=['GET', 'POST'])
 @app.route('/api/payroll-runs', methods=['GET', 'POST'])
 @hr_or_admin_required
+@idempotent
 def payroll_runs_api():
     if request.method == 'GET':
         conn = get_db()
@@ -2243,6 +2263,7 @@ def payroll_runs_api():
 @app.route('/api/v1/payroll-runs/<int:rid>/finalize', methods=['POST'])
 @app.route('/api/payroll-runs/<int:rid>/finalize', methods=['POST'])
 @hr_or_admin_required
+@idempotent
 def finalize_payroll(rid):
     try:
         with outbox.transaction() as conn:
@@ -2995,6 +3016,7 @@ def admin_leaves_page():
 @app.route('/api/v1/leaves', methods=['GET', 'POST'])
 @app.route('/api/leaves', methods=['GET', 'POST'])
 @login_required
+@idempotent
 def leaves_api():
     """Create or list leave requests
     ---
@@ -3463,6 +3485,7 @@ def export_report_pdf():
 
 @app.route('/api/start-break', methods=['POST'])
 @login_required
+@idempotent
 def start_break():
     data = request.get_json(silent=True) or {}
     break_type = data.get('break_type')
@@ -3561,6 +3584,7 @@ def get_user_breaks():
 
 @app.route('/api/break-approvals', methods=['GET', 'POST'])
 @login_required
+@idempotent
 def break_approvals_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
@@ -4105,6 +4129,7 @@ def get_users():
 
 @app.route('/api/users', methods=['POST'])
 @admin_required
+@idempotent
 def add_user():
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('name') or not data.get('email'):
@@ -4475,8 +4500,9 @@ def cleanup_expired_tokens():
     try:
         conn = get_db()
         conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < ?", [datetime.now()])
+        conn.execute("DELETE FROM idempotency_keys WHERE expires_at < ?", [datetime.now()])  # CC-07
         conn.close()
-        logger.info("Cleaned up expired password reset tokens")
+        logger.info("Cleaned up expired password reset tokens and idempotency keys")
     except Exception as e:
         logger.warning("Cleanup failed: %s", e)
 

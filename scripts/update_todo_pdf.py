@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import subprocess
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -39,6 +40,9 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-23", "CC-07 idempotent writes done: @idempotent decorator on 9 POST routes, "
+     "idempotency_keys DDL + hourly purge, 6 unit tests green (DuckDB 40 / PG 43 / PG+Redis 43), "
+     "probe replays on pure v2.0 JSONB -> 86/86 GET + 12/12 write. Next: service-layer rewrite."),
     ("2026-09-23", "TODO list created. Next task slated: CC-07 idempotency."),
 ]
 
@@ -61,7 +65,7 @@ TASKS = [
     ("Phase 3b", "Boolean adapter compat: predicates, INSERT params, naive datetime round-trip", "Inert on legacy (zero boolean cols); PG-gated tests (21480fe)", DONE),
     ("Phase 3b", "Write-flow probe + salary_structures seed data fix (CC-05)", "11/11 core write flows green on public (21480fe)", DONE),
     ("Phase 3b", "CC-09 transactional outbox (outbox.py + scheduler + admin endpoints)", "Atomic business-write + event; backoff -> dead-letter (7e52f88)", DONE),
-    ("Phase 3b", "CC-07 idempotency: idempotency_keys wired for keyed POST retries", "idempotency_keys table already in v2.0 schema", PENDING),
+    ("Phase 3b", "CC-07 idempotency: @idempotent decorator + idempotency_keys wired for keyed POST retries", "Replay-without-duplicate, 409 on body reuse, claim released on failure; 6 unit tests green on every stack; probe replays on pure v2.0 JSONB", DONE),
     ("Phase 3b", "Service-layer rewrite onto public: notifications.category, shift_assignments, expanded audit_log", "Second-largest remaining phase; several increments", PENDING),
     ("Phase 3b", "Extend probe write section: forgot-password, payroll bank-file/TDS, ticket/ATS", "Measurable backlog for the service-layer rewrite", PENDING),
     # ── Phase 4 ──────────────────────────────────────────────────────────
@@ -75,16 +79,26 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "34 passed, 3 skipped (PG-gated CC-01/boolean tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "37 passed"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "37 passed"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "40 passed, 3 skipped (PG-gated CC-01/boolean tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "43 passed"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "43 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "15 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 45 identity + 4 natural keys"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "86/86 GET + 11/11 write flows, 0 seed rejections"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "86/86 GET + 12/12 write flows (incl. CC-07 replay), 0 seed rejections"),
 ]
 
 DONE_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p and t[3] == DONE) for p in sorted({t[0] for t in TASKS})}
 TOTAL_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p) for p in sorted({t[0] for t in TASKS})}
+
+
+def _current_branch() -> str:
+    try:
+        head = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=os.path.dirname(os.path.dirname(__file__)),
+            text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+        return f"main @ {head}"
+    except Exception:
+        return "main (unknown HEAD)"
 
 
 def build_pdf(path: str) -> None:
@@ -120,8 +134,8 @@ def build_pdf(path: str) -> None:
     done_total = sum(1 for t in TASKS if t[3] == DONE)
     summary_rows = [
         ["Completed tasks", f"{done_total} / {len(TASKS)}"],
-        ["Current branch", "main @ 7e52f88 (CC-09 outbox)"],
-        ["Next task", "CC-07 idempotency - wire idempotency_keys for keyed POST retries"],
+        ["Current branch", _current_branch()],
+        ["Next task", "Service-layer rewrite onto public - notifications.category, shift_assignments, expanded audit_log"],
     ]
     for phase in sorted(TOTAL_BY_PHASE):
         summary_rows.append([f"{phase} progress", f"{DONE_BY_PHASE[phase]} / {TOTAL_BY_PHASE[phase]} done"])

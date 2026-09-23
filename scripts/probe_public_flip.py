@@ -123,7 +123,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     # Clear residue from prior probe runs so dedupe guards don't mask results.
     with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
         pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
-        pc.execute("DELETE FROM leave_requests WHERE reason = 'public write probe'")
+        pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
         pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
 
@@ -199,7 +199,32 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return _post(cl_a, tok_a, f"/api/break-approvals/{target['approval_id']}/approve").status_code
     run("break-approvals(approve)", approve_lunch)
 
+    # ── CC-07 idempotency (same key twice -> stored response replay) ─────
     run("users(create) verify GETs", lambda: cl_a.get(f"/api/users/{uniq}").status_code)
+
+    def idem_replay():
+        url = "/api/leaves"
+        body = {
+            "leave_type": "Casual",
+            "start_date": (today + timedelta(days=40)).isoformat(),
+            "end_date": (today + timedelta(days=40)).isoformat(),
+            "reason": "idempotency probe",
+        }
+        hdrs = {"X-CSRF-Token": tok_a, "Content-Type": "application/json",
+                "Idempotency-Key": "probe-ik-1"}
+        r1 = cl_a.post(url, json=body, headers=hdrs)
+        if r1.status_code != 201:
+            return r1.status_code
+        r2 = cl_a.post(url, json=body, headers=hdrs)
+        if r2.status_code != 201 or r2.get_json() != r1.get_json():
+            return 409  # no replay stored on the v2.0 idempotency_keys (JSONB)
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            n = pc.execute(
+                "SELECT count(*) FROM leave_requests WHERE emp_id = %s AND reason = 'idempotency probe'",
+                ["EMP001"],
+            ).fetchone()[0]
+        return 200 if n == 1 else 409  # duplicate applied despite replay
+    run("idempotency(replay leaves x2)", idem_replay)
 
     return out
 
