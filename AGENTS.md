@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 29 on DuckDB, 32 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 34 on DuckDB, 37 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (29 on DuckDB, 32 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (34 on DuckDB, 37 on PostgreSQL; the
   3 CC-01/boolean-compat tests are PG-gated and skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -91,7 +91,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   `db/postgres_schema.sql` records the later flip to `GENERATED ALWAYS`.
 - Public-flip probe: `scripts/probe_public_flip.py` boots the app against the
   pure v2.0 `public` schema on a throwaway DB and measures the API surface.
-  Result: **85/85 GET `/api/*` routes + 11/11 core write flows green, zero
+  Result: **86/86 GET `/api/*` routes + 11/11 core write flows green, zero
   seed-time rejections** — the v1.0 app boots and fully self-seeds on v2.0.
 - Adapter boot compat in `db_backend.py` (inert on `legacy`, zero boolean
   columns, so Phase-2 runs stay byte-identical):
@@ -106,6 +106,22 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 - Sample-seed fix: `salary_structures` now spans EMP001/EMP002 (two unbounded
   ranges on one employee violated the CC-05 `no_overlapping_structure`
   exclusion). Full readiness detail in `docs/MIGRATION.md` §"Phase 3b".
+
+## Phase 3b (CC-09 transactional outbox)
+- `outbox.py`: `enqueue()` + `dispatch_once()` + a `transaction()` context
+  manager (atomic business-write + event on both backends — DuckDB
+  `BEGIN`/`COMMIT`, PG via a dedicated non-autocommit connection in
+  `db_backend.transaction()`).
+- Wired flows (event fires inside the same transaction as the business
+  write): `payroll.finalized` (payroll run finalize → per-employee payout
+  notifications), `offer.created` (offer letter → candidate email),
+  `offer.accepted` (offer acceptance → admin onboarding notification).
+- Dispatcher: `BackgroundScheduler` job every 60s + `POST
+  /api/admin/outbox/dispatch` (manual) + `GET /api/admin/outbox` (monitor).
+  Handlers are retried with exponential backoff (30s base) and
+  dead-lettered after `MAX_ATTEMPTS = 5`.
+- `outbox_events` DDL added to `init_db` (no-op on v2.0 `public`, which has
+  the identity/JSONB infrastructure table).
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

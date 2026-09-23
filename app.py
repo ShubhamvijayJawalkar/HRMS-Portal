@@ -26,6 +26,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
+import outbox  # CC-09 transactional outbox (dispatcher job + enqueue helper)
+
 # ── Logging ───────────────────────────────────────────────────────────
 log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
 logging.basicConfig(
@@ -343,6 +345,24 @@ def init_db():
             is_read INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
+    # ── Outbox (CC-09 transactional outbox) ────────────────────────
+    # No-op on the v2.0 `public` schema (already BIGINT-identity + JSONB);
+    # DuckDB / legacy-PG get the self-serving v1.0 shape.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS outbox_events (
+            event_id INTEGER PRIMARY KEY,
+            event_type VARCHAR NOT NULL,
+            aggregate VARCHAR,
+            aggregate_id VARCHAR,
+            payload TEXT,
+            status VARCHAR DEFAULT 'pending',
+            attempts INTEGER DEFAULT 0,
+            next_attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            delivered_at TIMESTAMP
         )
     ''')
 
@@ -2004,10 +2024,18 @@ def offers_api():
     if not data.get('candidate_id') or not data.get('offered_salary'):
         return jsonify({'error': 'candidate_id and offered_salary required'}), 400
     oid = gen_id()
-    conn = get_db()
-    conn.execute("INSERT INTO offer_letters VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [oid, data['candidate_id'], float(data['offered_salary']), datetime.now().date(), 'Pending', None, data.get('notes')])
-    conn.close()
+    try:
+        with outbox.transaction() as conn:
+            conn.execute("INSERT INTO offer_letters VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         [oid, data['candidate_id'], float(data['offered_salary']), datetime.now().date(), 'Pending', None, data.get('notes')])
+            cand = conn.execute("SELECT name, email FROM candidates WHERE candidate_id = ?", [data['candidate_id']]).fetchone()
+            payload = {'offer_id': oid, 'candidate_id': data['candidate_id'], 'salary': float(data['offered_salary'])}
+            if cand:
+                payload.update({'name': cand[0], 'email': cand[1]})
+            outbox.enqueue(conn, 'offer.created', 'offer_letters', str(oid), payload)
+    except Exception as e:
+        logger.warning('create offer failed: %s', e)
+        return jsonify({'error': 'Failed to send offer'}), 500
     return jsonify({'message': 'Offer sent', 'id': oid}), 201
 
 
@@ -2015,12 +2043,19 @@ def offers_api():
 @app.route('/api/offers/<int:oid>/accept', methods=['POST'])
 @hr_or_admin_required
 def accept_offer(oid):
-    conn = get_db()
-    conn.execute("UPDATE offer_letters SET status = 'Accepted', accepted_at = ? WHERE offer_id = ?", [datetime.now(), oid])
-    row = conn.execute("SELECT candidate_id FROM offer_letters WHERE offer_id = ?", [oid]).fetchone()
-    if row:
-        conn.execute("UPDATE candidates SET status = 'Hired' WHERE candidate_id = ?", [row[0]])
-    conn.close()
+    try:
+        with outbox.transaction() as conn:
+            conn.execute("UPDATE offer_letters SET status = 'Accepted', accepted_at = ? WHERE offer_id = ?", [datetime.now(), oid])
+            row = conn.execute("SELECT candidate_id FROM offer_letters WHERE offer_id = ?", [oid]).fetchone()
+            cid = None
+            if row:
+                cid = row[0]
+                conn.execute("UPDATE candidates SET status = 'Hired' WHERE candidate_id = ?", [cid])
+            outbox.enqueue(conn, 'offer.accepted', 'offer_letters', str(oid),
+                           {'offer_id': oid, 'candidate_id': cid})
+    except Exception as e:
+        logger.warning('accept_offer failed: %s', e)
+        return jsonify({'error': 'Failed to accept offer'}), 500
     return jsonify({'message': 'Offer accepted'}), 200
 
 
@@ -2209,9 +2244,13 @@ def payroll_runs_api():
 @app.route('/api/payroll-runs/<int:rid>/finalize', methods=['POST'])
 @hr_or_admin_required
 def finalize_payroll(rid):
-    conn = get_db()
-    conn.execute("UPDATE payroll_runs SET status = 'Finalized' WHERE run_id = ?", [rid])
-    conn.close()
+    try:
+        with outbox.transaction() as conn:
+            conn.execute("UPDATE payroll_runs SET status = 'Finalized' WHERE run_id = ?", [rid])
+            outbox.enqueue(conn, 'payroll.finalized', 'payroll_runs', str(rid), {'run_id': rid})
+    except Exception as e:
+        logger.warning('finalize_payroll failed: %s', e)
+        return jsonify({'error': 'Failed to finalize payroll'}), 500
     return jsonify({'message': 'Payroll finalized'}), 200
 
 
@@ -3970,6 +4009,40 @@ def admin_dispose_break(break_id):
     return jsonify({'message': 'Break ended by admin', 'duration_minutes': duration}), 200
 
 
+@app.route('/api/admin/outbox', methods=['GET'])
+@admin_required
+def admin_outbox_list():
+    """Outbox monitor: recent outbox events with status/attempts."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT event_id, event_type, aggregate, aggregate_id, status, attempts, created_at, delivered_at "
+            "FROM outbox_events ORDER BY event_id DESC LIMIT 100"
+        ).fetchall()
+    except Exception:
+        conn.close()
+        return jsonify({'data': []}), 200
+    conn.close()
+    return jsonify({'data': [{
+        'event_id': r[0], 'event_type': r[1], 'aggregate': r[2],
+        'aggregate_id': r[3], 'status': r[4], 'attempts': r[5],
+        'created_at': r[6].isoformat() if r[6] else None,
+        'delivered_at': r[7].isoformat() if r[7] else None,
+    } for r in rows]}), 200
+
+
+@app.route('/api/admin/outbox/dispatch', methods=['POST'])
+@admin_required
+def admin_outbox_dispatch():
+    """Manually trigger one outbox dispatch pass (CC-09)."""
+    try:
+        result = outbox.run_dispatch()
+    except Exception as e:
+        logger.warning('outbox dispatch failed: %s', e)
+        return jsonify({'error': 'Outbox dispatch failed'}), 500
+    return jsonify(result), 200
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  USER MANAGEMENT
 # ══════════════════════════════════════════════════════════════════════
@@ -4414,6 +4487,7 @@ if not STARTED:
     _is_dev = os.getenv('FLASK_DEBUG') == '1' or os.getenv('FLASK_ENV') != 'production'
     if _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
         scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
+        scheduler.add_job(outbox.run_dispatch, 'interval', seconds=60)
         scheduler.start()
         STARTED = True
         logger.info("Scheduler started")

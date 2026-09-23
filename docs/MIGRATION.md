@@ -326,7 +326,7 @@ APP_DB=postgres APP_DB_SCHEMA=public \
   python scripts/probe_public_flip.py
 ```
 
-**Result: 85/85 authenticated GET `/api/*` routes and 11/11 core write flows
+**Result: 86/86 authenticated GET `/api/*` routes and 11/11 core write flows
 serve unmodified from `public`** (login + CSRF included; write flows cover
 start/end break, regularization, leave apply, notification read, Lunch break
 approval request + admin approve, and admin user creation). `init_db` boots and
@@ -363,13 +363,39 @@ renames below (§8), plus POST surfaces beyond the 11 core flows (forgot
 password, payroll run, ticket/ATS writes) — each measurable by extending the
 probe's write section.
 
+### CC-09 — transactional outbox (implemented)
+`outbox.py` implements the outbox pattern against the v2.0 `outbox_events`
+infrastructure table (`identity` key, `JSONB` payload, `TIMESTAMPTZ`):
+pending → delivered, or attempts + exponential backoff (30s base) →
+`dead_letter` after `MAX_ATTEMPTS = 5`.
+
+- **Atomicity**: `outbox.transaction()` wraps the business write and its
+  event in one DB transaction on either backend — DuckDB via
+  `BEGIN`/`COMMIT` (the python client tracks it, verified in tests), PG via a
+  dedicated non-autocommit connection (`db_backend.transaction()`). A
+  `DuckDBCompatConnection` wraps the PG transaction so the app's
+  DuckDB-flavoured SQL still translates inside it.
+- **Wired flows** (event enqueued on the same tx as the write):
+  - `payroll.finalized` — `POST /api/payroll-runs/<id>/finalize` → handler
+    inserts a payout notification per employee on the run
+  - `offer.created` — `POST /api/offers` → handler emails the candidate
+  - `offer.accepted` — `POST /api/offers/<id>/accept` → handler notifies the
+    admin team to start onboarding
+- **Dispatch**: a `BackgroundScheduler` job runs every 60s; admins can
+  trigger a pass manually (`POST /api/admin/outbox/dispatch`) and monitor the
+  queue (`GET /api/admin/outbox`).
+- The `outbox_events` DDL is added to `init_db` (self-serving
+  `CREATE TABLE IF NOT EXISTS`), so the pattern is exercised on every
+  backend; on the v2.0 `public` schema it maps onto the existing
+  infrastructure table untouched.
+
 ## 10. Next steps
 
-1. Phase 3b — remaining CC-01 flip work: the actual service-layer rewrite
-   onto `public` (notifications rename, `shift_assignments`, expanded
-   `audit_log`), extending the probe's write section to the remaining POST
-   surfaces (forgot password, payroll run, ticket/ATS), then outbox (CC-09)
-   and idempotency (CC-07).
+1. Phase 3b — remaining: idempotency (CC-07, `idempotency_keys` table already
+   in the schema) and the actual service-layer rewrite onto `public`
+   (notifications rename, `shift_assignments`, expanded `audit_log`),
+   extending the probe's write section to the remaining POST surfaces
+   (forgot password, payroll bank-file/TDS export, ticket/ATS writes).
 2. Phase 4 — new capabilities: attendance finalisation job (FR-JOB-01),
    maker-checker payroll (FR-PAY-06), corrected ATS/onboarding/offboarding flows.
 3. Phase 5 — cutover; Phase 6 — decommission DuckDB.

@@ -332,6 +332,109 @@ def test_insert_boolean_param_coercion_public_and_inert_legacy():
     assert '1' in s_leg  # legacy is INTEGER: nothing rewritten
 
 
+# ── CC-09 Transactional Outbox ─────────────────────────────────
+
+def test_outbox_transaction_rolls_back():
+    """The business write and its outbox event commit atomically (or not)."""
+    import outbox
+    unique = 99999991
+    try:
+        with outbox.transaction() as conn:
+            conn.execute(
+                "INSERT INTO notifications (notification_id, emp_id, type, message, created_at) VALUES (?, ?, 'T', 'm', ?)",
+                [unique, 'EMP001', datetime.now()])
+            raise RuntimeError('boom')
+    except RuntimeError:
+        pass
+    conn = get_db()
+    n = conn.execute("SELECT COUNT(*) FROM notifications WHERE notification_id = ?", [unique]).fetchone()[0]
+    conn.close()
+    assert n == 0
+
+
+def test_outbox_enqueue_and_dispatch_delivers_with_side_effect():
+    import outbox
+    with outbox.transaction() as conn:
+        eid = outbox.enqueue(conn, 'offer.accepted', 'offer_letters', '42',
+                             {'offer_id': 42, 'candidate_id': 'C1'})
+    assert eid is not None, 'outbox event should be enqueued'
+    conn = get_db()
+    stats = outbox.dispatch_once(conn)
+    conn.close()
+    assert stats['dispatched'] == 1 and stats['delivered'] == 1
+    conn = get_db()
+    row = conn.execute("SELECT status FROM outbox_events WHERE event_id = ?", [eid]).fetchone()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM notifications WHERE type = 'Onboarding' AND emp_id = 'EMP001'").fetchone()[0]
+    conn.close()
+    assert row[0] == 'delivered'
+    assert count >= 1  # handler side effect ran
+
+
+def test_outbox_unknown_event_backoffs_then_dead_letters():
+    import outbox
+    with outbox.transaction() as conn:
+        eid = outbox.enqueue(conn, 'no.such.handler', 'x', 'y', {})
+    conn = get_db()
+    outbox.dispatch_once(conn)
+    first = conn.execute("SELECT status, attempts FROM outbox_events WHERE event_id = ?", [eid]).fetchone()
+    assert first[0] == 'pending' and first[1] == 1  # retry with backoff, not dead-lettered
+    for _ in range(6):
+        conn.execute("UPDATE outbox_events SET next_attempt_at = '2000-01-01' WHERE event_id = ?", [eid])
+        outbox.dispatch_once(conn)
+    final = conn.execute("SELECT status, attempts FROM outbox_events WHERE event_id = ?", [eid]).fetchone()
+    conn.close()
+    assert final[0] == 'dead_letter' and final[1] == outbox.MAX_ATTEMPTS
+
+
+def test_finalize_payroll_enqueues_and_dispatch_notifies(client):
+    """Admin creates a payroll run, finalizes it; the outbox event fires and
+    the dispatcher notifies every employee on the run."""
+    import outbox
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99991
+    resp = client.post('/api/payroll-runs', json={'month': 11, 'year': 2099})
+    assert resp.status_code == 201, resp.get_json()
+    conn = get_db()
+    rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2099").fetchone()[0]
+    conn.close()
+    resp = client.post(f'/api/payroll-runs/{rid}/finalize')
+    assert resp.status_code == 200, resp.get_json()
+    conn = get_db()
+    pending = conn.execute(
+        "SELECT status FROM outbox_events WHERE event_type = 'payroll.finalized' AND aggregate_id = ?",
+        [str(rid)]).fetchone()
+    conn.close()
+    assert pending and pending[0] == 'pending'
+    conn = get_db()
+    stats = outbox.dispatch_once(conn)
+    conn.close()
+    assert stats['delivered'] >= 1
+    conn = get_db()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM notifications WHERE type = 'Payroll' AND message LIKE ?",
+        [f'%{rid}%']).fetchone()[0]
+    conn.close()
+    assert n >= 1  # every run employee got the payout notification
+
+
+def test_admin_outbox_endpoints(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99992
+    resp = client.get('/api/admin/outbox')
+    assert resp.status_code == 200
+    assert 'data' in resp.get_json()
+    resp = client.post('/api/admin/outbox/dispatch')
+    assert resp.status_code == 200
+    assert set(resp.get_json()) == {'dispatched', 'delivered', 'failed', 'dead_lettered'}
+
+
 # ── Authenticated API Tests (use session_transaction) ──────────
 
 def test_profile_api(client):

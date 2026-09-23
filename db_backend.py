@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import contextmanager
 
 import psycopg
 from psycopg.rows import tuple_row
@@ -290,10 +291,16 @@ def translate(sql: str, params, schema: str | None = None) -> str:
 
 
 class DuckDBCompatConnection:
-    """DuckDB-drop-in wrapper around a psycopg connection (autocommit=True)."""
+    """DuckDB-drop-in wrapper around a psycopg connection.
 
-    def __init__(self, pg_conn: "psycopg.Connection"):
+    ``autocommit=True`` (the default, DuckDB parity) makes every statement
+    immediately durable and ``commit()`` a swallow no-op; ``autocommit=False``
+    drives the CC-09 outbox transaction, where commit/rollback really apply.
+    """
+
+    def __init__(self, pg_conn: "psycopg.Connection", autocommit: bool = True):
         self._conn = pg_conn
+        self._autocommit = autocommit
         pg_conn.row_factory = _naive_datetime_factory
 
     def execute(self, sql, params=None):
@@ -313,17 +320,19 @@ class DuckDBCompatConnection:
             return cur.executemany(translate(sql2, True, schema), seq2)
 
     def commit(self):
-        """Statements autocommit (DuckDB parity); commit() is a no-op."""
+        """No-op under autocommit (DuckDB parity); otherwise commit for real."""
         try:
             self._conn.commit()
         except Exception:
-            pass
+            if not self._autocommit:
+                raise
 
     def rollback(self):
         try:
             self._conn.rollback()
         except Exception:
-            pass
+            if not self._autocommit:
+                raise
 
     def close(self):
         self._conn.close()
@@ -346,6 +355,36 @@ def connect():
         conn.close()
         raise
     return DuckDBCompatConnection(conn)
+
+
+@contextmanager
+def transaction():
+    """Open a transaction on a dedicated non-autocommit connection.
+
+    Drives the CC-09 outbox pattern: the business write and its outbox event
+    run on the yielded connection and commit atomically (rollback on error).
+    The connection is a :class:`DuckDBCompatConnection`, so the app's
+    DuckDB-flavoured SQL still translates/rewrites inside the transaction.
+    """
+    schema = app_schema()
+    if not _SCHEMA_RE.fullmatch(schema):
+        raise ValueError(f"invalid APP_DB_SCHEMA {schema!r}")
+    conn = psycopg.connect(database_url(), autocommit=False)
+    try:
+        conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
+        conn.execute(f"SET search_path TO {schema}")
+    except Exception:
+        conn.close()
+        raise
+    dc = DuckDBCompatConnection(conn, autocommit=False)
+    try:
+        yield dc
+        dc.commit()
+    except Exception:
+        dc.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def reset_schema(schema: str | None = None) -> None:
