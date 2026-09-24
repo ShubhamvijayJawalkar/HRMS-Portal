@@ -250,7 +250,6 @@ def _coerce_insert_boolean_params(sql: str, params, schema: str | None):
     m = re.match(r"(?is)^(INSERT\s+INTO\s+[\"`\w.]+)\s*\(([^)]*)\)\s+VALUES\s*\((.*)\)\s*;?\s*$", sql)
     if not m:
         return sql, params
-    table = m.group(1).rsplit(".", 1)[-1].strip("\"`")
     cols = [c.strip().strip("\"`") for c in m.group(2).split(",")]
     vals = [v.strip() for v in _split_top_level(m.group(3))]
     if len(cols) != len(vals):
@@ -277,6 +276,39 @@ def _coerce_insert_boolean_params(sql: str, params, schema: str | None):
     sql_out = f"{m.group(1)} ({', '.join(cols)}) VALUES ({', '.join(new_vals)})" if sql_changed else sql
     params_out = new_params if params_changed else params
     return sql_out, params_out
+
+
+def _coerce_boolean_comparison_params(sql: str, params, schema: str | None):
+    """Coerce int 0/1 parameters compared with or assigned to BOOLEAN flags.
+
+    ``translate`` renders ``is_read = ?`` as ``is_read = %s::boolean``, but a
+    Python ``int`` reaches psycopg as ``smallint`` and PostgreSQL rejects the
+    smallint-to-boolean cast. This pass mutates only the matching parameters,
+    leaving the SQL byte-identical. It covers UPDATE assignments and SELECT /
+    DELETE predicates, and is inert on schemas with no BOOLEAN columns.
+    """
+    if not schema or params is None:
+        return sql, params
+    bool_cols = _boolean_columns(schema)
+    if not bool_cols:
+        return sql, params
+
+    new_params = list(params)
+    changed = False
+    for col in bool_cols:
+        pattern = re.compile(
+            rf"(?<!\w)({re.escape(col)})(?!\w)(\s*=\s*)(\?)", re.I
+        )
+        for match in pattern.finditer(sql):
+            # The adapter maps placeholders positionally, including the
+            # equality sign in this match. Count only up to the placeholder.
+            index = sql.count("?", 0, match.end(3)) - 1
+            if 0 <= index < len(new_params):
+                value = new_params[index]
+                if isinstance(value, int) and value in (0, 1):
+                    new_params[index] = bool(value)
+                    changed = True
+    return sql, (new_params if changed else params)
 
 
 def translate(sql: str, params, schema: str | None = None) -> str:
@@ -307,6 +339,7 @@ class DuckDBCompatConnection:
         conn = self._conn
         schema = app_schema()
         sql, params = _coerce_insert_boolean_params(sql, params, schema)
+        sql, params = _coerce_boolean_comparison_params(sql, params, schema)
         q = translate(sql, params, schema)
         if params is None:
             return conn.execute(q)
@@ -315,7 +348,11 @@ class DuckDBCompatConnection:
     def executemany(self, sql, seq_of_params):
         with self._conn.cursor() as cur:
             schema = app_schema()
-            seq2 = [_coerce_insert_boolean_params(sql, sp, schema)[1] for sp in seq_of_params]
+            seq2 = []
+            for params in seq_of_params:
+                _, coerced = _coerce_insert_boolean_params(sql, params, schema)
+                _, coerced = _coerce_boolean_comparison_params(sql, coerced, schema)
+                seq2.append(coerced)
             sql2, _ = _coerce_insert_boolean_params(sql, seq_of_params[0], schema) if seq_of_params else (sql, seq_of_params)
             return cur.executemany(translate(sql2, True, schema), seq2)
 

@@ -222,13 +222,17 @@ def get_shift(emp_id, conn=None, on_date=None):
             conn.close()
 
 
-def set_shift(emp_id, shift_start, shift_end, conn=None, weekly_off='Sat,Sun', effective_from=None):
-    """Persist an employee's (static) shift.
+def set_shift(emp_id, shift_start, shift_end, conn=None, weekly_off=None, effective_from=None):
+    """Persist an employee's (static) shift and weekly-off pattern.
 
-    v1.0 shape: ``users.shift_start/shift_end`` columns.
+    v1.0 shape: ``users.shift_start/shift_end/weekly_off_pattern`` columns.
     v2.0 shape: replace that employee's ``shift_assignments`` rows with one
     open-ended row — the v1.0 one-shift-per-employee equivalent. Effective-dated
     scheduling (multiple periods) is a Phase-4 concern (FR-ATT-17).
+
+    ``weekly_off=None`` preserves the employee's current pattern (or falls
+    back to ``WEEKLY_OFF_PATTERN``) so callers that only change shift times do
+    not silently reset the employee's non-working days.
     """
     if not shift_start and not shift_end:
         return
@@ -239,6 +243,13 @@ def set_shift(emp_id, shift_start, shift_end, conn=None, weekly_off='Sat,Sun', e
         conn = get_db()
     try:
         if _shift_model():
+            if weekly_off is None:
+                current = conn.execute(
+                    "SELECT weekly_off_pattern FROM shift_assignments WHERE emp_id = ? "
+                    "ORDER BY effective_from DESC LIMIT 1",
+                    [emp_id],
+                ).fetchone()
+                weekly_off = (current[0] if current else None) or os.getenv('WEEKLY_OFF_PATTERN', 'Sat,Sun')
             start_t, start_24x7 = _parse_shift_time(shift_start)
             end_t, end_24x7 = _parse_shift_time(shift_end)
             stype = '24x7' if (start_24x7 or end_24x7) else 'Fixed'
@@ -251,11 +262,64 @@ def set_shift(emp_id, shift_start, shift_end, conn=None, weekly_off='Sat,Sun', e
                 "VALUES (?, ?, ?, ?, ?, ?, NULL)",
                 [emp_id, stype, start_t, end_t, weekly_off, effective_from],
             )
-        else:
+        elif weekly_off is None:
             conn.execute(
                 "UPDATE users SET shift_start = ?, shift_end = ? WHERE emp_id = ?",
                 [shift_start, shift_end, emp_id],
             )
+        else:
+            conn.execute(
+                "UPDATE users SET shift_start = ?, shift_end = ?, weekly_off_pattern = ? WHERE emp_id = ?",
+                [shift_start, shift_end, weekly_off, emp_id],
+            )
+    finally:
+        if own:
+            conn.close()
+
+
+def get_weekly_off_pattern(emp_id, conn=None, on_date=None):
+    """Return the employee's effective weekly-off pattern for ``on_date``.
+
+    v2.0 stores it on ``shift_assignments`` (falling back to the effective
+    leave-policy assignment). The v1.0 compatibility shape stores it on
+    ``users``. If neither has data, ``WEEKLY_OFF_PATTERN`` (default
+    ``Sat,Sun``) is used rather than hard-coding Monday-Friday in the job.
+    """
+    own = conn is None
+    if own:
+        conn = get_db()
+    if on_date is None:
+        on_date = datetime.now().date()
+    try:
+        if _shift_model():
+            row = conn.execute(
+                "SELECT weekly_off_pattern FROM shift_assignments "
+                "WHERE emp_id = ? AND effective_from <= ? "
+                "AND (effective_to IS NULL OR effective_to >= ?) "
+                "ORDER BY effective_from DESC LIMIT 1",
+                [emp_id, on_date, on_date],
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+            try:
+                row = conn.execute(
+                    "SELECT weekly_off_pattern FROM leave_policy_assignments "
+                    "WHERE emp_id = ? AND effective_from <= ? "
+                    "AND (effective_to IS NULL OR effective_to >= ?) "
+                    "ORDER BY effective_from DESC LIMIT 1",
+                    [emp_id, on_date, on_date],
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+            except Exception:
+                pass
+        else:
+            row = conn.execute(
+                "SELECT weekly_off_pattern FROM users WHERE emp_id = ?", [emp_id]
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+        return os.getenv('WEEKLY_OFF_PATTERN', 'Sat,Sun')
     finally:
         if own:
             conn.close()
@@ -489,6 +553,42 @@ def init_db():
             holiday_date DATE NOT NULL,
             year INTEGER NOT NULL,
             type VARCHAR DEFAULT 'National'
+        )
+    ''')
+
+    # ── Holiday Opt-ins ────────────────────────────────────────────
+    # Optional holidays become attendance holidays only for employees with
+    # an Approved opt-in (FR-HOL-03 / FR-JOB-01). No-op on v2.0 `public`.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS holiday_optins (
+            optin_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            holiday_id INTEGER NOT NULL,
+            status VARCHAR DEFAULT 'Pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            FOREIGN KEY (holiday_id) REFERENCES holidays(holiday_id)
+        )
+    ''')
+
+    # ── Attendance Days (Phase 4 / FR-JOB-01) ──────────────────────
+    # Output of the nightly attendance job — one row per employee per day
+    # (Present|Half-day|Absent|On Leave|Holiday|Weekly-off); the single
+    # source for reports / payroll LOP. No-op on the v2.0 `public` schema
+    # (already BIGINT-identity + TIMESTAMPTZ); DuckDB / legacy-PG get the
+    # self-serving v1.0 shape.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS attendance_days (
+            attendance_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            attendance_date DATE NOT NULL,
+            status VARCHAR NOT NULL,
+            shift_hours NUMERIC(8,2),
+            source VARCHAR DEFAULT 'job',
+            version INTEGER DEFAULT 1,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            UNIQUE (emp_id, attendance_date)
         )
     ''')
 
@@ -884,6 +984,11 @@ def init_db():
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} VARCHAR")
             except Exception:
                 pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN weekly_off_pattern VARCHAR DEFAULT 'Sat,Sun'")
+        except Exception:
+            pass
+        conn.execute("UPDATE users SET weekly_off_pattern = 'Sat,Sun' WHERE weekly_off_pattern IS NULL")
 
     result = conn.execute("SELECT COUNT(*) FROM break_types").fetchone()[0]
     if result == 0:
@@ -1308,6 +1413,380 @@ def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
         except Exception:
             pass
     return shift_start_dt + timedelta(days=1)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ATTENDANCE FINALISATION (Phase 4 / FR-JOB-01)
+# ══════════════════════════════════════════════════════════════════════
+
+ATTENDANCE_STATUS_PRESENT = 'Present'
+ATTENDANCE_STATUS_HALF_DAY = 'Half-day'
+ATTENDANCE_STATUS_ABSENT = 'Absent'
+ATTENDANCE_STATUS_ON_LEAVE = 'On Leave'
+ATTENDANCE_STATUS_HOLIDAY = 'Holiday'
+ATTENDANCE_STATUS_WEEKLY_OFF = 'Weekly-off'
+
+_WEEKDAY_NAMES = (
+    'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'
+)
+_ATTENDANCE_IDENTITY_CACHE: dict = {}
+
+
+def _attendance_id_is_identity() -> bool:
+    """True when the target schema generates ``attendance_id`` itself.
+
+    PostgreSQL ``public`` uses the CC-01 identity key. DuckDB and the legacy
+    PostgreSQL schema use the v1.0 integer key and need a caller-supplied ID.
+    """
+    backend = os.getenv('APP_DB', 'duckdb').lower()
+    is_pg = backend in ('postgres', 'postgresql', 'pg')
+    schema = 'main'
+    if is_pg:
+        import db_backend
+        schema = db_backend.app_schema()
+    key = f"{backend}:{schema}"
+    if key not in _ATTENDANCE_IDENTITY_CACHE:
+        if not is_pg:
+            _ATTENDANCE_IDENTITY_CACHE[key] = False
+        else:
+            import db_backend
+            conn = db_backend.connect()
+            try:
+                row = conn.execute(
+                    "SELECT is_identity FROM information_schema.columns "
+                    "WHERE table_schema = ? AND table_name = 'attendance_days' "
+                    "AND column_name = 'attendance_id'",
+                    [schema],
+                ).fetchone()
+                _ATTENDANCE_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
+            except Exception:
+                _ATTENDANCE_IDENTITY_CACHE[key] = False
+            finally:
+                conn.close()
+    return _ATTENDANCE_IDENTITY_CACHE[key]
+
+
+def _attendance_date(value):
+    """Coerce a date/datetime/string to ``datetime.date``."""
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, 'year') and hasattr(value, 'month') and hasattr(value, 'day'):
+        return value
+    return datetime.strptime(str(value), '%Y-%m-%d').date()
+
+
+def _attendance_table_exists(conn, table_name):
+    try:
+        conn.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+        return True
+    except Exception:
+        return False
+
+
+def _attendance_ratio(env_name, default):
+    try:
+        value = float(os.getenv(env_name, default))
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, 0.0), 2.0)
+
+
+def _is_weekly_off(target_date, pattern):
+    """Check a day against a per-employee ``Sat,Sun``-style pattern.
+
+    Full weekday names, three-letter abbreviations, numeric weekdays, and a
+    simple ``Mon-Fri`` range are accepted. A blank pattern means no configured
+    weekly off, rather than a hard-coded Monday-Friday working week.
+    """
+    if not pattern:
+        return False
+    normalised = str(pattern).lower().replace('|', ',').replace(';', ',').replace('/', ',')
+    configured = set()
+    for token in (part.strip() for part in normalised.split(',')):
+        if not token:
+            continue
+        bounds = [part.strip() for part in token.split('-') if part.strip()]
+        indices = []
+        for bound in bounds:
+            for index, name in enumerate(_WEEKDAY_NAMES):
+                if bound in (name, name[:3], str(index + 1)):
+                    indices.append(index)
+                    break
+        if len(indices) == 1:
+            configured.add(indices[0])
+        elif len(indices) == 2 and indices[0] <= indices[1]:
+            configured.update(range(indices[0], indices[1] + 1))
+    return target_date.weekday() in configured
+
+
+def _attendance_shift_window(emp_id, target_date, conn):
+    """Resolve the employee's scheduled window and credited shift length."""
+    start_value, end_value = get_shift(emp_id, conn, on_date=target_date)
+    if start_value == '24x7' and end_value == '24x7':
+        start_dt = datetime.combine(target_date, datetime.min.time())
+        end_dt = start_dt + timedelta(days=1)
+        return start_dt, end_dt
+
+    start_t, start_24x7 = _parse_shift_time(start_value)
+    end_t, end_24x7 = _parse_shift_time(end_value)
+    if start_t and end_t and not start_24x7 and not end_24x7:
+        start_dt = datetime.combine(target_date, start_t)
+        end_dt = datetime.combine(target_date, end_t)
+        if end_dt <= start_dt:
+            end_dt += timedelta(days=1)
+        return start_dt, end_dt
+
+    # Employees without a configured shift still receive a deterministic
+    # attendance row; use an 8-hour default rather than treating 24x7 as a
+    # full-day requirement by accident.
+    start_dt = datetime.combine(target_date, datetime.min.time())
+    return start_dt, start_dt + timedelta(hours=float(os.getenv('ATTENDANCE_DEFAULT_SHIFT_HOURS', '8')))
+
+
+def _attendance_worked_hours(emp_id, target_date, shift_start_dt, shift_end_dt, conn, as_of=None):
+    """Calculate credited hours from first login through last logout.
+
+    Multiple sessions are deliberately not summed: the SRS uses the elapsed
+    shift window, consistent with FR-ATT-09. Open/orphaned sessions are capped
+    at the scheduled length plus 25%; all values are capped at that same
+    payroll-safe ceiling before being written to ``attendance_days``.
+    """
+    rows = conn.execute(
+        "SELECT login_time, logout_time FROM user_sessions "
+        "WHERE emp_id = ? AND session_date = ? ORDER BY login_time",
+        [emp_id, target_date],
+    ).fetchall()
+    if not rows:
+        return 0.0
+
+    login_times = [row[0] for row in rows if row[0]]
+    if not login_times:
+        return 0.0
+    first_login = min(login_times)
+    if any(row[1] is None for row in rows):
+        as_of = as_of or datetime.now()
+        scheduled = max(0.0, (shift_end_dt - shift_start_dt).total_seconds() / 3600)
+        orphan_cap = shift_end_dt + timedelta(hours=scheduled * 0.25)
+        last_event = min(as_of, orphan_cap)
+    else:
+        logout_times = [row[1] for row in rows if row[1]]
+        last_event = max(logout_times) if logout_times else first_login
+    if last_event < first_login:
+        return 0.0
+
+    raw_hours = max(0.0, (last_event - first_login).total_seconds() / 3600)
+    scheduled = max(0.0, (shift_end_dt - shift_start_dt).total_seconds() / 3600)
+    credit_cap = scheduled * 1.25
+    return round(min(raw_hours, credit_cap), 2)
+
+
+def _has_approved_attendance_leave(emp_id, target_date, conn):
+    return bool(conn.execute(
+        "SELECT 1 FROM leave_requests WHERE emp_id = ? "
+        "AND status = 'Approved' AND start_date <= ? AND end_date >= ? LIMIT 1",
+        [emp_id, target_date, target_date],
+    ).fetchone())
+
+
+def _attendance_employee_location(emp_id, target_date, conn):
+    """Resolve an employee's effective leave-policy location when available."""
+    if not _shift_model():
+        return None
+    try:
+        row = conn.execute(
+            "SELECT location FROM leave_policy_assignments "
+            "WHERE emp_id = ? AND effective_from <= ? "
+            "AND (effective_to IS NULL OR effective_to >= ?) "
+            "ORDER BY effective_from DESC LIMIT 1",
+            [emp_id, target_date, target_date],
+        ).fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _is_attendance_holiday(emp_id, target_date, conn):
+    """National holidays, plus location-matched optional holidays with opt-in."""
+    if _shift_model():
+        try:
+            holidays = conn.execute(
+                "SELECT holiday_id, type, location FROM holidays WHERE holiday_date = ?",
+                [target_date],
+            ).fetchall()
+        except Exception:
+            # A lightweight v2.0 stand-in may not carry location yet.
+            holidays = conn.execute(
+                "SELECT holiday_id, type FROM holidays WHERE holiday_date = ?", [target_date]
+            ).fetchall()
+    else:
+        # The v1.0 compatibility table predates the location column.
+        holidays = conn.execute(
+            "SELECT holiday_id, type FROM holidays WHERE holiday_date = ?", [target_date]
+        ).fetchall()
+    if not holidays:
+        return False
+
+    has_national = any(str(row[1] or '').lower() == 'national' for row in holidays)
+    if has_national:
+        return True
+    optional_ids = {row[0] for row in holidays if str(row[1] or '').lower() == 'optional'}
+    if not optional_ids or not _attendance_table_exists(conn, 'holiday_optins'):
+        return False
+
+    placeholders = ','.join('?' for _ in optional_ids)
+    approved = {
+        row[0] for row in conn.execute(
+            f"SELECT holiday_id FROM holiday_optins WHERE emp_id = ? "
+            f"AND status = 'Approved' AND holiday_id IN ({placeholders})",
+            [emp_id, *sorted(optional_ids)],
+        ).fetchall()
+    }
+    if not approved:
+        return False
+    employee_location = _attendance_employee_location(emp_id, target_date, conn)
+    for row in holidays:
+        holiday_id, holiday_type = row[0], str(row[1] or '').lower()
+        if holiday_id not in approved or holiday_type != 'optional':
+            continue
+        # A NULL location is an organisation-wide holiday. When location data
+        # is unavailable (the v1.0 shape), retain the safe legacy behaviour of
+        # applying an approved optional holiday rather than silently dropping it.
+        holiday_location = row[2] if len(row) > 2 else None
+        if not holiday_location or not employee_location or str(holiday_location).lower() == str(employee_location).lower():
+            return True
+    return False
+
+
+def _classify_attendance(emp_id, target_date, conn, as_of=None):
+    """Return ``(status, credited_hours)`` for one employee/date (FR-JOB-01)."""
+    shift_start_dt, shift_end_dt = _attendance_shift_window(emp_id, target_date, conn)
+    if _is_attendance_holiday(emp_id, target_date, conn):
+        return ATTENDANCE_STATUS_HOLIDAY, 0.0
+    if _has_approved_attendance_leave(emp_id, target_date, conn):
+        return ATTENDANCE_STATUS_ON_LEAVE, 0.0
+
+    pattern = get_weekly_off_pattern(emp_id, conn, on_date=target_date)
+    if _is_weekly_off(target_date, pattern):
+        return ATTENDANCE_STATUS_WEEKLY_OFF, 0.0
+
+    worked_hours = _attendance_worked_hours(
+        emp_id, target_date, shift_start_dt, shift_end_dt, conn, as_of=as_of
+    )
+    scheduled_hours = max(0.0, (shift_end_dt - shift_start_dt).total_seconds() / 3600)
+    full_threshold = scheduled_hours * _attendance_ratio('ATTENDANCE_FULL_DAY_RATIO', 1.0)
+    half_threshold = scheduled_hours * _attendance_ratio('ATTENDANCE_HALF_DAY_RATIO', 0.5)
+    if worked_hours >= full_threshold and full_threshold > 0:
+        return ATTENDANCE_STATUS_PRESENT, worked_hours
+    if worked_hours >= half_threshold and half_threshold > 0:
+        return ATTENDANCE_STATUS_HALF_DAY, worked_hours
+    return ATTENDANCE_STATUS_ABSENT, worked_hours
+
+
+def finalize_attendance_for_date(target_date, employee_ids=None, as_of=None):
+    """Replace one shift date's attendance rows in a single transaction.
+
+    With no ``employee_ids`` every currently active employee is finalised,
+    which is the normal nightly path. A subset is used when employees have
+    different shift dates at the scheduler's run time (or for a targeted
+    recompute after a source record changes).
+    """
+    target_date = _attendance_date(target_date)
+    as_of = as_of or datetime.now()
+    if getattr(as_of, 'tzinfo', None) is not None:
+        as_of = as_of.replace(tzinfo=None)
+    counts = {}
+    processed = 0
+
+    with outbox.transaction() as conn:
+        all_employees = employee_ids is None
+        if all_employees:
+            employee_ids = [row[0] for row in conn.execute(
+                "SELECT emp_id FROM users WHERE status = 'Active' ORDER BY emp_id"
+            ).fetchall()]
+        else:
+            if isinstance(employee_ids, str):
+                employee_ids = [employee_ids]
+            employee_ids = list(dict.fromkeys(employee_ids))
+            employee_ids = [
+                emp_id for emp_id in employee_ids
+                if conn.execute(
+                    "SELECT 1 FROM users WHERE emp_id = ? AND status = 'Active'", [emp_id]
+                ).fetchone()
+            ]
+
+        classified = [
+            (emp_id, *_classify_attendance(emp_id, target_date, conn, as_of=as_of))
+            for emp_id in employee_ids
+        ]
+
+        if all_employees:
+            # Normal all-employee run: one predicate keeps the replacement
+            # statement efficient while still removing stale inactive rows,
+            # including the edge case where no users remain active.
+            conn.execute("DELETE FROM attendance_days WHERE attendance_date = ?", [target_date])
+        else:
+            for emp_id in employee_ids:
+                conn.execute(
+                    "DELETE FROM attendance_days WHERE emp_id = ? AND attendance_date = ?",
+                    [emp_id, target_date],
+                )
+
+        now = datetime.now()
+        identity_model = _attendance_id_is_identity()
+        next_attendance_id = None
+        if not identity_model:
+            next_attendance_id = int(conn.execute(
+                "SELECT COALESCE(MAX(attendance_id), 0) + 1 FROM attendance_days"
+            ).fetchone()[0])
+        for emp_id, status, shift_hours in classified:
+            if identity_model:
+                conn.execute(
+                    "INSERT INTO attendance_days "
+                    "(emp_id, attendance_date, status, shift_hours, source, version, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'job', 1, ?)",
+                    [emp_id, target_date, status, shift_hours, now],
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO attendance_days "
+                    "(attendance_id, emp_id, attendance_date, status, shift_hours, source, version, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'job', 1, ?)",
+                    [next_attendance_id, emp_id, target_date, status, shift_hours, now],
+                )
+                next_attendance_id += 1
+            counts[status] = counts.get(status, 0) + 1
+        processed = len(classified)
+
+    return {
+        'date': target_date.isoformat(),
+        'processed': processed,
+        'counts': counts,
+    }
+
+
+def run_attendance_finalization():
+    """Nightly scheduler entry: finalise each employee's current shift date."""
+    conn = get_db()
+    now = datetime.now()
+    by_date = {}
+    try:
+        active_ids = [row[0] for row in conn.execute(
+            "SELECT emp_id FROM users WHERE status = 'Active' ORDER BY emp_id"
+        ).fetchall()]
+        for emp_id in active_ids:
+            shift_date = _get_shift_date_for_dt(emp_id, now, conn)
+            by_date.setdefault(shift_date, []).append(emp_id)
+    finally:
+        conn.close()
+
+    results = [
+        finalize_attendance_for_date(shift_date, employee_ids=emp_ids, as_of=now)
+        for shift_date, emp_ids in sorted(by_date.items())
+    ]
+    return {
+        'processed': sum(result['processed'] for result in results),
+        'dates': results,
+    }
 
 
 def get_user(emp_id):
@@ -1962,10 +2441,24 @@ def regularization_api():
 @admin_required
 def approve_regularization(rid):
     conn = get_db()
-    conn.execute(
-        "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE request_id = ? AND status = 'Pending'",
-        [session['emp_id'], datetime.now(), rid]
-    )
+    row = conn.execute(
+        "SELECT emp_id, request_date, status FROM regularization_requests WHERE request_id = ?",
+        [rid],
+    ).fetchone()
+    if row and row[2] == 'Pending':
+        conn.execute(
+            "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, updated_at = ? "
+            "WHERE request_id = ? AND status = 'Pending'",
+            [session['emp_id'], datetime.now(), rid]
+        )
+        conn.close()
+        # FR-JOB-01/FR-REG-03: a later approved correction recomputes only
+        # the affected employee/date, rather than waiting for the next night.
+        try:
+            finalize_attendance_for_date(row[1], employee_ids=[row[0]])
+        except Exception as exc:
+            logger.warning('attendance recompute after regularization failed: %s', exc)
+        return jsonify({'message': 'Approved'}), 200
     conn.close()
     return jsonify({'message': 'Approved'}), 200
 
@@ -3133,12 +3626,13 @@ def bank_file_export(rid):
     if not rows:
         return jsonify({'error': 'No items'}), 404
     import csv
-    buf = BytesIO()
-    writer = csv.writer(buf)
+    import io
+    text_buf = io.StringIO()
+    writer = csv.writer(text_buf)
     writer.writerow(['Employee ID', 'Name', 'Net Salary', 'Account Number', 'IFSC'])
     for r in rows:
         writer.writerow([r[0], r[1], f"{float(r[2]):.2f}", '', ''])
-    buf.seek(0)
+    buf = BytesIO(text_buf.getvalue().encode('utf-8'))
     return send_file(buf, mimetype='text/csv', as_attachment=True, download_name=f'payroll_{rid}.csv')
 
 
@@ -3981,6 +4475,12 @@ def get_user_calendar():
         [start_date, end_date]
     ).fetchall()
 
+    attendance_rows = conn.execute(
+        "SELECT attendance_date, status, shift_hours, source FROM attendance_days "
+        "WHERE emp_id = ? AND attendance_date BETWEEN ? AND ? ORDER BY attendance_date",
+        [emp_id, start_date, end_date]
+    ).fetchall()
+
     shift_start, shift_end = get_shift(emp_id, conn)
 
     conn.close()
@@ -4026,6 +4526,16 @@ def get_user_calendar():
         d = h[0].isoformat() if h[0] else None
         if d: holiday_map[d] = h[1]
 
+    attendance_map = {}
+    for row in attendance_rows:
+        d = row[0].isoformat() if row[0] else None
+        if d:
+            attendance_map[d] = {
+                'status': row[1],
+                'shift_hours': float(row[2]) if row[2] is not None else 0.0,
+                'source': row[3] or 'job',
+            }
+
     shift_start = shift_start or None
     shift_end = shift_end or None
 
@@ -4034,6 +4544,7 @@ def get_user_calendar():
         'breaks': brk_map,
         'leaves': leave_map,
         'holidays': holiday_map,
+        'attendance_days': attendance_map,
         'shift_start': shift_start,
         'shift_end': shift_end,
         'month': month,
@@ -4309,11 +4820,12 @@ def get_users():
                 'allow_login': int(r[7]) if r[7] else 1,
                 'allow_breaks': int(r[8]) if r[8] else 1,
                 'shift_start': sstart or '',
-                'shift_end': send or ''
+                'shift_end': send or '',
+                'weekly_off_pattern': get_weekly_off_pattern(r[0], conn)
             })
     else:
         rows = conn.execute(
-            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end, weekly_off_pattern FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
             params + [per_page, offset]
         ).fetchall()
         data = [{
@@ -4323,7 +4835,8 @@ def get_users():
             'allow_login': int(r[7]) if r[7] else 1,
             'allow_breaks': int(r[8]) if r[8] else 1,
             'shift_start': r[9] or '',
-            'shift_end': r[10] or ''
+            'shift_end': r[10] or '',
+            'weekly_off_pattern': r[11] or 'Sat,Sun'
         } for r in rows]
     conn.close()
     return jsonify({
@@ -4355,16 +4868,21 @@ def add_user():
              datetime.now(), datetime.now(),
              int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1))]
         )
-        set_shift(data['emp_id'], data.get('shift_start', ''), data.get('shift_end', ''), conn=conn)
+        set_shift(
+            data['emp_id'], data.get('shift_start', ''), data.get('shift_end', ''),
+            conn=conn, weekly_off=data.get('weekly_off_pattern')
+        )
     else:
         conn.execute(
-            "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks, shift_start, shift_end) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks, shift_start, shift_end, weekly_off_pattern) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?, ?)",
             [data['emp_id'], data['name'], data['email'], hash_password(pwd),
              data.get('role', 'Employee'), data.get('department', ''),
              data.get('designation', ''),
              datetime.now(), datetime.now(),
              int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1)),
-             data.get('shift_start', ''), data.get('shift_end', '')]
+             data.get('shift_start', ''), data.get('shift_end', ''),
+             data.get('weekly_off_pattern', 'Sat,Sun')]
         )
     conn.close()
     audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}',
@@ -4403,7 +4921,8 @@ def get_user_route(emp_id):
         'allow_login': int(u[6]) if u[6] else 1,
         'allow_breaks': int(u[7]) if u[7] else 1,
         'shift_start': sstart or '',
-        'shift_end': send or ''
+        'shift_end': send or '',
+        'weekly_off_pattern': get_weekly_off_pattern(emp_id)
     }), 200
 
 
@@ -4412,20 +4931,20 @@ def get_user_route(emp_id):
 def update_user(emp_id):
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    if _shift_model():
-        conn.execute(
-            "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ? WHERE emp_id = ?",
-            [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
-             data.get('status', 'Active'), int(data.get('allow_login', 1)),
-             int(data.get('allow_breaks', 1)), emp_id]
-        )
-        set_shift(emp_id, data.get('shift_start', ''), data.get('shift_end', ''), conn=conn)
-    else:
-        conn.execute(
-            "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ?, shift_start = ?, shift_end = ? WHERE emp_id = ?",
-            [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
-             data.get('status', 'Active'), int(data.get('allow_login', 1)),
-             int(data.get('allow_breaks', 1)), data.get('shift_start', ''), data.get('shift_end', ''), emp_id]
+    conn.execute(
+        "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ? WHERE emp_id = ?",
+        [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
+         data.get('status', 'Active'), int(data.get('allow_login', 1)),
+         int(data.get('allow_breaks', 1)), emp_id]
+    )
+    current_start, current_end = get_shift(emp_id, conn)
+    if 'shift_start' in data or 'shift_end' in data or 'weekly_off_pattern' in data:
+        set_shift(
+            emp_id,
+            data.get('shift_start', current_start),
+            data.get('shift_end', current_end),
+            conn=conn,
+            weekly_off=data.get('weekly_off_pattern'),
         )
     conn.close()
     audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}', entity='users', entity_id=emp_id)
@@ -4466,7 +4985,9 @@ def delete_user(emp_id):
         ('user_sessions', 'emp_id'), ('breaks', 'emp_id'), ('leave_requests', 'emp_id'),
         ('leave_balance', 'emp_id'), ('break_approvals', 'emp_id'), ('audit_log', 'emp_id'),
         ('notifications', 'emp_id'), ('password_reset_tokens', 'emp_id'),
-        ('regularization_requests', 'emp_id'), ('onboarding_tasks', 'emp_id'),
+        ('regularization_requests', 'emp_id'), ('attendance_days', 'emp_id'),
+        ('holiday_optins', 'emp_id'), ('shift_assignments', 'emp_id'),
+        ('onboarding_tasks', 'emp_id'),
         ('offboarding_tasks', 'emp_id'), ('exit_interviews', 'emp_id'),
         ('salary_structures', 'emp_id'), ('payroll_items', 'emp_id'),
         ('goals', 'emp_id'), ('performance_reviews', 'emp_id'),
@@ -4739,8 +5260,23 @@ if not STARTED:
     _is_gunicorn_master = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or os.getenv('GUNICORN_MASTER') == 'true'
     _is_dev = os.getenv('FLASK_DEBUG') == '1' or os.getenv('FLASK_ENV') != 'production'
     if _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
+        try:
+            attendance_hour = min(max(int(os.getenv('ATTENDANCE_JOB_HOUR', '2')), 0), 23)
+        except (TypeError, ValueError):
+            attendance_hour = 2
         scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
         scheduler.add_job(outbox.run_dispatch, 'interval', seconds=60)
+        scheduler.add_job(
+            run_attendance_finalization,
+            'cron',
+            hour=attendance_hour,
+            minute=5,
+            id='attendance-finalization',
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
         scheduler.start()
         STARTED = True
         logger.info("Scheduler started")

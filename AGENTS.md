@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 40 on DuckDB, 43 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 61 on DuckDB, 65 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
@@ -28,8 +28,8 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (40 on DuckDB, 43 on PostgreSQL; the
-  3 CC-01/boolean-compat tests are PG-gated and skip on DuckDB)
+- `tests/test_app.py` — Flask unit tests (61 on DuckDB, 65 on PostgreSQL; the
+  5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
@@ -91,21 +91,25 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   `db/postgres_schema.sql` records the later flip to `GENERATED ALWAYS`.
 - Public-flip probe: `scripts/probe_public_flip.py` boots the app against the
   pure v2.0 `public` schema on a throwaway DB and measures the API surface.
-  Result: **86/86 GET `/api/*` routes + 12/12 core write flows green, zero
+  Result: **86/86 GET `/api/*` routes + 27/27 core write flows green, zero
   seed-time rejections** — the v1.0 app boots and fully self-seeds on v2.0.
   The write surface includes the CC-07 idempotency replay check
   (`Idempotency-Key` header → stored response replayed from the v2.0 JSONB
-  `idempotency_keys` table, no double-apply).
+  `idempotency_keys` table, no double-apply), shift assignment persistence,
+  payroll exports, and FR-JOB-01 attendance finalisation.
 - Adapter boot compat in `db_backend.py` (inert on `legacy`, zero boolean
   columns, so Phase-2 runs stay byte-identical):
   - `translate()` rewrites `col = 0|1|?` into boolean literals/casts only for
     columns actually BOOLEAN in the connected schema
   - `_coerce_insert_boolean_params()` turns `int 0/1` params into bool for
     INSERTs into v2.0 flag columns (and rewrites literal `0/1` values)
+  - `_coerce_boolean_comparison_params()` does the same for UPDATE/SELECT
+    comparisons, fixing psycopg's smallint-to-boolean cast failure
   - row factory strips tzinfo from returned datetimes — v2.0 stores
     `TIMESTAMPTZ` where v1.0 code does naive arithmetic
   - PG-gated tests: `test_boolean_flag_rewrite_public_and_inert_legacy`,
-    `test_insert_boolean_param_coercion_public_and_inert_legacy`
+    `test_insert_boolean_param_coercion_public_and_inert_legacy`, and
+    `test_boolean_comparison_param_coercion_public_and_inert_legacy`
 - Sample-seed fix: `salary_structures` now spans EMP001/EMP002 (two unbounded
   ranges on one employee violated the CC-05 `no_overlapping_structure`
   exclusion). Full readiness detail in `docs/MIGRATION.md` §"Phase 3b".
@@ -159,9 +163,30 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 7 new unit tests; DuckDB suite is 53 passed / 4 skipped (PG-gated). The
+- 7 new unit tests; DuckDB suite is 61 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
+
+## Phase 4 (FR-JOB-01 attendance finalisation)
+- `finalize_attendance_for_date()` classifies every active employee as
+  `Present`, `Half-day`, `Absent`, `On Leave`, `Holiday`, or `Weekly-off` in
+  the required priority order. It uses effective-dated shift assignments and
+  each employee's weekly-off pattern, national/optional holiday opt-ins
+  (including effective policy location), and first-login → last-logout
+  elapsed hours.
+- The nightly `attendance-finalization` scheduler job runs at 02:05 by
+  default; per-shift dates are grouped so night and day shifts finalize
+  correctly. Reruns replace the target date transactionally via
+  `attendance_days`; the public v2.0 identity key is detected without
+  mutating the target schema.
+- `GET /api/user/calendar` now exposes finalized `attendance_days`; v1.0
+  users store a compatibility `weekly_off_pattern` while v2.0 reads the
+  effective `shift_assignments`/`leave_policy_assignments` row.
+- Seven attendance acceptance tests cover all statuses, optional-holiday
+  opt-ins, inactive exclusion, orphaned-session caps, idempotent replacement,
+  regularization-triggered recompute, calendar output, and weekly-off parsing.
+  The public-flip probe now verifies
+  the attendance finalization flow: **86/86 GET + 27/27 write flows green**.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

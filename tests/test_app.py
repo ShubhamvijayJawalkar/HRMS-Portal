@@ -332,6 +332,30 @@ def test_insert_boolean_param_coercion_public_and_inert_legacy():
     assert '1' in s_leg  # legacy is INTEGER: nothing rewritten
 
 
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+    reason='the boolean coercion snoops information_schema on PostgreSQL',
+)
+def test_boolean_comparison_param_coercion_public_and_inert_legacy():
+    """UPDATE/SELECT int params become bool before psycopg binds them."""
+    from db_backend import _coerce_boolean_comparison_params
+
+    sql = ("UPDATE users SET name = ?, allow_login = ?, allow_breaks = ? "
+           "WHERE emp_id = ?")
+    params = ['Updated', 0, 1, 'EMP001']
+    sql_out, params_out = _coerce_boolean_comparison_params(sql, params, 'public')
+    assert sql_out == sql
+    assert params_out == ['Updated', False, True, 'EMP001']
+
+    select_sql = "SELECT * FROM notifications WHERE is_read = ?"
+    _, select_params = _coerce_boolean_comparison_params(select_sql, [0], 'public')
+    assert select_params == [False]
+
+    legacy_sql, legacy_params = _coerce_boolean_comparison_params(sql, params, 'legacy')
+    assert legacy_sql == sql
+    assert legacy_params == params
+
+
 # ── CC-09 Transactional Outbox ─────────────────────────────────
 
 def test_outbox_transaction_rolls_back():
@@ -803,6 +827,333 @@ def test_outbox_payroll_notification_category(client):
     assert row and row[0] == 'Payroll'
 
 
+def test_payroll_bank_file_is_binary_csv(client):
+    """The export must hand Flask bytes, not the csv module's text stream."""
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99014
+    created = client.post('/api/payroll-runs', json={'month': 11, 'year': 2097})
+    assert created.status_code == 201, created.get_json()
+    conn = get_db()
+    run_id = conn.execute(
+        "SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2097"
+    ).fetchone()[0]
+    conn.close()
+    assert client.post(f'/api/payroll-runs/{run_id}/finalize').status_code == 200
+
+    response = client.get(f'/api/payroll-runs/{run_id}/bank-file')
+    assert response.status_code == 200
+    assert response.mimetype == 'text/csv'
+    assert response.data.startswith(b'Employee ID,Name,Net Salary,Account Number,IFSC')
+
+
+# ── Attendance finalisation (Phase 4 / FR-JOB-01) ─────────────────────
+
+ATTENDANCE_TEST_DATE = datetime(2091, 1, 8).date()  # Monday
+ATTENDANCE_HOLIDAY_DATE = datetime(2091, 1, 9).date()
+ATTENDANCE_OPTIONAL_DATE = datetime(2091, 1, 10).date()
+ATTENDANCE_TEST_IDS = [
+    'ATTJOBPRS', 'ATTJOBHALF', 'ATTJOBSHORT', 'ATTJOBLEAVE',
+    'ATTJOBHOL', 'ATTJOBWEEK', 'ATTJOBORPHAN', 'ATTJOBOPTYES',
+    'ATTJOBOPTPEND', 'ATTJOBINACTIVE',
+]
+
+
+@pytest.fixture
+def attendance_scenario():
+    """Create isolated source rows for every FR-JOB-01 classification."""
+    from app import set_shift
+
+    conn = get_db()
+    conn.execute("DELETE FROM holiday_optins WHERE emp_id LIKE 'ATTJOB%'")
+    conn.execute("DELETE FROM holidays WHERE name IN ('Attendance national holiday', 'Attendance optional holiday')")
+    conn.execute("DELETE FROM leave_requests WHERE reason = 'Attendance finalisation test'")
+    conn.execute("DELETE FROM regularization_requests WHERE reason = 'test correction'")
+    conn.execute("DELETE FROM user_sessions WHERE emp_id LIKE 'ATTJOB%'")
+    conn.execute("DELETE FROM attendance_days WHERE emp_id LIKE 'ATTJOB%'")
+    try:
+        conn.execute("DELETE FROM shift_assignments WHERE emp_id LIKE 'ATTJOB%'")
+    except Exception:
+        pass
+    conn.execute("DELETE FROM users WHERE emp_id LIKE 'ATTJOB%'")
+
+    patterns = {
+        'ATTJOBWEEK': 'Mon',
+    }
+    for emp_id in ATTENDANCE_TEST_IDS:
+        status = 'Inactive' if emp_id == 'ATTJOBINACTIVE' else 'Active'
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, status) "
+            "VALUES (?, ?, ?, 'not-used', 'Employee', ?)",
+            [emp_id, emp_id, f'{emp_id.lower()}@company.com', status],
+        )
+        set_shift(
+            emp_id, '09:00', '17:00', conn=conn,
+            weekly_off=patterns.get(emp_id, 'Sat,Sun'),
+            effective_from=datetime(2090, 1, 1).date(),
+        )
+
+    sessions = {
+        'ATTJOBPRS': ('09:00', '17:00', 8.0),
+        'ATTJOBHALF': ('09:00', '13:00', 4.0),
+        'ATTJOBSHORT': ('09:00', '10:00', 1.0),
+        'ATTJOBLEAVE': ('09:00', '17:00', 8.0),
+        'ATTJOBHOL': ('09:00', '17:00', 8.0),
+        'ATTJOBWEEK': ('09:00', '17:00', 8.0),
+        'ATTJOBOPTYES': ('09:00', '17:00', 8.0),
+        'ATTJOBOPTPEND': ('09:00', '17:00', 8.0),
+    }
+    for offset, (emp_id, (login_at, logout_at, hours)) in enumerate(sessions.items(), start=1):
+        conn.execute(
+            "INSERT INTO user_sessions "
+            "(session_id, emp_id, login_time, logout_time, total_hours, session_date) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                887200 + offset, emp_id,
+                datetime.combine(ATTENDANCE_TEST_DATE, datetime.strptime(login_at, '%H:%M').time()),
+                datetime.combine(ATTENDANCE_TEST_DATE, datetime.strptime(logout_at, '%H:%M').time()),
+                hours, ATTENDANCE_TEST_DATE,
+            ],
+        )
+    conn.execute(
+        "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) "
+        "VALUES (887250, 'ATTJOBORPHAN', ?, ?)",
+        [datetime(2091, 1, 8, 9), ATTENDANCE_TEST_DATE],
+    )
+
+    conn.execute(
+        "INSERT INTO leave_requests "
+        "(leave_id, emp_id, leave_type, start_date, end_date, year, reason, status) "
+        "VALUES (887101, 'ATTJOBLEAVE', 'Casual', ?, ?, 2091, "
+        "'Attendance finalisation test', 'Approved')",
+        [ATTENDANCE_TEST_DATE, ATTENDANCE_TEST_DATE],
+    )
+    conn.execute(
+        "INSERT INTO holidays (holiday_id, name, holiday_date, year, type) "
+        "VALUES (887001, 'Attendance national holiday', ?, 2091, 'National')",
+        [ATTENDANCE_HOLIDAY_DATE],
+    )
+    conn.execute(
+        "INSERT INTO holidays (holiday_id, name, holiday_date, year, type) "
+        "VALUES (887002, 'Attendance optional holiday', ?, 2091, 'Optional')",
+        [ATTENDANCE_OPTIONAL_DATE],
+    )
+    for offset, emp_id in enumerate(['ATTJOBOPTYES', 'ATTJOBOPTPEND'], start=1):
+        conn.execute(
+            "INSERT INTO user_sessions "
+            "(session_id, emp_id, login_time, logout_time, total_hours, session_date) "
+            "VALUES (?, ?, ?, ?, 8, ?)",
+            [
+                887260 + offset, emp_id,
+                datetime(2091, 1, 10, 9), datetime(2091, 1, 10, 17),
+                ATTENDANCE_OPTIONAL_DATE,
+            ],
+        )
+    conn.execute(
+        "INSERT INTO holiday_optins (optin_id, emp_id, holiday_id, status) "
+        "VALUES (887301, 'ATTJOBOPTYES', 887002, 'Approved')"
+    )
+    conn.execute(
+        "INSERT INTO holiday_optins (optin_id, emp_id, holiday_id, status) "
+        "VALUES (887302, 'ATTJOBOPTPEND', 887002, 'Pending')"
+    )
+    conn.close()
+
+    try:
+        yield
+    finally:
+        conn = get_db()
+        conn.execute("DELETE FROM holiday_optins WHERE emp_id LIKE 'ATTJOB%'")
+        conn.execute("DELETE FROM holidays WHERE name IN ('Attendance national holiday', 'Attendance optional holiday')")
+        conn.execute("DELETE FROM leave_requests WHERE reason = 'Attendance finalisation test'")
+        conn.execute("DELETE FROM regularization_requests WHERE reason = 'test correction'")
+        conn.execute("DELETE FROM user_sessions WHERE emp_id LIKE 'ATTJOB%'")
+        conn.execute("DELETE FROM attendance_days WHERE emp_id LIKE 'ATTJOB%'")
+        try:
+            conn.execute("DELETE FROM shift_assignments WHERE emp_id LIKE 'ATTJOB%'")
+        except Exception:
+            pass
+        conn.execute("DELETE FROM users WHERE emp_id LIKE 'ATTJOB%'")
+        conn.close()
+
+
+def test_attendance_finalization_classifies_every_source(attendance_scenario):
+    from app import finalize_attendance_for_date
+
+    result = finalize_attendance_for_date(
+        ATTENDANCE_TEST_DATE,
+        as_of=datetime(2091, 1, 9, 12),
+    )
+    assert result['date'] == ATTENDANCE_TEST_DATE.isoformat()
+    assert result['processed'] >= len(ATTENDANCE_TEST_IDS) - 1
+
+    conn = get_db()
+    placeholders = ','.join('?' for _ in ATTENDANCE_TEST_IDS)
+    rows = conn.execute(
+        f"SELECT emp_id, status, shift_hours, source, version FROM attendance_days "
+        f"WHERE attendance_date = ? AND emp_id IN ({placeholders})",
+        [ATTENDANCE_TEST_DATE, *ATTENDANCE_TEST_IDS],
+    ).fetchall()
+    conn.close()
+    by_employee = {row[0]: row for row in rows}
+
+    assert by_employee['ATTJOBPRS'][1:4] == ('Present', 8.0, 'job')
+    assert by_employee['ATTJOBHALF'][1:4] == ('Half-day', 4.0, 'job')
+    assert by_employee['ATTJOBSHORT'][1:4] == ('Absent', 1.0, 'job')
+    assert by_employee['ATTJOBLEAVE'][1:4] == ('On Leave', 0.0, 'job')
+    assert by_employee['ATTJOBHOL'][1:4] == ('Present', 8.0, 'job')
+    assert by_employee['ATTJOBWEEK'][1:4] == ('Weekly-off', 0.0, 'job')
+    # Open/orphaned session is capped at scheduled 8h + 25% = 10h.
+    assert by_employee['ATTJOBORPHAN'][1:4] == ('Present', 10.0, 'job')
+    assert 'ATTJOBINACTIVE' not in by_employee
+    assert all(row[4] == 1 for row in rows)
+
+    finalize_attendance_for_date(
+        ATTENDANCE_HOLIDAY_DATE, employee_ids=['ATTJOBHOL'],
+        as_of=datetime(2091, 1, 10, 12),
+    )
+    conn = get_db()
+    holiday_row = conn.execute(
+        "SELECT status, shift_hours FROM attendance_days "
+        "WHERE emp_id = 'ATTJOBHOL' AND attendance_date = ?",
+        [ATTENDANCE_HOLIDAY_DATE],
+    ).fetchone()
+    conn.close()
+    assert holiday_row == ('Holiday', 0.0)
+
+
+def test_attendance_optional_holiday_requires_approved_optin(attendance_scenario):
+    from app import finalize_attendance_for_date
+
+    # A row outside the targeted employee set must survive a subset rerun.
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO attendance_days (attendance_id, emp_id, attendance_date, status, source) "
+        "VALUES (887500, 'ATTJOBPRS', ?, 'Present', 'manual')",
+        [ATTENDANCE_OPTIONAL_DATE],
+    )
+    conn.close()
+
+    finalize_attendance_for_date(
+        ATTENDANCE_OPTIONAL_DATE,
+        employee_ids=['ATTJOBOPTYES', 'ATTJOBOPTPEND'],
+        as_of=datetime(2091, 1, 10, 18),
+    )
+
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT emp_id, status, source FROM attendance_days WHERE attendance_date = ? "
+        "AND emp_id IN ('ATTJOBOPTYES', 'ATTJOBOPTPEND', 'ATTJOBPRS')",
+        [ATTENDANCE_OPTIONAL_DATE],
+    ).fetchall()
+    conn.close()
+    by_employee = {row[0]: row[1:] for row in rows}
+    assert by_employee['ATTJOBOPTYES'] == ('Holiday', 'job')
+    assert by_employee['ATTJOBOPTPEND'] == ('Present', 'job')
+    assert by_employee['ATTJOBPRS'] == ('Present', 'manual')
+
+
+def test_attendance_rerun_replaces_date_transactionally(attendance_scenario):
+    from app import finalize_attendance_for_date
+
+    finalize_attendance_for_date(
+        ATTENDANCE_TEST_DATE, employee_ids=['ATTJOBPRS'],
+        as_of=datetime(2091, 1, 8, 18),
+    )
+    conn = get_db()
+    conn.execute(
+        "UPDATE attendance_days SET status = 'Absent', source = 'manual', version = 9 "
+        "WHERE emp_id = 'ATTJOBPRS' AND attendance_date = ?",
+        [ATTENDANCE_TEST_DATE],
+    )
+    conn.close()
+
+    finalize_attendance_for_date(
+        ATTENDANCE_TEST_DATE, employee_ids=['ATTJOBPRS'],
+        as_of=datetime(2091, 1, 8, 18),
+    )
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT status, shift_hours, source, version FROM attendance_days "
+        "WHERE emp_id = 'ATTJOBPRS' AND attendance_date = ?",
+        [ATTENDANCE_TEST_DATE],
+    ).fetchall()
+    conn.close()
+    assert rows == [('Present', 8.0, 'job', 1)]
+
+
+def test_approved_regularization_recomputes_attendance_row(attendance_scenario, client):
+    from app import finalize_attendance_for_date
+
+    finalize_attendance_for_date(
+        ATTENDANCE_TEST_DATE, employee_ids=['ATTJOBPRS'],
+        as_of=datetime(2091, 1, 8, 18),
+    )
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO regularization_requests "
+        "(request_id, emp_id, request_date, reason, status) "
+        "VALUES (887401, 'ATTJOBPRS', ?, 'test correction', 'Pending')",
+        [ATTENDANCE_TEST_DATE],
+    )
+    conn.close()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+
+    response = client.post('/api/regularization/887401/approve')
+    assert response.status_code == 200
+    conn = get_db()
+    row = conn.execute(
+        "SELECT status, source FROM attendance_days "
+        "WHERE emp_id = 'ATTJOBPRS' AND attendance_date = ?",
+        [ATTENDANCE_TEST_DATE],
+    ).fetchone()
+    conn.close()
+    assert row == ('Present', 'job')
+
+
+def test_attendance_status_appears_in_monthly_calendar(attendance_scenario, client):
+    from app import finalize_attendance_for_date
+
+    finalize_attendance_for_date(
+        ATTENDANCE_TEST_DATE, employee_ids=['ATTJOBPRS'],
+        as_of=datetime(2091, 1, 8, 18),
+    )
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'ATTJOBPRS'
+        sess['name'] = 'Attendance Test'
+        sess['role'] = 'Employee'
+
+    response = client.get('/api/user/calendar?month=1&year=2091')
+    assert response.status_code == 200
+    day = response.get_json()['attendance_days'][ATTENDANCE_TEST_DATE.isoformat()]
+    assert day == {'status': 'Present', 'shift_hours': 8.0, 'source': 'job'}
+
+
+def test_weekly_off_pattern_is_not_hard_coded():
+    from app import _is_weekly_off
+
+    monday = datetime(2091, 1, 8).date()
+    assert _is_weekly_off(monday, 'Mon')
+    assert _is_weekly_off(monday, 'Monday')
+    assert _is_weekly_off(monday, 'Mon-Fri')
+    assert not _is_weekly_off(monday, 'Sat,Sun')
+    assert not _is_weekly_off(monday, '')
+
+
+def test_attendance_nightly_scheduler_job_registered():
+    from app import scheduler
+
+    job = scheduler.get_job('attendance-finalization')
+    assert job is not None
+    assert job.max_instances == 1
+    assert job.coalesce is True
+
+
 # ── Service-layer rewrite inc 2 (shifts: users.columns ⇄ shift_assignments) ──
 
 def test_shift_model_false_on_v1(client):
@@ -845,22 +1196,24 @@ def test_user_create_roundtrips_shift(client):
     resp = client.post('/api/users', json={
         'emp_id': 'SHF1', 'name': 'Shift Tester', 'email': 'shf1@company.com',
         'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
-        'shift_start': '09:00', 'shift_end': '18:00',
+        'shift_start': '09:00', 'shift_end': '18:00', 'weekly_off_pattern': 'Sun,Mon',
     })
     assert resp.status_code == 201, resp.get_json()
     assert get_shift('SHF1') == ('09:00', '18:00')
     detail = client.get('/api/users/SHF1').get_json()
     assert detail['shift_start'] == '09:00'
     assert detail['shift_end'] == '18:00'
+    assert detail['weekly_off_pattern'] == 'Sun,Mon'
     listed = client.get('/api/users?search=shf1').get_json()['data']
-    assert any(u['emp_id'] == 'SHF1' and u['shift_start'] == '09:00' for u in listed)
+    assert any(u['emp_id'] == 'SHF1' and u['shift_start'] == '09:00' and u['weekly_off_pattern'] == 'Sun,Mon' for u in listed)
     resp = client.put('/api/users/SHF1', json={
         'name': 'Shift Tester', 'email': 'shf1@company.com', 'role': 'Employee',
         'department': 'MIS', 'status': 'Active',
-        'shift_start': '22:00', 'shift_end': '06:00',
+        'shift_start': '22:00', 'shift_end': '06:00', 'weekly_off_pattern': 'Tue',
     })
     assert resp.status_code == 200, resp.get_json()
     assert get_shift('SHF1') == ('22:00', '06:00')
+    assert client.get('/api/users/SHF1').get_json()['weekly_off_pattern'] == 'Tue'
 
 
 def test_shift_24x7_roundtrip(client):

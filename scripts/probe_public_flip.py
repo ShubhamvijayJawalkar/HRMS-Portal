@@ -121,10 +121,12 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     """Fire the core state-changing flows against ``public`` exactly as the
     legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
     business rule fired) vs failed (5xx/EXC)."""
-    from datetime import date, timedelta
+    from datetime import date, datetime, timedelta
 
     out: dict[str, tuple[str, str]] = {}
     today = date.today()
+    days_until_monday = (7 - today.weekday()) % 7 or 7
+    attendance_date = today + timedelta(days=days_until_monday)
     state: dict = {}
 
     # Clear residue from prior probe runs so dedupe guards don't mask results.
@@ -142,6 +144,15 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
                    "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_runs WHERE year >= 2099")
         pc.execute("DELETE FROM password_reset_tokens WHERE emp_id = 'EMP002'")
+        pc.execute("DELETE FROM idempotency_keys WHERE key LIKE 'probe-%'")
+        pc.execute(
+            "DELETE FROM attendance_days WHERE emp_id = 'EMP002' AND attendance_date = %s",
+            [attendance_date],
+        )
+        pc.execute(
+            "DELETE FROM user_sessions WHERE emp_id = 'EMP002' AND session_date = %s",
+            [attendance_date],
+        )
 
     def run(name, fn):
         try:
@@ -239,6 +250,35 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         ok = row is not None and row[0] == 'Fixed' and row[1] == '10:00' and row[2] == '19:00'
         return 200 if ok and 'shift_start' not in cols else 409
     run("shifts(assignment write)", shift_write)
+
+    # ── FR-JOB-01: nightly finalisation against the v2.0 identity key and
+    #    effective-dated shift/weekly-off assignment ─────────────────────────
+    def attendance_finalize():
+        from app import finalize_attendance_for_date
+
+        start = datetime.combine(attendance_date, datetime.strptime("10:00", "%H:%M").time())
+        end = datetime.combine(attendance_date, datetime.strptime("19:00", "%H:%M").time())
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            pc.execute(
+                "INSERT INTO user_sessions "
+                "(emp_id, login_time, logout_time, total_hours, session_date) "
+                "VALUES ('EMP002', %s, %s, 9, %s)",
+                [start, end, attendance_date],
+            )
+        result = finalize_attendance_for_date(
+            attendance_date, employee_ids=["EMP002"], as_of=datetime.combine(attendance_date, datetime.strptime("20:00", "%H:%M").time()),
+        )
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT status, shift_hours, source, version FROM attendance_days "
+                "WHERE emp_id = 'EMP002' AND attendance_date = %s",
+                [attendance_date],
+            ).fetchone()
+        return 200 if (
+            result.get("processed") == 1
+            and row == ("Present", 9, "job", 1)
+        ) else 409
+    run("attendance(finalize)", attendance_finalize)
 
     # ── password-reset journey (public POSTs, no session required) ─────────
     def forgot_password():

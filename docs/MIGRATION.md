@@ -1,11 +1,11 @@
-# HRMS v2.0 — Migration Runbook (Phases 0–3)
+# HRMS v2.0 — Migration Runbook (Phases 0–4)
 
 This runbook covers **Phase 0 (freeze & inventory)**, **Phase 1 (one-time ETL:
-DuckDB → PostgreSQL)** and **Phase 2 (service-layer cutover: the existing app
-runs on PostgreSQL)** of the SRS v2.0 migration plan (§14). Later phases
-(cross-cutting rules CC-01…CC-16, new capabilities, final cutover,
-decommission) are tracked in §14 of the SRS and are out of scope for this
-document.
+DuckDB → PostgreSQL)**, **Phase 2 (service-layer cutover: the existing app
+runs on PostgreSQL)**, **Phase 3 (cross-cutting rules)**, and the first
+**Phase 4 capability (FR-JOB-01 attendance finalisation)** of the SRS v2.0
+migration plan (§14). The remaining Phase 4 capabilities, final cutover, and
+DuckDB decommission are tracked in §14 and the living TO DO list.
 
 > The schema is now **frozen**. Any change to the DuckDB v1.0 schema must be
 > reviewed against this migration before it lands. Add changes here if you
@@ -280,8 +280,11 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_fresh \
 ## 8. Known v1.0 → v2.0 mapping decisions
 
 - `users.shift_start/shift_end` → one `shift_assignments` row per employee,
-  `effective_from = 1970-01-01`, weekly-off default `Sat,Sun`. Collect real
-  weekly-off patterns (SRS R-04) before Phase 3.
+  `effective_from = 1970-01-01`, with the employee's weekly-off pattern
+  (default `Sat,Sun`). The v1.0 compatibility path keeps a
+  `users.weekly_off_pattern` column; v2.0 reads the effective assignment and
+  leave-policy fallback. Collect real employee patterns (SRS R-04) before
+  relying on the job for payroll.
 - `notifications.type` becomes `notifications.category` (preference key,
   FR-NOT-03); `type` value is copied across.
 - `tickets.category` is copied to `tickets.queue` (`IT` fallback); both kept.
@@ -329,24 +332,26 @@ APP_DB=postgres APP_DB_SCHEMA=public \
   python scripts/probe_public_flip.py
 ```
 
-**Result: 86/86 authenticated GET `/api/*` routes and 12/12 core write flows
+**Result: 86/86 authenticated GET `/api/*` routes and 27/27 core write flows
 serve unmodified from `public`** (login + CSRF included; write flows cover
 start/end break, regularization, leave apply, notification read, Lunch break
-approval request + admin approve, admin user creation, and the CC-07
-idempotency replay check — the same leave apply sent twice with the same
-`Idempotency-Key` replays the stored response and leaves exactly one row).
-`init_db` boots and fully self-seeds against the v2.0 schema — **zero
-seed-time rejections**. That is a complete measured readiness picture, not a
-leap of faith.
+approval request + admin approve, admin user creation, shift assignment,
+FR-JOB-01 attendance finalisation, password reset, help-desk ticket
+create/comment/resolve, ATS candidate → offer → accept, payroll run
+create/finalize → bank-file + TDS exports, and the CC-07 idempotency replay
+check — the same leave apply sent twice with the same `Idempotency-Key`
+replays the stored response and leaves exactly one row). `init_db` boots and
+fully self-seeds against the v2.0 schema — **zero seed-time rejections**. That
+is a complete measured readiness picture, not a leap of faith.
 
-*Since that measurement the write section has been extended to 26 flows
-(service-layer rewrite inc 3): password reset journey, shift assignment
-write, help-desk ticket create/comment/resolve, ATS candidate → offer →
-accept, and payroll run create/finalize → bank-file + TDS exports. Re-running
-the probe against a clean `hrms_probe` is the next gate.*
+The extended write section (service-layer rewrite inc 3) was re-run against a
+clean `hrms_probe` on 2026-09-24. It exposed and then fixed two adapter/export
+issues: psycopg could not bind integer flag parameters to a v2.0 BOOLEAN
+UPDATE, and the payroll bank-file writer was passing text to `BytesIO`. The
+probe is now green on all 27 flows.
 
 #### Adapter compat added this phase
-Three small, schema-scoped pieces in `db_backend.py` made the flip possible.
+Four small, schema-scoped pieces in `db_backend.py` made the flip possible.
 All are strict no-ops on `legacy` (zero boolean columns, naive timestamps), so
 Phase-2 behaviour is byte-identical (verified by the full unit + browser
 suites on PostgreSQL):
@@ -358,7 +363,10 @@ suites on PostgreSQL):
 2. `_coerce_insert_boolean_params()` co-ercies `int 0/1` params to `bool` for
    INSERTs into v2.0 flag columns (and rewrites literal `0/1` values);
    positionally maps the VALUES list to the column list.
-3. The row factory strips tzinfo from returned datetimes. v2.0 stores
+3. `_coerce_boolean_comparison_params()` applies the same coercion to
+   UPDATE/SELECT comparisons, so psycopg never sends a `smallint` into a
+   `?::boolean` placeholder.
+4. The row factory strips tzinfo from returned datetimes. v2.0 stores
    `TIMESTAMPTZ` for columns v1.0 code reads back for naive arithmetic
    (`datetime.now() - row[2]`); `legacy` already stores naive `TIMESTAMP`, so
    this restores the v1.0 round-trip contract on v2.0.
@@ -385,15 +393,15 @@ stays green on both the v1.0 (DuckDB/legacy) and v2.0 (`public`) shapes:
   `shift_assignments` row (`Fixed` with TIME bounds, or `24x7`), on the v1.0
   shape it is exactly the old column write. Effective-dated scheduling
   (multiple periods) is Phase 4 (FR-ATT-17).
-- **Inc 3 (in progress)** — extended probe write section (26 flows) plus the
-  INSERT fixes it surfaced: `tickets`, `offer_letters` and `payroll_runs`
-  were written with bare `VALUES` (relying on v1.0 column order) — v2.0
-  adds `queue` mid-tickets, `basic_pct/hra_pct/allowances_pct` to
-  offer_letters, and maker-checker columns to payroll_runs. Each INSERT is
-  now an explicit column list valid on both shapes.
+- **Inc 3 (done)** — extended the probe write section to 27 flows and fixed
+  the INSERT/export drift it surfaced: `tickets`, `offer_letters` and
+  `payroll_runs` use explicit column lists valid on both shapes; the Boolean
+  UPDATE parameter and payroll bank-file fixes are now verified on `public`.
+  The probe also exercises FR-JOB-01 against the v2.0 identity key and
+  effective-dated shift assignment.
 
-Remaining measured POST surfaces are the Phase 4 corrected flows
-(ATS/onboarding/offboarding, maker-checker payroll), still to be verified on
+Remaining measured POST surfaces are the remaining Phase 4 corrected flows
+(maker-checker payroll and onboarding/offboarding), still to be verified on
 `public` by the same probe.
 
 ### CC-09 — transactional outbox (implemented)
@@ -449,12 +457,51 @@ verified against the *real* v2.0 `idempotency_keys` (`key` natural PK, `JSONB`
   write-flow in the probe that replays the leave apply against pure v2.0
   `public` and asserts exactly one row.
 
-## 10. Next steps
+## 10. Phase 4 — attendance finalisation (FR-JOB-01, implemented)
 
-1. Phase 3b — service-layer rewrite inc 3: re-run the extended probe (26 write
-   flows) against a clean `hrms_probe` (`public`) and fix any drift it
-   surfaces. Inc 1 (audit_log + notifications.category) and inc 2
-   (shift_assignments) are already landed.
-2. Phase 4 — new capabilities: attendance finalisation job (FR-JOB-01),
-   maker-checker payroll (FR-PAY-06), corrected ATS/onboarding/offboarding flows.
-3. Phase 5 — cutover; Phase 6 — decommission DuckDB.
+`finalize_attendance_for_date()` is the service entry point used by the
+nightly scheduler. For every active employee it resolves the effective shift
+and weekly-off pattern, then applies this priority:
+
+```text
+Holiday → On Leave → Weekly-off → Present → Half-day → Absent
+```
+
+- A National holiday always wins. An Optional holiday wins only when the
+  employee has an Approved `holiday_optins` row and the holiday location
+  matches the employee's effective leave-policy location (NULL means
+  organisation-wide).
+- A shift is measured from first login to last logout (not the sum of
+  session rows). Open/orphaned sessions are capped at scheduled hours + 25%,
+  and the credited value is rounded to two decimals.
+- `Present` and `Half-day` use the scheduled shift length multiplied by
+  `ATTENDANCE_FULL_DAY_RATIO` (default `1.0`) and
+  `ATTENDANCE_HALF_DAY_RATIO` (default `0.5`). These are configurable policy
+  thresholds, not a new schema constraint.
+- `run_attendance_finalization()` groups employees by their own current shift
+  date and calls the transactional replacement once per date. Re-running a
+  date deletes and recreates that date's rows atomically; the v1.0 shape gets
+  explicit integer IDs, while v2.0 `public` uses its identity sequence.
+- `attendance_days` is the single finalized source consumed by the monthly
+  calendar. Payroll/report consumers should use its stored status/hours for
+  LOP rather than recalculating ad hoc.
+- v1.0 adds a compatibility `users.weekly_off_pattern` column. v2.0 reads
+  `shift_assignments.weekly_off_pattern`, then the effective
+  `leave_policy_assignments` row, and finally the configured default.
+
+Validation:
+
+- **61 DuckDB unit tests passed / 5 skipped**.
+- **65 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+  green with Redis sessions.
+- **15 Playwright tests passed on both DuckDB and PostgreSQL**.
+- Clean `hrms_probe`: **86/86 GET + 27/27 write flows**, including the
+  attendance finalization path, green against the pure v2.0 `public` schema.
+
+## 11. Next steps
+
+1. Phase 4 — implement maker-checker payroll (FR-PAY-06) and the corrected
+   ATS/onboarding/offboarding flows; extend the public-flip probe for each.
+2. Phase 5 — final cutover: flip `APP_DB_SCHEMA` to `public`, reconcile final
+   data, and retire the legacy schema.
+3. Phase 6 — decommission the DuckDB runtime after the defined audit fallback.
