@@ -77,6 +77,7 @@
         .pagination-btn:disabled:hover { background: var(--surface); color: var(--text-muted); border-color: var(--border); }
         .role-badge { padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
         .role-admin { background: #EDE9FE; color: #6D28D9; }
+        .role-finance { background: #FEF3C7; color: #92400E; }
         .role-team-leader { background: #DBEAFE; color: #1D4ED8; }
         .role-employee { background: #F1F5F9; color: #475569; }
         .empty-state { text-align: center; padding: 32px 16px; color: var(--text-muted); }
@@ -122,6 +123,7 @@
                 <select id="filterRole" onchange="applyFilters()">
                     <option value="">All Roles</option>
                     <option value="Admin">Admin</option>
+                    <option value="Finance">Finance</option>
                     <option value="Team Leader">Team Leader</option>
                     <option value="Employee">Employee</option>
                 </select>
@@ -176,7 +178,7 @@
                         <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
                     </div>
                     <div class="row">
-                        <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
+                        <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option><option>Finance</option></select></div>
                         <div class="col-md-4 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
                         <div class="col-md-4 mb-3"><label for="designation" class="form-label">Designation</label><input type="text" id="designation" class="form-control" placeholder="e.g., Developer"></div>
                     </div>
@@ -225,7 +227,7 @@
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3"><label class="form-label">Department</label><select id="editDepartment" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
-                        <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>Admin</option></select></div>
+                        <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>Admin</option><option>Finance</option></select></div>
                     </div>
                     <div class="row mb-3">
                         <div class="col-md-4 mb-2"><label class="form-label">Shift Type</label><select id="editShiftType" class="form-select" onchange="toggleEditShiftTime()"><option value="">Select</option><option value="time">Fixed Time</option><option value="24x7">24 x 7</option></select></div>

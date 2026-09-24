@@ -332,23 +332,25 @@ APP_DB=postgres APP_DB_SCHEMA=public \
   python scripts/probe_public_flip.py
 ```
 
-**Result: 86/86 authenticated GET `/api/*` routes and 27/27 core write flows
+**Result: 86/86 authenticated GET `/api/*` routes and 30/30 core write flows
 serve unmodified from `public`** (login + CSRF included; write flows cover
 start/end break, regularization, leave apply, notification read, Lunch break
 approval request + admin approve, admin user creation, shift assignment,
 FR-JOB-01 attendance finalisation, password reset, help-desk ticket
 create/comment/resolve, ATS candidate → offer → accept, payroll run
-create/finalize → bank-file + TDS exports, and the CC-07 idempotency replay
-check — the same leave apply sent twice with the same `Idempotency-Key`
-replays the stored response and leaves exactly one row). `init_db` boots and
-fully self-seeds against the v2.0 schema — **zero seed-time rejections**. That
-is a complete measured readiness picture, not a leap of faith.
+create → Finance submit → Admin approve → finalize → bank-file + TDS exports,
+and the CC-07 idempotency replay check — the same leave apply sent twice with
+the same `Idempotency-Key` replays the stored response and leaves exactly one
+row). `init_db` boots and fully self-seeds against the v2.0 schema — **zero
+seed-time rejections**. That is a complete measured readiness picture, not a
+leap of faith.
 
 The extended write section (service-layer rewrite inc 3) was re-run against a
 clean `hrms_probe` on 2026-09-24. It exposed and then fixed two adapter/export
 issues: psycopg could not bind integer flag parameters to a v2.0 BOOLEAN
 UPDATE, and the payroll bank-file writer was passing text to `BytesIO`. The
-probe is now green on all 27 flows.
+probe now also exercises the Finance-submit/Admin-approve payroll path and is
+green on all 30 flows.
 
 #### Adapter compat added this phase
 Four small, schema-scoped pieces in `db_backend.py` made the flip possible.
@@ -393,16 +395,16 @@ stays green on both the v1.0 (DuckDB/legacy) and v2.0 (`public`) shapes:
   `shift_assignments` row (`Fixed` with TIME bounds, or `24x7`), on the v1.0
   shape it is exactly the old column write. Effective-dated scheduling
   (multiple periods) is Phase 4 (FR-ATT-17).
-- **Inc 3 (done)** — extended the probe write section to 27 flows and fixed
+- **Inc 3 (done)** — extended the probe write section to 30 flows and fixed
   the INSERT/export drift it surfaced: `tickets`, `offer_letters` and
   `payroll_runs` use explicit column lists valid on both shapes; the Boolean
   UPDATE parameter and payroll bank-file fixes are now verified on `public`.
   The probe also exercises FR-JOB-01 against the v2.0 identity key and
-  effective-dated shift assignment.
+  effective-dated shift assignment, plus FR-PAY-06's Finance-submit/Admin-
+  approve path.
 
-Remaining measured POST surfaces are the remaining Phase 4 corrected flows
-(maker-checker payroll and onboarding/offboarding), still to be verified on
-`public` by the same probe.
+Remaining measured POST surfaces are the corrected onboarding/offboarding
+flows, still to be verified on `public` by the same probe.
 
 ### CC-09 — transactional outbox (implemented)
 `outbox.py` implements the outbox pattern against the v2.0 `outbox_events`
@@ -491,17 +493,53 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **61 DuckDB unit tests passed / 5 skipped**.
-- **65 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **64 DuckDB unit tests passed / 5 skipped**.
+- **68 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **15 Playwright tests passed on both DuckDB and PostgreSQL**.
-- Clean `hrms_probe`: **86/86 GET + 27/27 write flows**, including the
-  attendance finalization path, green against the pure v2.0 `public` schema.
+- Clean `hrms_probe`: **86/86 GET + 30/30 write flows**, including the
+  attendance and payroll maker-checker paths, green against the pure v2.0
+  `public` schema.
 
-## 11. Next steps
+## 11. Phase 4 — maker-checker payroll (FR-PAY-06, implemented)
 
-1. Phase 4 — implement maker-checker payroll (FR-PAY-06) and the corrected
-   ATS/onboarding/offboarding flows; extend the public-flip probe for each.
+Payroll now uses the strict lifecycle:
+
+```text
+Draft → Submitted → Approved → Finalized
+```
+
+- `POST /api/payroll-runs/<id>/submit` records the submitter and transitions
+  only a Draft run.
+- `POST /api/payroll-runs/<id>/approve` is restricted to Finance/Admin,
+  requires Submitted status, and rejects the submitter as approver.
+- `POST /api/payroll-runs/<id>/finalize` is restricted to an Approved run;
+  it records the transition, writes the approval trail, and enqueues
+  `payroll.finalized` atomically. Bank, TDS, and payslip exports reject
+  non-Finalized runs.
+- `payroll_approvals` stores `Submit`, `Approve`, and `Finalize` actions with
+  actor and from/to status. Each successful transition also writes the
+  expanded audit log.
+- Payroll creation includes Active/Onboarding users with a salary structure
+  effective for the requested period. An optional `adjustment_of_run_id`
+  must reference a Finalized run; finalized items are never edited in place.
+- The v1.0 compatibility schema receives the new columns/table in `init_db`;
+  the v2.0 `public` schema is detected and left untouched. Finance/Admin UI
+  access and the role selector are wired for the new lifecycle.
+
+Validation:
+
+- **64 DuckDB unit tests passed / 5 skipped**.
+- **68 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **68 passed / 1 skipped**.
+- **15 Playwright tests passed on both DuckDB and PostgreSQL**.
+- Clean `hrms_probe`: **86/86 GET + 30/30 write flows**, including the
+  Finance-submit/Admin-approve/finalize payroll path.
+
+## 12. Next steps
+
+1. Phase 4 — implement the corrected ATS/onboarding/offboarding flows and
+   extend the public-flip probe for each.
 2. Phase 5 — final cutover: flip `APP_DB_SCHEMA` to `public`, reconcile final
    data, and retire the legacy schema.
 3. Phase 6 — decommission the DuckDB runtime after the defined audit fallback.

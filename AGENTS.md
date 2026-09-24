@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 61 on DuckDB, 65 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 64 on DuckDB, 68 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 15 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (61 on DuckDB, 65 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (64 on DuckDB, 68 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (15 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -91,7 +91,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   `db/postgres_schema.sql` records the later flip to `GENERATED ALWAYS`.
 - Public-flip probe: `scripts/probe_public_flip.py` boots the app against the
   pure v2.0 `public` schema on a throwaway DB and measures the API surface.
-  Result: **86/86 GET `/api/*` routes + 27/27 core write flows green, zero
+  Result: **86/86 GET `/api/*` routes + 30/30 core write flows green, zero
   seed-time rejections** — the v1.0 app boots and fully self-seeds on v2.0.
   The write surface includes the CC-07 idempotency replay check
   (`Idempotency-Key` header → stored response replayed from the v2.0 JSONB
@@ -163,7 +163,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 7 new unit tests; DuckDB suite is 61 passed / 5 skipped (PG-gated). The
+- 7 new unit tests; DuckDB suite is 64 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
 
@@ -186,7 +186,22 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   opt-ins, inactive exclusion, orphaned-session caps, idempotent replacement,
   regularization-triggered recompute, calendar output, and weekly-off parsing.
   The public-flip probe now verifies
-  the attendance finalization flow: **86/86 GET + 27/27 write flows green**.
+  the attendance finalization flow: **86/86 GET + 30/30 write flows green**.
+
+## Phase 4 (FR-PAY-06 maker-checker payroll)
+- Payroll now follows `Draft → Submitted → Approved → Finalized`.
+  `POST /api/payroll-runs/<id>/submit` and `/approve` are restricted to
+  Finance/Admin, and the submitter cannot approve their own run.
+- Every transition is conditional, audited, and recorded in
+  `payroll_approvals`; finalization also enqueues `payroll.finalized` in the
+  same transaction. Finalized runs are read-only for bank/TDS/payslip exports.
+- Payroll creation now includes Active/Onboarding users with effective salary
+  structures and supports an `adjustment_of_run_id` reference to a finalized
+  run. v1.0 compatibility tables receive the new columns; v2.0 `public` is
+  left untouched and uses the existing identity key.
+- Finance access is available in the payroll/salary UI and user role filters.
+  Maker-checker, self-approval, state-transition, trail, adjustment-run, and
+  Finance-access tests pass on DuckDB, PostgreSQL, and PostgreSQL+Redis.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

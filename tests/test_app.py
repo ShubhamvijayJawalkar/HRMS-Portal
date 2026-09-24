@@ -425,6 +425,7 @@ def test_finalize_payroll_enqueues_and_dispatch_notifies(client):
     conn = get_db()
     rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2099").fetchone()[0]
     conn.close()
+    assert _payroll_submit_and_approve(client, rid, 99091).status_code == 200
     resp = client.post(f'/api/payroll-runs/{rid}/finalize')
     assert resp.status_code == 200, resp.get_json()
     conn = get_db()
@@ -457,6 +458,39 @@ def test_admin_outbox_endpoints(client):
     resp = client.post('/api/admin/outbox/dispatch')
     assert resp.status_code == 200
     assert set(resp.get_json()) == {'dispatched', 'delivered', 'failed', 'dead_lettered'}
+
+
+def _ensure_finance_approver():
+    """Create a second privileged actor for payroll maker-checker tests."""
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM users WHERE emp_id = 'PAYFIN01'").fetchone():
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, status) "
+            "VALUES ('PAYFIN01', 'Payroll Finance', 'payfin01@company.com', ?, 'Finance', 'Finance', 'Active')",
+            [hash_password('pass123')],
+        )
+    conn.close()
+
+
+def _payroll_submit_and_approve(client, rid, session_id=99090):
+    """Submit as the current Admin, approve as a different Finance user."""
+    _ensure_finance_approver()
+    submitted = client.post(f'/api/payroll-runs/{rid}/submit')
+    assert submitted.status_code == 200, submitted.get_json()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'PAYFIN01'
+        sess['name'] = 'Payroll Finance'
+        sess['role'] = 'Finance'
+        sess['department'] = 'Finance'
+        sess['session_id'] = session_id
+    approved = client.post(f'/api/payroll-runs/{rid}/approve')
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['department'] = 'MIS'
+        sess['session_id'] = session_id + 1
+    return approved
 
 
 # ── Authenticated API Tests (use session_transaction) ──────────
@@ -682,6 +716,7 @@ def test_idempotent_payroll_finalize_single_outbox_event(client):
         "SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2099"
     ).fetchone()[0]
     conn.close()
+    assert _payroll_submit_and_approve(client, rid, 99092).status_code == 200
     hdrs = {'Idempotency-Key': 'ik-finalize-1'}
     f1 = client.post(f'/api/payroll-runs/{rid}/finalize', headers=hdrs)
     assert f1.status_code == 200, f1.get_json()
@@ -815,7 +850,8 @@ def test_outbox_payroll_notification_category(client):
     conn = get_db()
     rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2098").fetchone()[0]
     conn.close()
-    client.post(f'/api/payroll-runs/{rid}/finalize')
+    assert _payroll_submit_and_approve(client, rid, 99093).status_code == 200
+    assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 200
     conn = get_db()
     outbox.dispatch_once(conn)
     conn.close()
@@ -841,12 +877,99 @@ def test_payroll_bank_file_is_binary_csv(client):
         "SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2097"
     ).fetchone()[0]
     conn.close()
+    assert _payroll_submit_and_approve(client, run_id, 99094).status_code == 200
     assert client.post(f'/api/payroll-runs/{run_id}/finalize').status_code == 200
 
     response = client.get(f'/api/payroll-runs/{run_id}/bank-file')
     assert response.status_code == 200
     assert response.mimetype == 'text/csv'
     assert response.data.startswith(b'Employee ID,Name,Net Salary,Account Number,IFSC')
+
+
+# ── Payroll maker-checker (Phase 4 / FR-PAY-06) ─────────────────────────
+
+def test_finance_role_can_access_payroll_and_salary(client):
+    _ensure_finance_approver()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'PAYFIN01'
+        sess['name'] = 'Payroll Finance'
+        sess['role'] = 'Finance'
+        sess['department'] = 'Finance'
+        sess['session_id'] = 99094
+    assert client.get('/admin/payroll').status_code == 200
+    assert client.get('/admin/salary-structures').status_code == 200
+    assert client.get('/api/payroll-runs').status_code == 200
+    assert client.get('/api/salary-structures').status_code == 200
+
+
+def test_payroll_maker_checker_blocks_direct_and_self_approval(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99095
+    created = client.post('/api/payroll-runs', json={'month': 10, 'year': 2096})
+    assert created.status_code == 201, created.get_json()
+    rid = created.get_json()['run_id']
+
+    assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 409
+    assert client.post(f'/api/payroll-runs/{rid}/submit').status_code == 200
+    assert client.post(f'/api/payroll-runs/{rid}/approve').status_code == 403
+
+    _ensure_finance_approver()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'PAYFIN01'
+        sess['name'] = 'Payroll Finance'
+        sess['role'] = 'Finance'
+        sess['department'] = 'Finance'
+        sess['session_id'] = 99096
+    assert client.post(f'/api/payroll-runs/{rid}/approve').status_code == 200
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99097
+    assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 200
+
+    conn = get_db()
+    status = conn.execute("SELECT status FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()[0]
+    trail = conn.execute(
+        "SELECT action, actor_emp_id, from_status, to_status FROM payroll_approvals "
+        "WHERE run_id = ? ORDER BY approval_id",
+        [rid],
+    ).fetchall()
+    conn.close()
+    assert status == 'Finalized'
+    assert [(row[0], row[1], row[2], row[3]) for row in trail] == [
+        ('Submit', 'EMP001', 'Draft', 'Submitted'),
+        ('Approve', 'PAYFIN01', 'Submitted', 'Approved'),
+        ('Finalize', 'EMP001', 'Approved', 'Finalized'),
+    ]
+
+
+def test_payroll_adjustment_run_must_reference_finalized_run(client):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99098
+    original = client.post('/api/payroll-runs', json={'month': 9, 'year': 2095})
+    assert original.status_code == 201, original.get_json()
+    original_id = original.get_json()['run_id']
+    assert _payroll_submit_and_approve(client, original_id, 99099).status_code == 200
+    assert client.post(f'/api/payroll-runs/{original_id}/finalize').status_code == 200
+
+    adjustment = client.post('/api/payroll-runs', json={
+        'month': 10, 'year': 2095, 'adjustment_of_run_id': original_id,
+    })
+    assert adjustment.status_code == 201, adjustment.get_json()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT adjustment_of_run_id, status FROM payroll_runs WHERE run_id = ?",
+        [adjustment.get_json()['run_id']],
+    ).fetchone()
+    conn.close()
+    assert row == (original_id, 'Draft')
 
 
 # ── Attendance finalisation (Phase 4 / FR-JOB-01) ─────────────────────

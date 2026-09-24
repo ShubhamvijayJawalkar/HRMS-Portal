@@ -35,8 +35,9 @@
                 <li class="nav-item"><a class="nav-link {% if request.path.startswith('/admin/holidays') %}active{% endif %}" href="/admin/holidays"><i class="bi bi-calendar-event"></i>Holidays</a></li>
                 {% endif %}
                 {% set is_admin = session.get('role') == 'Admin' %}
+                {% set is_finance = session.get('role') == 'Finance' %}
                 {% set is_hr = session.get('department') == 'HR' %}
-                {% if is_admin or is_hr %}
+                {% if is_admin or is_finance or is_hr %}
                 <li class="nav-item dropdown">
                     <a class="nav-link dropdown-toggle {% if request.path.startswith('/admin/assets') or request.path.startswith('/admin/jobs') or request.path.startswith('/admin/candidates') or request.path.startswith('/admin/payroll') or request.path.startswith('/admin/salary') or request.path.startswith('/admin/goals') or request.path.startswith('/admin/reviews') or request.path.startswith('/admin/expenses') or request.path.startswith('/admin/tickets') or request.path.startswith('/admin/documents') or request.path.startswith('/admin/analytics') or request.path.startswith('/admin/audit') or request.path.startswith('/admin/reports') or request.path.startswith('/admin/import-users') %}active{% endif %}" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false"><i class="bi bi-grid-3x3-gap-fill"></i>Modules</a>
                     <ul class="dropdown-menu dropdown-menu-dark">
@@ -44,7 +45,7 @@
                         <li><a class="dropdown-item" href="/admin/jobs"><i class="bi bi-briefcase"></i>Jobs</a></li>
                         <li><a class="dropdown-item" href="/admin/candidates"><i class="bi bi-person-lines-fill"></i>Candidates</a></li>
                         <li><a class="dropdown-item" href="/admin/payroll"><i class="bi bi-cash-stack"></i>Payroll</a></li>
-                        {% if is_admin %}
+                        {% if is_admin or is_finance %}
                         <li><a class="dropdown-item" href="/admin/salary-structures"><i class="bi bi-wallet"></i>Salary</a></li>
                         {% endif %}
                         <li><a class="dropdown-item" href="/admin/documents"><i class="bi bi-file-earmark-text"></i>Documents</a></li>

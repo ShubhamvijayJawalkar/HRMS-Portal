@@ -94,7 +94,11 @@ FKS: dict[str, list[tuple[str, str, bool]]] = {
     "offboarding_tasks": [("emp_id", "users", False), ("assigned_to", "users", False)],
     "exit_interviews": [("emp_id", "users", False)],
     "salary_structures": [("emp_id", "users", False)],
-    "payroll_runs": [("submitted_by", "users", True), ("approved_by", "users", True)],
+    "payroll_runs": [
+        ("submitted_by", "users", True), ("approved_by", "users", True),
+        ("adjustment_of_run_id", "payroll_runs", True),
+    ],
+    "payroll_approvals": [("run_id", "payroll_runs", False), ("actor_emp_id", "users", False)],
     "payroll_items": [("run_id", "payroll_runs", False), ("emp_id", "users", False)],
     "goals": [("emp_id", "users", False)],
     "performance_reviews": [("emp_id", "users", False), ("reviewer_id", "users", False)],
@@ -456,6 +460,13 @@ REGISTRY: list[dict] = [
         select="SELECT run_id, month, year, processed_at, status FROM payroll_runs ORDER BY run_id",
         row_fn=lambda r: (*r, None, None, None, None, None, None),
         pk="run_id",
+    ),
+    dict(
+        table="payroll_approvals",
+        columns=["approval_id", "run_id", "actor_emp_id", "action", "from_status", "to_status", "created_at"],
+        select="SELECT approval_id, run_id, actor_emp_id, action, from_status, to_status, created_at FROM payroll_approvals ORDER BY approval_id",
+        row_fn=_row_fn_none,
+        pk="approval_id",
     ),
     dict(
         table="payroll_items",

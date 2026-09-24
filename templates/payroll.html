@@ -55,6 +55,8 @@
         .alert { border-radius: 10px; border: none; }
         .admin-badge { background: rgba(255,255,255,0.2); padding: 5px 12px; border-radius: 20px; font-size: 12px; color: white; font-weight: 600; }
         .status-Draft { background: #FEFCE8; color: #92400E; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Submitted { background: #DBEAFE; color: #1D4ED8; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
+        .status-Approved { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
         .status-Finalized { background: #F0FDF4; color: #166534; padding: 4px 12px; border-radius: 20px; font-size: 11px; font-weight: 600; display: inline-block; }
         .net-amount { font-weight: bold; color: #22C55E; }
     </style>
@@ -109,7 +111,13 @@ async function loadRuns() {
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No runs</td></tr>'; return; }
     tbody.innerHTML = data.map(run => {
         const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-        const actions = run.status === 'Draft' ? `<button class="btn btn-success btn-sm" onclick="finalizeRun(${run.id})">Finalize</button> <button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>` : `<button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`;
+        const actions = run.status === 'Draft'
+            ? `<button class="btn btn-primary btn-sm" onclick="submitRun(${run.id})">Submit</button> <button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`
+            : run.status === 'Submitted'
+                ? `<button class="btn btn-success btn-sm" onclick="approveRun(${run.id})">Approve</button> <button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`
+                : run.status === 'Approved'
+                    ? `<button class="btn btn-success btn-sm" onclick="finalizeRun(${run.id})">Finalize</button> <button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`
+                    : `<button class="btn btn-outline-primary btn-sm" onclick="loadItems(${run.id})">View</button>`;
         return `<tr><td><strong>${months[run.month-1]} ${run.year}</strong></td><td>${run.processed_at ? new Date(run.processed_at).toLocaleString() : '-'}</td><td><span class="status-${run.status}">${run.status}</span></td><td>${actions}</td></tr>`;
     }).join('');
 }
@@ -118,6 +126,16 @@ async function runPayroll() {
     const r = await fetch('/api/payroll-runs', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const res = await r.json();
     if (r.ok) { loadRuns(); alert(res.message); } else alert(res.error);
+}
+async function submitRun(id) {
+    if (!confirm('Submit this payroll run for checker approval?')) return;
+    const r = await fetch(`/api/payroll-runs/${id}/submit`, { method:'POST' });
+    if (r.ok) loadRuns(); else alert((await r.json()).error || 'Failed to submit');
+}
+async function approveRun(id) {
+    if (!confirm('Approve this submitted payroll run?')) return;
+    const r = await fetch(`/api/payroll-runs/${id}/approve`, { method:'POST' });
+    if (r.ok) loadRuns(); else alert((await r.json()).error || 'Failed to approve');
 }
 async function finalizeRun(id) {
     if (!confirm('Finalize this payroll run?')) return;

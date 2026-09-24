@@ -140,6 +140,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM offer_letters WHERE candidate_id IN "
                    "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
         pc.execute("DELETE FROM candidates WHERE email LIKE 'probe-cand-%'")
+        pc.execute("DELETE FROM payroll_approvals WHERE run_id IN "
+                   "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_items WHERE run_id IN "
                    "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_runs WHERE year >= 2099")
@@ -209,6 +211,11 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         out["login-EMP001"] = ("FAIL", f"login status={lc_a}")
         return out
     out["login-EMP001"] = ("OK", "status=200")
+    cl_f, tok_f, lc_f = _login(app_mod, "EMP003")
+    if lc_f != 200:
+        out["login-EMP003"] = ("FAIL", f"login status={lc_f}")
+        return out
+    out["login-EMP003"] = ("OK", "status=200")
 
     uniq = f"TEST{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
 
@@ -361,7 +368,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return _post(cl_a, tok_a, f"/api/offers/{oid}/accept").status_code
     run("ats(offer accept)", offer_accept)
 
-    # ── payroll exports: create + finalize a run, then bank-file + TDS ─────
+    # ── payroll maker-checker: create → submit (Finance) → approve (Admin)
+    #    → finalize, then bank-file + TDS exports ───────────────────────────
     pay_year = 2099 + (os.getpid() % 50)
 
     def payroll_create():
@@ -378,11 +386,32 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return 201
     run("payroll(run create)", payroll_create)
 
+    def payroll_submit():
+        rid = state.get("run_id")
+        if not rid:
+            return 409
+        return _post(cl_f, tok_f, f"/api/payroll-runs/{rid}/submit").status_code
+    run("payroll(submit)", payroll_submit)
+
+    def payroll_approve():
+        rid = state.get("run_id")
+        if not rid:
+            return 409
+        return _post(cl_a, tok_a, f"/api/payroll-runs/{rid}/approve").status_code
+    run("payroll(approve)", payroll_approve)
+
     def payroll_finalize():
         rid = state.get("run_id")
         if not rid:
             return 409
-        return _post(cl_a, tok_a, f"/api/payroll-runs/{rid}/finalize").status_code
+        status = _post(cl_a, tok_a, f"/api/payroll-runs/{rid}/finalize").status_code
+        if status != 200:
+            return status
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            trail = pc.execute(
+                "SELECT COUNT(*) FROM payroll_approvals WHERE run_id = %s", [rid],
+            ).fetchone()[0]
+        return 200 if trail == 3 else 409
     run("payroll(finalize)", payroll_finalize)
 
     def bank_file():
@@ -444,8 +473,8 @@ def main() -> int:
     from security import hash_password
 
     with psycopg.connect(dsn, autocommit=True) as pconn:
+        ph = hash_password("pass123")
         if pconn.execute("SELECT count(*) FROM users").fetchone()[0] == 0:
-            ph = hash_password("pass123")
             pconn.execute(
                 "INSERT INTO users (emp_id, name, email, password, role, department,"
                 " designation, phone, date_of_joining, status, allow_login, allow_breaks,"
@@ -464,6 +493,16 @@ def main() -> int:
                 " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 ["EMP002", "Probe User", "probe2@company.com", ph, "Employee", "Operations",
                  "Associate", "9876543211", "2024-01-01", "EMP001", "Active", True, True,
+                 "2024-01-01", "2024-01-01"],
+            )
+        if not pconn.execute("SELECT 1 FROM users WHERE emp_id = 'EMP003'").fetchone():
+            pconn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department,"
+                " designation, phone, date_of_joining, status, allow_login, allow_breaks,"
+                " first_login, created_at)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                ["EMP003", "Probe Finance", "probe3@company.com", ph, "Finance", "Finance",
+                 "Finance Manager", "9876543212", "2024-01-01", "Active", True, True,
                  "2024-01-01", "2024-01-01"],
             )
         if pconn.execute("SELECT count(*) FROM leave_balance").fetchone()[0] == 0:

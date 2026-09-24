@@ -162,6 +162,64 @@ def _shift_model() -> bool:
     return _SHIFT_MODEL_CACHE[key]
 
 
+_PAYROLL_MODEL_CACHE: dict = {}
+
+
+def _payroll_v2_model() -> bool:
+    """True when payroll runs use the v2.0 maker-checker columns."""
+    backend = os.getenv('APP_DB', 'duckdb').lower()
+    is_pg = backend in ('postgres', 'postgresql', 'pg')
+    schema = 'main'
+    if is_pg:
+        import db_backend
+        schema = db_backend.app_schema()
+    key = f"{backend}:{schema}"
+    if key not in _PAYROLL_MODEL_CACHE:
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = 'payroll_runs' "
+                "AND column_name = 'submitted_by'",
+                [schema],
+            ).fetchone()
+            _PAYROLL_MODEL_CACHE[key] = bool(row)
+        except Exception:
+            _PAYROLL_MODEL_CACHE[key] = False
+        finally:
+            conn.close()
+    return _PAYROLL_MODEL_CACHE[key]
+
+
+_SALARY_MODEL_CACHE: dict = {}
+
+
+def _salary_v2_model() -> bool:
+    """True when salary structures carry effective-dated end dates."""
+    backend = os.getenv('APP_DB', 'duckdb').lower()
+    is_pg = backend in ('postgres', 'postgresql', 'pg')
+    schema = 'main'
+    if is_pg:
+        import db_backend
+        schema = db_backend.app_schema()
+    key = f"{backend}:{schema}"
+    if key not in _SALARY_MODEL_CACHE:
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = 'salary_structures' "
+                "AND column_name = 'effective_to'",
+                [schema],
+            ).fetchone()
+            _SALARY_MODEL_CACHE[key] = bool(row)
+        except Exception:
+            _SALARY_MODEL_CACHE[key] = False
+        finally:
+            conn.close()
+    return _SALARY_MODEL_CACHE[key]
+
+
 def _fmt_shift_time(v):
     """Normalise a shift time (str 'HH:MM' or datetime.time) to 'HH:MM'."""
     if v is None:
@@ -766,18 +824,25 @@ def init_db():
             allowances DECIMAL(12,2) DEFAULT 0,
             deductions DECIMAL(12,2) DEFAULT 0,
             effective_from DATE NOT NULL,
+            effective_to DATE,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
 
-    # ── Payroll Runs (Phase 2) ──────────────────────────────────────
+    # ── Payroll Runs (Phase 2 / FR-PAY-06) ───────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS payroll_runs (
             run_id INTEGER PRIMARY KEY,
             month INTEGER NOT NULL,
             year INTEGER NOT NULL,
             processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status VARCHAR DEFAULT 'Draft'
+            status VARCHAR DEFAULT 'Draft',
+            submitted_by VARCHAR,
+            submitted_at TIMESTAMP,
+            approved_by VARCHAR,
+            approved_at TIMESTAMP,
+            finalized_at TIMESTAMP,
+            adjustment_of_run_id INTEGER
         )
     ''')
 
@@ -793,11 +858,57 @@ def init_db():
             pf DECIMAL(12,2) DEFAULT 0,
             esi DECIMAL(12,2) DEFAULT 0,
             pt DECIMAL(12,2) DEFAULT 0,
+            tds DECIMAL(12,2) DEFAULT 0,
+            lop_amount DECIMAL(12,2) DEFAULT 0,
+            reimbursements DECIMAL(12,2) DEFAULT 0,
             payslip_generated INTEGER DEFAULT 0,
             FOREIGN KEY (run_id) REFERENCES payroll_runs(run_id),
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+
+    # ── Payroll maker-checker trail (FR-PAY-06) ─────────────────────
+    # No-op on v2.0 public, which already owns identity + TIMESTAMPTZ.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS payroll_approvals (
+            approval_id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL,
+            actor_emp_id VARCHAR NOT NULL,
+            action VARCHAR NOT NULL,
+            from_status VARCHAR NOT NULL,
+            to_status VARCHAR NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (run_id) REFERENCES payroll_runs(run_id),
+            FOREIGN KEY (actor_emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
+    # Existing v1.0 DuckDB/legacy files predate the v2.0 payroll columns.
+    # Add them only on the compatibility schema; `public` already has the
+    # identity/TIMESTAMPTZ shape and must not be ALTERed at boot.
+    if not _salary_v2_model():
+        try:
+            conn.execute("ALTER TABLE salary_structures ADD COLUMN effective_to DATE")
+        except Exception:
+            pass
+    if not _payroll_v2_model():
+        for table, columns in {
+            'payroll_runs': [
+                ('submitted_by', 'VARCHAR'), ('submitted_at', 'TIMESTAMP'),
+                ('approved_by', 'VARCHAR'), ('approved_at', 'TIMESTAMP'),
+                ('finalized_at', 'TIMESTAMP'), ('adjustment_of_run_id', 'INTEGER'),
+            ],
+            'payroll_items': [
+                ('tds', 'DECIMAL(12,2) DEFAULT 0'),
+                ('lop_amount', 'DECIMAL(12,2) DEFAULT 0'),
+                ('reimbursements', 'DECIMAL(12,2) DEFAULT 0'),
+            ],
+        }.items():
+            for column, definition in columns:
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                except Exception:
+                    pass
 
     # ── Performance Goals (Phase 3) ─────────────────────────────────
     conn.execute('''
@@ -1853,6 +1964,24 @@ def hr_or_admin_required(f):
     return decorated
 
 
+def finance_or_admin_required(f):
+    """Require the v2.0 Finance role or an Admin operations role."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'emp_id' not in session:
+            if request.is_json:
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('login'))
+        emp_id = session['emp_id']
+        conn = get_db()
+        row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+        conn.close()
+        if not row or str(row[0]).lower() not in ('finance', 'admin'):
+            return jsonify({'error': 'Forbidden - Finance access required'}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 def department_required(*depts):
     """Require specific department(s) or Admin role"""
     def decorator(f):
@@ -2005,7 +2134,7 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    if session.get('role') == 'Admin' or session.get('department') == 'HR':
+    if session.get('role') in ('Admin', 'Finance') or session.get('department') == 'HR':
         return render_template('admin_dashboard.html')
     return render_template('user_dashboard.html')
 
@@ -2861,13 +2990,13 @@ def exit_interviews_api():
 # ══════════════════════════════════════════════════════════════════════
 
 @app.route('/admin/payroll')
-@hr_or_admin_required
+@finance_or_admin_required
 def admin_payroll():
     return render_template('payroll.html')
 
 
 @app.route('/admin/salary-structures')
-@hr_or_admin_required
+@finance_or_admin_required
 def admin_salary():
     return render_template('salary.html')
 
@@ -2876,21 +3005,22 @@ def admin_salary():
 
 @app.route('/api/v1/salary-structures', methods=['GET', 'POST'])
 @app.route('/api/salary-structures', methods=['GET', 'POST'])
-@hr_or_admin_required
+@finance_or_admin_required
 def salary_api():
     if request.method == 'GET':
         conn = get_db()
-        rows = conn.execute("SELECT s.struct_id, s.emp_id, u.name, s.basic, s.hra, s.allowances, s.deductions, s.effective_from FROM salary_structures s JOIN users u ON s.emp_id = u.emp_id ORDER BY s.effective_from DESC").fetchall()
+        rows = conn.execute("SELECT s.struct_id, s.emp_id, u.name, s.basic, s.hra, s.allowances, s.deductions, s.effective_from, s.effective_to FROM salary_structures s JOIN users u ON s.emp_id = u.emp_id ORDER BY s.effective_from DESC").fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'basic': float(r[3]), 'hra': float(r[4]), 'allowances': float(r[5]), 'deductions': float(r[6]), 'effective_from': r[7].isoformat() if r[7] else None, 'effective_to': r[8].isoformat() if r[8] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('basic'):
         return jsonify({'error': 'emp_id and basic required'}), 400
     sid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO salary_structures VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    conn.execute("INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from, effective_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  [sid, data['emp_id'], float(data['basic']), float(data.get('hra', 0)), float(data.get('allowances', 0)), float(data.get('deductions', 0)),
-                  parse_date(data.get('effective_from'), datetime.now().date())])
+                  parse_date(data.get('effective_from'), datetime.now().date()),
+                  parse_date(data.get('effective_to'))])
     conn.close()
     return jsonify({'message': 'Salary structure saved', 'id': sid}), 201
 
@@ -2907,53 +3037,284 @@ def calc_payroll_item(emp_id, basic, hra, allowances, deductions):
     return gross, round(total_ded, 2), round(net, 2), round(pf, 2), round(esi, 2), pt
 
 
+_PAYROLL_APPROVAL_IDENTITY_CACHE: dict = {}
+
+
+def _payroll_approval_id_is_identity() -> bool:
+    """Detect the v2.0 identity key without mutating either schema."""
+    backend = os.getenv('APP_DB', 'duckdb').lower()
+    is_pg = backend in ('postgres', 'postgresql', 'pg')
+    schema = 'main'
+    if is_pg:
+        import db_backend
+        schema = db_backend.app_schema()
+    key = f"{backend}:{schema}"
+    if key not in _PAYROLL_APPROVAL_IDENTITY_CACHE:
+        if not is_pg:
+            _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = False
+        else:
+            import db_backend
+            conn = db_backend.connect()
+            try:
+                row = conn.execute(
+                    "SELECT is_identity FROM information_schema.columns "
+                    "WHERE table_schema = ? AND table_name = 'payroll_approvals' "
+                    "AND column_name = 'approval_id'",
+                    [schema],
+                ).fetchone()
+                _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
+            except Exception:
+                _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = False
+            finally:
+                conn.close()
+    return _PAYROLL_APPROVAL_IDENTITY_CACHE[key]
+
+
+def _record_payroll_approval(conn, run_id, actor_emp_id, action, from_status, to_status):
+    """Append one maker-checker transition to payroll_approvals."""
+    now = datetime.now()
+    if _payroll_approval_id_is_identity():
+        conn.execute(
+            "INSERT INTO payroll_approvals "
+            "(run_id, actor_emp_id, action, from_status, to_status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [run_id, actor_emp_id, action, from_status, to_status, now],
+        )
+        return
+    next_id = int(conn.execute(
+        "SELECT COALESCE(MAX(approval_id), 0) + 1 FROM payroll_approvals"
+    ).fetchone()[0])
+    conn.execute(
+        "INSERT INTO payroll_approvals "
+        "(approval_id, run_id, actor_emp_id, action, from_status, to_status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [next_id, run_id, actor_emp_id, action, from_status, to_status, now],
+    )
+
+
+def _payroll_period_bounds(month, year):
+    start = datetime(int(year), int(month), 1).date()
+    if int(month) == 12:
+        next_month = datetime(int(year) + 1, 1, 1).date()
+    else:
+        next_month = datetime(int(year), int(month) + 1, 1).date()
+    return start, next_month - timedelta(days=1)
+
+
+def _payroll_run(rid):
+    conn = get_db()
+    row = conn.execute(
+        "SELECT run_id, month, year, status, submitted_by, submitted_at, "
+        "approved_by, approved_at, finalized_at, adjustment_of_run_id "
+        "FROM payroll_runs WHERE run_id = ?",
+        [rid],
+    ).fetchone()
+    conn.close()
+    return row
+
+
 @app.route('/api/v1/payroll-runs', methods=['GET', 'POST'])
 @app.route('/api/payroll-runs', methods=['GET', 'POST'])
-@hr_or_admin_required
+@finance_or_admin_required
 @idempotent
 def payroll_runs_api():
     if request.method == 'GET':
         conn = get_db()
-        rows = conn.execute("SELECT run_id, month, year, processed_at, status FROM payroll_runs ORDER BY year DESC, month DESC").fetchall()
+        rows = conn.execute(
+            "SELECT run_id, month, year, processed_at, status, submitted_by, submitted_at, "
+            "approved_by, approved_at, finalized_at, adjustment_of_run_id "
+            "FROM payroll_runs ORDER BY year DESC, month DESC"
+        ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'month': r[1], 'year': r[2], 'processed_at': r[3].isoformat() if r[3] else None, 'status': r[4]} for r in rows]), 200
+        return jsonify([{
+            'id': r[0], 'month': r[1], 'year': r[2],
+            'processed_at': r[3].isoformat() if r[3] else None,
+            'status': r[4], 'submitted_by': r[5],
+            'submitted_at': r[6].isoformat() if r[6] else None,
+            'approved_by': r[7], 'approved_at': r[8].isoformat() if r[8] else None,
+            'finalized_at': r[9].isoformat() if r[9] else None,
+            'adjustment_of_run_id': r[10],
+        } for r in rows]), 200
+
     data = request.get_json(silent=True) or {}
-    month, year = data.get('month'), data.get('year')
-    if not month or not year:
-        return jsonify({'error': 'month and year required'}), 400
+    try:
+        month, year = int(data['month']), int(data['year'])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({'error': 'month and year are required integers'}), 400
+    if month < 1 or month > 12 or year < 2000 or year > 2200:
+        return jsonify({'error': 'invalid payroll period'}), 400
+
     conn = get_db()
-    if conn.execute("SELECT 1 FROM payroll_runs WHERE month = ? AND year = ?", [month, year]).fetchone():
+    try:
+        adjustment_of_run_id = data.get('adjustment_of_run_id')
+        if adjustment_of_run_id not in (None, ''):
+            try:
+                adjustment_of_run_id = int(adjustment_of_run_id)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'adjustment_of_run_id must be an integer'}), 400
+            original = conn.execute(
+                "SELECT status FROM payroll_runs WHERE run_id = ?", [adjustment_of_run_id]
+            ).fetchone()
+            if not original:
+                conn.close()
+                return jsonify({'error': 'Original payroll run not found'}), 404
+            if original[0] != 'Finalized':
+                conn.close()
+                return jsonify({'error': 'Only a Finalized run can be adjusted'}), 409
+
+        if conn.execute(
+            "SELECT 1 FROM payroll_runs WHERE month = ? AND year = ? AND status <> 'Cancelled'",
+            [month, year],
+        ).fetchone():
+            conn.close()
+            return jsonify({'error': 'Payroll already processed for this period'}), 409
+
+        period_start, period_end = _payroll_period_bounds(month, year)
+        rid = gen_id()
+        conn.execute(
+            "INSERT INTO payroll_runs "
+            "(run_id, month, year, processed_at, status, adjustment_of_run_id) "
+            "VALUES (?, ?, ?, ?, 'Draft', ?)",
+            [rid, month, year, datetime.now(), adjustment_of_run_id],
+        )
+        employees = conn.execute(
+            "SELECT u.emp_id, s.basic, s.hra, s.allowances, s.deductions "
+            "FROM users u JOIN salary_structures s ON s.struct_id = ("
+            "SELECT s2.struct_id FROM salary_structures s2 "
+            "WHERE s2.emp_id = u.emp_id AND s2.effective_from <= ? "
+            "AND (s2.effective_to IS NULL OR s2.effective_to >= ?) "
+            "ORDER BY s2.effective_from DESC LIMIT 1"
+            ") WHERE u.status IN ('Active', 'Onboarding') ORDER BY u.emp_id",
+            [period_end, period_start],
+        ).fetchall()
+        for emp_id, basic, hra, allowances, deductions in employees:
+            gross, total_ded, net, pf, esi, pt = calc_payroll_item(
+                emp_id, float(basic), float(hra), float(allowances), float(deductions)
+            )
+            conn.execute(
+                "INSERT INTO payroll_items "
+                "(item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [gen_id(), rid, emp_id, gross, total_ded, net, pf, esi, pt],
+            )
         conn.close()
-        return jsonify({'error': 'Payroll already processed for this period'}), 409
-    rid = gen_id()
-    conn.execute("INSERT INTO payroll_runs (run_id, month, year, processed_at, status) VALUES (?, ?, ?, ?, ?)", [rid, month, year, datetime.now(), 'Draft'])
-    employees = conn.execute("SELECT u.emp_id, COALESCE(s.basic,0), COALESCE(s.hra,0), COALESCE(s.allowances,0), COALESCE(s.deductions,0) FROM users u LEFT JOIN salary_structures s ON u.emp_id = s.emp_id AND s.effective_from <= ? WHERE u.role = 'Employee'", [datetime.now().date()]).fetchall()
-    for e in employees:
-        gross, total_ded, net, pf, esi, pt = calc_payroll_item(e[0], float(e[1]), float(e[2]), float(e[3]), float(e[4]))
-        conn.execute("INSERT INTO payroll_items (item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                     [gen_id(), rid, e[0], gross, total_ded, net, pf, esi, pt])
-    conn.close()
-    return jsonify({'message': f'Payroll run created for {month}/{year}'}), 201
+    except Exception:
+        conn.close()
+        raise
+    return jsonify({
+        'message': f'Payroll run created for {month}/{year}',
+        'run_id': rid,
+        'status': 'Draft',
+    }), 201
+
+
+@app.route('/api/v1/payroll-runs/<int:rid>/submit', methods=['POST'])
+@app.route('/api/payroll-runs/<int:rid>/submit', methods=['POST'])
+@finance_or_admin_required
+@idempotent
+def submit_payroll(rid):
+    row = _payroll_run(rid)
+    if not row:
+        return jsonify({'error': 'Payroll run not found'}), 404
+    if row[3] != 'Draft':
+        return jsonify({'error': f"Payroll run is already {row[3]}"}), 409
+
+    actor = session['emp_id']
+    now = datetime.now()
+    try:
+        with outbox.transaction() as conn:
+            conn.execute(
+                "UPDATE payroll_runs SET status = 'Submitted', submitted_by = ?, submitted_at = ? "
+                "WHERE run_id = ? AND status = 'Draft'",
+                [actor, now, rid],
+            )
+            transitioned = conn.execute(
+                "SELECT status, submitted_by FROM payroll_runs WHERE run_id = ?", [rid]
+            ).fetchone()
+            if not transitioned or transitioned[0] != 'Submitted' or transitioned[1] != actor:
+                return jsonify({'error': 'Payroll run state changed; reload and retry'}), 409
+            _record_payroll_approval(conn, rid, actor, 'Submit', 'Draft', 'Submitted')
+    except Exception as exc:
+        logger.warning('submit_payroll failed: %s', exc)
+        return jsonify({'error': 'Failed to submit payroll'}), 500
+    audit_log(actor, 'PAYROLL_SUBMIT', f'Payroll run {rid} submitted',
+              entity='payroll_runs', entity_id=rid, before={'status': 'Draft'}, after={'status': 'Submitted'})
+    return jsonify({'message': 'Payroll submitted', 'run_id': rid, 'status': 'Submitted'}), 200
+
+
+@app.route('/api/v1/payroll-runs/<int:rid>/approve', methods=['POST'])
+@app.route('/api/payroll-runs/<int:rid>/approve', methods=['POST'])
+@finance_or_admin_required
+@idempotent
+def approve_payroll(rid):
+    row = _payroll_run(rid)
+    if not row:
+        return jsonify({'error': 'Payroll run not found'}), 404
+    if row[3] != 'Submitted':
+        return jsonify({'error': f"Payroll run is already {row[3]}"}), 409
+    actor = session['emp_id']
+    if row[4] == actor:
+        return jsonify({'error': 'The submitter cannot approve their own payroll run'}), 403
+
+    now = datetime.now()
+    try:
+        with outbox.transaction() as conn:
+            conn.execute(
+                "UPDATE payroll_runs SET status = 'Approved', approved_by = ?, approved_at = ? "
+                "WHERE run_id = ? AND status = 'Submitted' AND submitted_by <> ?",
+                [actor, now, rid, actor],
+            )
+            transitioned = conn.execute(
+                "SELECT status, approved_by FROM payroll_runs WHERE run_id = ?", [rid]
+            ).fetchone()
+            if not transitioned or transitioned[0] != 'Approved' or transitioned[1] != actor:
+                return jsonify({'error': 'Payroll run state changed; reload and retry'}), 409
+            _record_payroll_approval(conn, rid, actor, 'Approve', 'Submitted', 'Approved')
+    except Exception as exc:
+        logger.warning('approve_payroll failed: %s', exc)
+        return jsonify({'error': 'Failed to approve payroll'}), 500
+    audit_log(actor, 'PAYROLL_APPROVE', f'Payroll run {rid} approved',
+              entity='payroll_runs', entity_id=rid, before={'status': 'Submitted'}, after={'status': 'Approved'})
+    return jsonify({'message': 'Payroll approved', 'run_id': rid, 'status': 'Approved'}), 200
 
 
 @app.route('/api/v1/payroll-runs/<int:rid>/finalize', methods=['POST'])
 @app.route('/api/payroll-runs/<int:rid>/finalize', methods=['POST'])
-@hr_or_admin_required
+@finance_or_admin_required
 @idempotent
 def finalize_payroll(rid):
+    row = _payroll_run(rid)
+    if not row:
+        return jsonify({'error': 'Payroll run not found'}), 404
+    if row[3] != 'Approved':
+        return jsonify({'error': 'Only an Approved payroll run can be finalized'}), 409
+    actor = session['emp_id']
+    now = datetime.now()
     try:
         with outbox.transaction() as conn:
-            conn.execute("UPDATE payroll_runs SET status = 'Finalized' WHERE run_id = ?", [rid])
+            conn.execute(
+                "UPDATE payroll_runs SET status = 'Finalized', finalized_at = ? "
+                "WHERE run_id = ? AND status = 'Approved'",
+                [now, rid],
+            )
+            transitioned = conn.execute(
+                "SELECT status, finalized_at FROM payroll_runs WHERE run_id = ?", [rid]
+            ).fetchone()
+            if not transitioned or transitioned[0] != 'Finalized' or transitioned[1] != now:
+                return jsonify({'error': 'Payroll run state changed; reload and retry'}), 409
+            _record_payroll_approval(conn, rid, actor, 'Finalize', 'Approved', 'Finalized')
             outbox.enqueue(conn, 'payroll.finalized', 'payroll_runs', str(rid), {'run_id': rid})
-    except Exception as e:
-        logger.warning('finalize_payroll failed: %s', e)
+    except Exception as exc:
+        logger.warning('finalize_payroll failed: %s', exc)
         return jsonify({'error': 'Failed to finalize payroll'}), 500
-    return jsonify({'message': 'Payroll finalized'}), 200
+    audit_log(actor, 'PAYROLL_FINALIZE', f'Payroll run {rid} finalized',
+              entity='payroll_runs', entity_id=rid, before={'status': 'Approved'}, after={'status': 'Finalized'})
+    return jsonify({'message': 'Payroll finalized', 'run_id': rid, 'status': 'Finalized'}), 200
 
 
 @app.route('/api/v1/payroll-runs/<int:rid>/items')
 @app.route('/api/payroll-runs/<int:rid>/items')
-@hr_or_admin_required
+@finance_or_admin_required
 def payroll_items(rid):
     conn = get_db()
     rows = conn.execute(
@@ -2968,7 +3329,7 @@ def payroll_items(rid):
 @app.route('/api/payslip/<int:run_id>/<emp_id>')
 @login_required
 def get_payslip(run_id, emp_id):
-    if session.get('role') != 'Admin' and session['emp_id'] != emp_id:
+    if session.get('role') not in ('Admin', 'Finance') and session['emp_id'] != emp_id:
         return jsonify({'error': 'Forbidden'}), 403
     conn = get_db()
     row = conn.execute(
@@ -3605,8 +3966,15 @@ def generate_payslip_pdf(run_id, emp_id):
 @app.route('/api/payroll-runs/<int:rid>/payslip-pdf/<emp_id>')
 @login_required
 def payslip_pdf(rid, emp_id):
-    if session.get('role') != 'Admin' and session['emp_id'] != emp_id:
+    if session.get('role') not in ('Admin', 'Finance') and session['emp_id'] != emp_id:
         return jsonify({'error': 'Forbidden'}), 403
+    conn = get_db()
+    run = conn.execute("SELECT status FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()
+    conn.close()
+    if not run:
+        return jsonify({'error': 'Not found'}), 404
+    if run[0] != 'Finalized':
+        return jsonify({'error': 'Payslips are available only after payroll finalization'}), 409
     pdf = generate_payslip_pdf(rid, emp_id)
     if not pdf:
         return jsonify({'error': 'Not found'}), 404
@@ -3615,9 +3983,16 @@ def payslip_pdf(rid, emp_id):
 
 @app.route('/api/v1/payroll-runs/<int:rid>/bank-file')
 @app.route('/api/payroll-runs/<int:rid>/bank-file')
-@hr_or_admin_required
+@finance_or_admin_required
 def bank_file_export(rid):
     conn = get_db()
+    run = conn.execute("SELECT status FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()
+    if not run:
+        conn.close()
+        return jsonify({'error': 'Run not found'}), 404
+    if run[0] != 'Finalized':
+        conn.close()
+        return jsonify({'error': 'Bank file is available only for Finalized payroll runs'}), 409
     rows = conn.execute(
         "SELECT p.emp_id, u.name, p.net_salary FROM payroll_items p JOIN users u ON p.emp_id = u.emp_id WHERE p.run_id = ? ORDER BY u.name",
         [rid]
@@ -3653,13 +4028,16 @@ def calc_tds(annual_gross):
 
 @app.route('/api/v1/payroll-runs/<int:rid>/tds-report')
 @app.route('/api/payroll-runs/<int:rid>/tds-report')
-@hr_or_admin_required
+@finance_or_admin_required
 def tds_report(rid):
     conn = get_db()
-    run = conn.execute("SELECT month, year FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()
+    run = conn.execute("SELECT month, year, status FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()
     if not run:
         conn.close()
         return jsonify({'error': 'Run not found'}), 404
+    if run[2] != 'Finalized':
+        conn.close()
+        return jsonify({'error': 'TDS report is available only for Finalized payroll runs'}), 409
     rows = conn.execute(
         "SELECT p.emp_id, u.name, p.gross_salary FROM payroll_items p JOIN users u ON p.emp_id = u.emp_id WHERE p.run_id = ?",
         [rid]
@@ -4990,6 +5368,8 @@ def delete_user(emp_id):
         ('onboarding_tasks', 'emp_id'),
         ('offboarding_tasks', 'emp_id'), ('exit_interviews', 'emp_id'),
         ('salary_structures', 'emp_id'), ('payroll_items', 'emp_id'),
+        ('payroll_approvals', 'actor_emp_id'), ('payroll_runs', 'submitted_by'),
+        ('payroll_runs', 'approved_by'),
         ('goals', 'emp_id'), ('performance_reviews', 'emp_id'),
         ('feedback_360', 'emp_id'), ('expense_claims', 'emp_id'),
         ('tickets', 'emp_id'), ('ticket_comments', 'emp_id'),
