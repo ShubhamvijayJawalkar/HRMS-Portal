@@ -125,11 +125,147 @@ def get_db():
     return conn
 
 
-def _get_shift_date_for_dt(emp_id, dt, conn):
-    row = conn.execute("SELECT shift_start FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if row and row[0] and row[0] != '24x7':
+# ── Shift model (service-layer rewrite inc 2) ──────────────────────────────
+# v1.0 keeps shifts on users.shift_start/shift_end (DuckDB + PG legacy).
+# v2.0 (public) moves them to the effective-dated shift_assignments table
+# (FR-ATT-17) and users has NO shift columns — init_db must not re-add them.
+_SHIFT_MODEL_CACHE: dict = {}
+
+
+def _shift_model() -> bool:
+    """True when the connected schema stores shifts in ``shift_assignments``
+    (v2.0 public); False on the v1.0 shape (``users.shift_start/end``).
+
+    Introspected once per process per backend+schema and cached — the same
+    pattern the DB adapter uses for boolean columns.
+    """
+    backend = os.getenv('APP_DB', 'duckdb').lower()
+    is_pg = backend in ('postgres', 'postgresql', 'pg')
+    if is_pg:
+        import db_backend
+        schema = db_backend.app_schema()
+    else:
+        schema = 'main'
+    key = f"{backend}:{schema}"
+    if key not in _SHIFT_MODEL_CACHE:
+        conn = get_db()
         try:
-            parts = row[0].split(':')
+            row = conn.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = ? AND table_name = 'shift_assignments'",
+                [schema],
+            ).fetchone()
+            _SHIFT_MODEL_CACHE[key] = bool(row)
+        except Exception:
+            _SHIFT_MODEL_CACHE[key] = False
+        finally:
+            conn.close()
+    return _SHIFT_MODEL_CACHE[key]
+
+
+def _fmt_shift_time(v):
+    """Normalise a shift time (str 'HH:MM' or datetime.time) to 'HH:MM'."""
+    if v is None:
+        return None
+    if hasattr(v, 'strftime'):
+        return v.strftime('%H:%M')
+    s = str(v)
+    return s[:5] if len(s) >= 5 else s
+
+
+def _parse_shift_time(s):
+    """'HH:MM' or '24x7' → (datetime.time | None, is_24x7)."""
+    if not s:
+        return None, False
+    s = str(s).strip()
+    if s.lower() == '24x7':
+        return None, True
+    try:
+        return datetime.strptime(s[:5], '%H:%M').time(), False
+    except Exception:
+        return None, False
+
+
+def get_shift(emp_id, conn=None, on_date=None):
+    """Resolve an employee's current shift as ('HH:MM', 'HH:MM') strings, or
+    ('24x7', '24x7') for round-the-clock. Returns (None, None) when unset.
+
+    v1.0 shape: static ``users.shift_start/shift_end`` columns.
+    v2.0 shape: the effective-dated ``shift_assignments`` row covering
+    ``on_date`` (default today), FR-ATT-17.
+    """
+    own = conn is None
+    if own:
+        conn = get_db()
+    try:
+        if on_date is None:
+            on_date = datetime.now().date()
+        if _shift_model():
+            row = conn.execute(
+                "SELECT shift_type, shift_start, shift_end FROM shift_assignments "
+                "WHERE emp_id = ? AND effective_from <= ? "
+                "AND (effective_to IS NULL OR effective_to >= ?) "
+                "ORDER BY effective_from DESC LIMIT 1",
+                [emp_id, on_date, on_date],
+            ).fetchone()
+            if not row:
+                return None, None
+            stype, sstart, send = row[0], row[1], row[2]
+            if stype == '24x7':
+                return '24x7', '24x7'
+            return _fmt_shift_time(sstart), _fmt_shift_time(send)
+        row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+        if not row:
+            return None, None
+        return (row[0] or None), (row[1] or None)
+    finally:
+        if own:
+            conn.close()
+
+
+def set_shift(emp_id, shift_start, shift_end, conn=None, weekly_off='Sat,Sun', effective_from=None):
+    """Persist an employee's (static) shift.
+
+    v1.0 shape: ``users.shift_start/shift_end`` columns.
+    v2.0 shape: replace that employee's ``shift_assignments`` rows with one
+    open-ended row — the v1.0 one-shift-per-employee equivalent. Effective-dated
+    scheduling (multiple periods) is a Phase-4 concern (FR-ATT-17).
+    """
+    if not shift_start and not shift_end:
+        return
+    if effective_from is None:
+        effective_from = datetime.now().date()
+    own = conn is None
+    if own:
+        conn = get_db()
+    try:
+        if _shift_model():
+            start_t, start_24x7 = _parse_shift_time(shift_start)
+            end_t, end_24x7 = _parse_shift_time(shift_end)
+            stype = '24x7' if (start_24x7 or end_24x7) else 'Fixed'
+            if stype == '24x7':
+                start_t = datetime.strptime('09:00', '%H:%M').time()
+                end_t = datetime.strptime('18:00', '%H:%M').time()
+            conn.execute("DELETE FROM shift_assignments WHERE emp_id = ?", [emp_id])
+            conn.execute(
+                "INSERT INTO shift_assignments (emp_id, shift_type, shift_start, shift_end, weekly_off_pattern, effective_from, effective_to) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL)",
+                [emp_id, stype, start_t, end_t, weekly_off, effective_from],
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET shift_start = ?, shift_end = ? WHERE emp_id = ?",
+                [shift_start, shift_end, emp_id],
+            )
+    finally:
+        if own:
+            conn.close()
+
+
+def _get_shift_date_for_dt(emp_id, dt, conn):
+    shift_start_str, _ = get_shift(emp_id, conn)
+    if shift_start_str and shift_start_str != '24x7':
+        try:
+            parts = shift_start_str.split(':')
             h, m = int(parts[0]), int(parts[1])
             shift_start_today = dt.replace(hour=h, minute=m, second=0, microsecond=0)
             if dt >= shift_start_today:
@@ -733,11 +869,21 @@ def init_db():
     )
 
     # ── Migrate: add new columns if missing ───────────────────────
-    for col in ['designation', 'manager_emp_id', 'phone', 'date_of_birth', 'date_of_joining', 'address', 'emergency_contact_name', 'emergency_contact_phone', 'shift_start', 'shift_end']:
+    for col in ['designation', 'manager_emp_id', 'phone', 'date_of_birth', 'date_of_joining', 'address', 'emergency_contact_name', 'emergency_contact_phone']:
         try:
             conn.execute(f"ALTER TABLE users ADD COLUMN {col} VARCHAR")
         except Exception:
             pass
+
+    # shift_start/shift_end live on users ONLY in the v1.0 model. On v2.0
+    # public the ALTER must NOT fire — the app must leave the target schema
+    # untouched (it would otherwise mutate it at every boot).
+    if not _shift_model():
+        for col in ['shift_start', 'shift_end']:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} VARCHAR")
+            except Exception:
+                pass
 
     result = conn.execute("SELECT COUNT(*) FROM break_types").fetchone()[0]
     if result == 0:
@@ -1041,7 +1187,13 @@ def init_db():
         )
 
     # ── Assign default shift 20:00-05:00 to all employees ────────
-    conn.execute("UPDATE users SET shift_start = '20:00', shift_end = '05:00' WHERE shift_start IS NULL")
+    if _shift_model():
+        for (eid,) in conn.execute("SELECT emp_id FROM users").fetchall():
+            s, _e = get_shift(eid, conn)
+            if not s:
+                set_shift(eid, '20:00', '05:00', conn=conn)
+    else:
+        conn.execute("UPDATE users SET shift_start = '20:00', shift_end = '05:00' WHERE shift_start IS NULL")
 
     # ── Fix seed session/break dates to use shift-based dates ─────
     _fix_seed_shift_dates(conn, now)
@@ -1122,16 +1274,7 @@ def gen_id():
 
 def _get_shift_start_dt(emp_id, conn=None, target_date=None):
     now = datetime.now()
-    if conn is None:
-        conn = get_db()
-        close = True
-    else:
-        close = False
-    row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if close:
-        conn.close()
-    shift_start_str = row[0] if row else None
-    shift_end_str = row[1] if row else None
+    shift_start_str, _ = get_shift(emp_id, conn)
     if shift_start_str and shift_start_str != '24x7':
         try:
             parts = shift_start_str.split(':')
@@ -1151,16 +1294,7 @@ def _get_shift_start_dt(emp_id, conn=None, target_date=None):
 
 
 def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
-    if conn is None:
-        conn = get_db()
-        close = True
-    else:
-        close = False
-    row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if close:
-        conn.close()
-    shift_start_str = row[0] if row else None
-    shift_end_str = row[1] if row else None
+    shift_start_str, shift_end_str = get_shift(emp_id, conn)
     if shift_start_str and shift_start_str != '24x7' and shift_end_str:
         try:
             sp = shift_start_str.split(':')
@@ -1179,7 +1313,7 @@ def _get_shift_end_dt(emp_id, shift_start_dt, conn=None):
 def get_user(emp_id):
     conn = get_db()
     u = conn.execute(
-        "SELECT emp_id, name, email, role, status, department, allow_login, allow_breaks, designation, manager_emp_id, phone, date_of_birth, date_of_joining, address, emergency_contact_name, emergency_contact_phone, shift_start, shift_end FROM users WHERE emp_id = ?",
+        "SELECT emp_id, name, email, role, status, department, allow_login, allow_breaks, designation, manager_emp_id, phone, date_of_birth, date_of_joining, address, emergency_contact_name, emergency_contact_phone FROM users WHERE emp_id = ?",
         [emp_id]
     ).fetchone()
     conn.close()
@@ -2093,7 +2227,7 @@ def offers_api():
     oid = gen_id()
     try:
         with outbox.transaction() as conn:
-            conn.execute("INSERT INTO offer_letters VALUES (?, ?, ?, ?, ?, ?, ?)",
+            conn.execute("INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
                          [oid, data['candidate_id'], float(data['offered_salary']), datetime.now().date(), 'Pending', None, data.get('notes')])
             cand = conn.execute("SELECT name, email FROM candidates WHERE candidate_id = ?", [data['candidate_id']]).fetchone()
             payload = {'offer_id': oid, 'candidate_id': data['candidate_id'], 'salary': float(data['offered_salary'])}
@@ -2299,7 +2433,7 @@ def payroll_runs_api():
         conn.close()
         return jsonify({'error': 'Payroll already processed for this period'}), 409
     rid = gen_id()
-    conn.execute("INSERT INTO payroll_runs VALUES (?, ?, ?, ?, ?)", [rid, month, year, datetime.now(), 'Draft'])
+    conn.execute("INSERT INTO payroll_runs (run_id, month, year, processed_at, status) VALUES (?, ?, ?, ?, ?)", [rid, month, year, datetime.now(), 'Draft'])
     employees = conn.execute("SELECT u.emp_id, COALESCE(s.basic,0), COALESCE(s.hra,0), COALESCE(s.allowances,0), COALESCE(s.deductions,0) FROM users u LEFT JOIN salary_structures s ON u.emp_id = s.emp_id AND s.effective_from <= ? WHERE u.role = 'Employee'", [datetime.now().date()]).fetchall()
     for e in employees:
         gross, total_ded, net, pf, esi, pt = calc_payroll_item(e[0], float(e[1]), float(e[2]), float(e[3]), float(e[4]))
@@ -2603,9 +2737,10 @@ def tickets_api():
         return jsonify({'error': 'subject required'}), 400
     tid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO tickets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [tid, session['emp_id'], data['subject'], data.get('description'), data.get('category'), data.get('priority', 'Medium'),
-                  'Open', None, datetime.now(), None, None])
+    conn.execute(
+        "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, status, assigned_to, created_at, updated_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [tid, session['emp_id'], data['subject'], data.get('description'), data.get('category'), data.get('priority', 'Medium'),
+         'Open', None, datetime.now(), None, None])
     conn.close()
     return jsonify({'message': 'Ticket created', 'id': tid}), 201
 
@@ -2647,7 +2782,7 @@ def add_ticket_comment(tid):
         conn.close()
         return jsonify({'error': 'Ticket not found'}), 404
     cid = gen_id()
-    conn.execute("INSERT INTO ticket_comments VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], datetime.now()])
+    conn.execute("INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], datetime.now()])
     conn.execute("UPDATE tickets SET updated_at = ? WHERE ticket_id = ?", [datetime.now(), tid])
     conn.close()
     return jsonify({'message': 'Comment added', 'id': cid}), 201
@@ -3846,9 +3981,7 @@ def get_user_calendar():
         [start_date, end_date]
     ).fetchall()
 
-    user_row = conn.execute(
-        "SELECT shift_start, shift_end FROM users WHERE emp_id = ?", [emp_id]
-    ).fetchone()
+    shift_start, shift_end = get_shift(emp_id, conn)
 
     conn.close()
 
@@ -3893,8 +4026,8 @@ def get_user_calendar():
         d = h[0].isoformat() if h[0] else None
         if d: holiday_map[d] = h[1]
 
-    shift_start = user_row[0] if user_row and user_row[0] else None
-    shift_end = user_row[1] if user_row and user_row[1] else None
+    shift_start = shift_start or None
+    shift_end = shift_end or None
 
     return jsonify({
         'sessions': sess_map,
@@ -4159,14 +4292,31 @@ def get_users():
         params.append(dept_filter)
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
     total = conn.execute(f"SELECT COUNT(*) FROM users{where_clause}", params).fetchone()[0]
-    rows = conn.execute(
-        f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [per_page, offset]
-    ).fetchall()
-    conn.close()
-    return jsonify({
-        'total': total, 'page': page, 'per_page': per_page,
-        'data': [{
+    if _shift_model():
+        # v2.0 (public): users has no shift columns — resolve per row from
+        # the effective-dated shift_assignments (FR-ATT-17).
+        rows = conn.execute(
+            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset]
+        ).fetchall()
+        data = []
+        for r in rows:
+            sstart, send = get_shift(r[0], conn)
+            data.append({
+                'emp_id': r[0], 'name': r[1], 'email': r[2], 'role': r[3],
+                'status': r[4], 'department': r[5],
+                'first_login': r[6].strftime('%I:%M %p') if r[6] else 'N/A',
+                'allow_login': int(r[7]) if r[7] else 1,
+                'allow_breaks': int(r[8]) if r[8] else 1,
+                'shift_start': sstart or '',
+                'shift_end': send or ''
+            })
+    else:
+        rows = conn.execute(
+            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset]
+        ).fetchall()
+        data = [{
             'emp_id': r[0], 'name': r[1], 'email': r[2], 'role': r[3],
             'status': r[4], 'department': r[5],
             'first_login': r[6].strftime('%I:%M %p') if r[6] else 'N/A',
@@ -4175,6 +4325,10 @@ def get_users():
             'shift_start': r[9] or '',
             'shift_end': r[10] or ''
         } for r in rows]
+    conn.close()
+    return jsonify({
+        'total': total, 'page': page, 'per_page': per_page,
+        'data': data
     }), 200
 
 
@@ -4192,15 +4346,26 @@ def add_user():
         conn.close()
         return jsonify({'error': 'Employee ID already exists'}), 409
     pwd = data.get('password', 'pass123')
-    conn.execute(
-        "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks, shift_start, shift_end) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?)",
-        [data['emp_id'], data['name'], data['email'], hash_password(pwd),
-         data.get('role', 'Employee'), data.get('department', ''),
-         data.get('designation', ''),
-         datetime.now(), datetime.now(),
-         int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1)),
-         data.get('shift_start', ''), data.get('shift_end', '')]
-    )
+    if _shift_model():
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?)",
+            [data['emp_id'], data['name'], data['email'], hash_password(pwd),
+             data.get('role', 'Employee'), data.get('department', ''),
+             data.get('designation', ''),
+             datetime.now(), datetime.now(),
+             int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1))]
+        )
+        set_shift(data['emp_id'], data.get('shift_start', ''), data.get('shift_end', ''), conn=conn)
+    else:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks, shift_start, shift_end) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?, ?, ?)",
+            [data['emp_id'], data['name'], data['email'], hash_password(pwd),
+             data.get('role', 'Employee'), data.get('department', ''),
+             data.get('designation', ''),
+             datetime.now(), datetime.now(),
+             int(data.get('allow_login', 1)), int(data.get('allow_breaks', 1)),
+             data.get('shift_start', ''), data.get('shift_end', '')]
+        )
     conn.close()
     audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}',
               entity='users', entity_id=data['emp_id'], after={'role': data.get('role'), 'department': data.get('department')})
@@ -4231,13 +4396,14 @@ def get_user_route(emp_id):
     u = get_user(emp_id)
     if not u:
         return jsonify({'error': 'Not found'}), 404
+    sstart, send = get_shift(emp_id)
     return jsonify({
         'emp_id': u[0], 'name': u[1], 'email': u[2], 'role': u[3],
         'status': u[4], 'department': u[5],
         'allow_login': int(u[6]) if u[6] else 1,
         'allow_breaks': int(u[7]) if u[7] else 1,
-        'shift_start': u[16] or '' if len(u) > 16 else '',
-        'shift_end': u[17] or '' if len(u) > 17 else ''
+        'shift_start': sstart or '',
+        'shift_end': send or ''
     }), 200
 
 
@@ -4246,12 +4412,21 @@ def get_user_route(emp_id):
 def update_user(emp_id):
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    conn.execute(
-        "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ?, shift_start = ?, shift_end = ? WHERE emp_id = ?",
-        [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
-         data.get('status', 'Active'), int(data.get('allow_login', 1)),
-         int(data.get('allow_breaks', 1)), data.get('shift_start', ''), data.get('shift_end', ''), emp_id]
-    )
+    if _shift_model():
+        conn.execute(
+            "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ? WHERE emp_id = ?",
+            [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
+             data.get('status', 'Active'), int(data.get('allow_login', 1)),
+             int(data.get('allow_breaks', 1)), emp_id]
+        )
+        set_shift(emp_id, data.get('shift_start', ''), data.get('shift_end', ''), conn=conn)
+    else:
+        conn.execute(
+            "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ?, shift_start = ?, shift_end = ? WHERE emp_id = ?",
+            [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
+             data.get('status', 'Active'), int(data.get('allow_login', 1)),
+             int(data.get('allow_breaks', 1)), data.get('shift_start', ''), data.get('shift_end', ''), emp_id]
+        )
     conn.close()
     audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}', entity='users', entity_id=emp_id)
     return jsonify({'message': 'User updated'}), 200

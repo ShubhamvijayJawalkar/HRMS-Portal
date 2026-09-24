@@ -110,6 +110,13 @@ def _post(cl, tok, url, body=None):
     return cl.post(url, json=body, headers=headers)
 
 
+def _put(cl, tok, url, body=None):
+    headers = {"X-CSRF-Token": tok}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    return cl.put(url, json=body, headers=headers)
+
+
 def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     """Fire the core state-changing flows against ``public`` exactly as the
     legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
@@ -126,6 +133,15 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
         pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
+        pc.execute("DELETE FROM ticket_comments WHERE comment = 'probe comment'")
+        pc.execute("DELETE FROM tickets WHERE subject = 'public write probe'")
+        pc.execute("DELETE FROM offer_letters WHERE candidate_id IN "
+                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM candidates WHERE email LIKE 'probe-cand-%'")
+        pc.execute("DELETE FROM payroll_items WHERE run_id IN "
+                   "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
+        pc.execute("DELETE FROM payroll_runs WHERE year >= 2099")
+        pc.execute("DELETE FROM password_reset_tokens WHERE emp_id = 'EMP002'")
 
     def run(name, fn):
         try:
@@ -198,6 +214,150 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             return 409
         return _post(cl_a, tok_a, f"/api/break-approvals/{target['approval_id']}/approve").status_code
     run("break-approvals(approve)", approve_lunch)
+
+    # ── service-layer rewrite: shifts resolve from shift_assignments, and
+    #    init_db must NOT have re-added users.shift_start/shift_end ──────────
+    def shift_write():
+        cur = cl_a.get("/api/users/EMP002").get_json()
+        if not cur:
+            return 409
+        body = {"name": cur["name"], "email": cur["email"], "role": "Employee",
+                "department": cur.get("department") or "Operations", "status": "Active",
+                "shift_start": "10:00", "shift_end": "19:00"}
+        rc = _put(cl_a, tok_a, "/api/users/EMP002", body).status_code
+        if rc != 200:
+            return rc
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT shift_type, to_char(shift_start, 'HH24:MI'), to_char(shift_end, 'HH24:MI') "
+                "FROM shift_assignments WHERE emp_id = 'EMP002'",
+            ).fetchone()
+            cols = [r[0] for r in pc.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'users'",
+            )]
+        ok = row is not None and row[0] == 'Fixed' and row[1] == '10:00' and row[2] == '19:00'
+        return 200 if ok and 'shift_start' not in cols else 409
+    run("shifts(assignment write)", shift_write)
+
+    # ── password-reset journey (public POSTs, no session required) ─────────
+    def forgot_password():
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute("SELECT email FROM users WHERE emp_id = 'EMP002'").fetchone()
+        if not row:
+            return 409
+        r = _post(cl, tok, "/api/forgot-password",
+                  {"emp_id": "EMP002", "email": row[0]})
+        if r.status_code == 200 and r.is_json:
+            state["reset_token"] = (r.get_json() or {}).get("token")
+        return r.status_code
+    run("auth(forgot-password)", forgot_password)
+
+    def reset_password_flow():
+        t = state.get("reset_token")
+        if not t:
+            return 409
+        return _post(cl, tok, "/api/reset-password",
+                     {"token": t, "new_password": "pass123"}).status_code
+    run("auth(reset-password)", reset_password_flow)
+
+    # ── help-desk journey: employee creates + comments, admin resolves ─────
+    def ticket_create():
+        r = _post(cl, tok, "/api/tickets",
+                  {"subject": "public write probe", "description": "ticket probe",
+                   "category": "IT", "priority": "Medium"})
+        if r.status_code == 201 and r.is_json:
+            state["ticket_id"] = (r.get_json() or {}).get("id")
+        return r.status_code
+    run("tickets(create)", ticket_create)
+
+    def ticket_comment():
+        tid = state.get("ticket_id")
+        if not tid:
+            return 409
+        return _post(cl, tok, f"/api/tickets/{tid}/comment", {"comment": "probe comment"}).status_code
+    run("tickets(comment)", ticket_comment)
+
+    def ticket_resolve():
+        tid = state.get("ticket_id")
+        if not tid:
+            return 409
+        return _put(cl_a, tok_a, f"/api/tickets/{tid}/status", {"status": "Resolved"}).status_code
+    run("tickets(resolve)", ticket_resolve)
+
+    # ── ATS journey: candidate → offered → offer sent → accepted (outbox) ─
+    cand_marker = f"probe-cand-{os.getpid()}@company.com"
+
+    def candidate_create():
+        r = _post(cl_a, tok_a, "/api/candidates",
+                  {"name": "Probe Candidate", "email": cand_marker,
+                   "phone": "9999900000", "resume_text": "public write probe"})
+        if r.status_code == 201 and r.is_json:
+            state["candidate_id"] = (r.get_json() or {}).get("id")
+        return r.status_code
+    run("ats(candidate create)", candidate_create)
+
+    def candidate_offered():
+        cid = state.get("candidate_id")
+        if not cid:
+            return 409
+        return _put(cl_a, tok_a, f"/api/candidates/{cid}/status", {"status": "Offered"}).status_code
+    run("ats(candidate offered)", candidate_offered)
+
+    def offer_send():
+        cid = state.get("candidate_id")
+        if not cid:
+            return 409
+        r = _post(cl_a, tok_a, "/api/offers", {"candidate_id": cid, "offered_salary": 600000})
+        if r.status_code == 201 and r.is_json:
+            state["offer_id"] = (r.get_json() or {}).get("id")
+        return r.status_code
+    run("ats(offer send)", offer_send)
+
+    def offer_accept():
+        oid = state.get("offer_id")
+        if not oid:
+            return 409
+        return _post(cl_a, tok_a, f"/api/offers/{oid}/accept").status_code
+    run("ats(offer accept)", offer_accept)
+
+    # ── payroll exports: create + finalize a run, then bank-file + TDS ─────
+    pay_year = 2099 + (os.getpid() % 50)
+
+    def payroll_create():
+        r = _post(cl_a, tok_a, "/api/payroll-runs", {"month": 1, "year": pay_year})
+        if r.status_code != 201:
+            return r.status_code
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT run_id FROM payroll_runs WHERE month = 1 AND year = %s", [pay_year],
+            ).fetchone()
+        if not row:
+            return 409
+        state["run_id"] = row[0]
+        return 201
+    run("payroll(run create)", payroll_create)
+
+    def payroll_finalize():
+        rid = state.get("run_id")
+        if not rid:
+            return 409
+        return _post(cl_a, tok_a, f"/api/payroll-runs/{rid}/finalize").status_code
+    run("payroll(finalize)", payroll_finalize)
+
+    def bank_file():
+        rid = state.get("run_id")
+        if not rid:
+            return 409
+        return cl_a.get(f"/api/payroll-runs/{rid}/bank-file").status_code
+    run("payroll(bank-file)", bank_file)
+
+    def tds_report():
+        rid = state.get("run_id")
+        if not rid:
+            return 409
+        return cl_a.get(f"/api/payroll-runs/{rid}/tds-report").status_code
+    run("payroll(tds-report)", tds_report)
 
     # ── CC-07 idempotency (same key twice -> stored response replay) ─────
     run("users(create) verify GETs", lambda: cl_a.get(f"/api/users/{uniq}").status_code)

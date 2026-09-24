@@ -803,5 +803,168 @@ def test_outbox_payroll_notification_category(client):
     assert row and row[0] == 'Payroll'
 
 
+# ── Service-layer rewrite inc 2 (shifts: users.columns ⇄ shift_assignments) ──
+
+def test_shift_model_false_on_v1(client):
+    """DuckDB/legacy keep shifts on users.shift_start/shift_end."""
+    from app import _shift_model
+    assert _shift_model() is False
+
+
+def test_seed_default_shift_2020(client):
+    """Boot seed still gives every employee a 20:00-05:00 shift on v1.0."""
+    conn = get_db()
+    row = conn.execute("SELECT shift_start, shift_end FROM users WHERE emp_id = 'EMP002'").fetchone()
+    conn.close()
+    assert row == ('20:00', '05:00')
+
+
+def test_get_shift_resolves_v1_and_unknown(client):
+    from app import get_shift
+    assert get_shift('EMP002') == ('20:00', '05:00')
+    assert get_shift('NOPE') == (None, None)
+
+
+def test_get_shift_start_end_math(client):
+    """20:00-05:00 shift: start at 20:00 of the target day, end at 05:00 next day."""
+    from app import _get_shift_start_dt, _get_shift_end_dt
+    sd = _get_shift_start_dt('EMP002', target_date=datetime(2030, 1, 15))
+    assert sd == datetime(2030, 1, 15, 20, 0, 0)
+    ed = _get_shift_end_dt('EMP002', sd)
+    assert ed == datetime(2030, 1, 16, 5, 0, 0)
+
+
+def test_user_create_roundtrips_shift(client):
+    """Admin user create/update persists and surfaces shift_start/shift_end."""
+    from app import get_shift
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99020
+    resp = client.post('/api/users', json={
+        'emp_id': 'SHF1', 'name': 'Shift Tester', 'email': 'shf1@company.com',
+        'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+        'shift_start': '09:00', 'shift_end': '18:00',
+    })
+    assert resp.status_code == 201, resp.get_json()
+    assert get_shift('SHF1') == ('09:00', '18:00')
+    detail = client.get('/api/users/SHF1').get_json()
+    assert detail['shift_start'] == '09:00'
+    assert detail['shift_end'] == '18:00'
+    listed = client.get('/api/users?search=shf1').get_json()['data']
+    assert any(u['emp_id'] == 'SHF1' and u['shift_start'] == '09:00' for u in listed)
+    resp = client.put('/api/users/SHF1', json={
+        'name': 'Shift Tester', 'email': 'shf1@company.com', 'role': 'Employee',
+        'department': 'MIS', 'status': 'Active',
+        'shift_start': '22:00', 'shift_end': '06:00',
+    })
+    assert resp.status_code == 200, resp.get_json()
+    assert get_shift('SHF1') == ('22:00', '06:00')
+
+
+def test_shift_24x7_roundtrip(client):
+    """'24x7' stays a recognised shift and workday math falls back to midnight."""
+    from app import get_shift, _get_shift_start_dt
+    conn = get_db()
+    conn.execute("UPDATE users SET shift_start = '24x7', shift_end = '24x7' WHERE emp_id = 'EMP002'")
+    conn.close()
+    assert get_shift('EMP002') == ('24x7', '24x7')
+    sd = _get_shift_start_dt('EMP002', target_date=datetime(2030, 1, 15))
+    assert sd == datetime(2030, 1, 15, 0, 0, 0)
+
+
+def test_shift_assignments_branch_executes_on_duckdb(client):
+    """Exercise the v2.0 shift_assignments code path with DuckDB standing in
+    for public: create the table, flip the cached model flag, and drive
+    get_shift/set_shift/user-CRUD through the assignment branch (inc 2).
+    """
+    from app import _shift_model, _SHIFT_MODEL_CACHE, get_shift, set_shift, \
+        _get_shift_start_dt, _get_shift_end_dt
+    conn = get_db()
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS shift_assignments (emp_id VARCHAR, shift_type VARCHAR, "
+        "shift_start TIME, shift_end TIME, weekly_off_pattern VARCHAR, effective_from DATE, effective_to DATE)"
+    )
+    conn.close()
+    _SHIFT_MODEL_CACHE.clear()
+    try:
+        assert _shift_model() is True
+        assert get_shift('NOPE') == (None, None)
+        set_shift('EMP001', '11:00', '20:00')
+        assert get_shift('EMP001') == ('11:00', '20:00')
+        conn = get_db()
+        row = conn.execute(
+            "SELECT shift_type, effective_to FROM shift_assignments WHERE emp_id = 'EMP001'"
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'Fixed' and row[1] is None
+        set_shift('EMP001', '24x7', '24x7')
+        assert get_shift('EMP001') == ('24x7', '24x7')
+        sd = _get_shift_start_dt('EMP001', target_date=datetime(2030, 1, 15))
+        assert sd == datetime(2030, 1, 15, 0, 0, 0)
+        ed = _get_shift_end_dt('EMP001', datetime(2030, 1, 15, 9, 0))
+        assert ed == datetime(2030, 1, 16, 9, 0)  # 24x7 -> start + 1 day
+        # user CRUD through the public branch: INSERT without shift columns,
+        # shift persisted to shift_assignments, read back via get_shift.
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP001'
+            sess['name'] = 'Admin'
+            sess['role'] = 'Admin'
+            sess['session_id'] = 99022
+        resp = client.post('/api/users', json={
+            'emp_id': 'SHF2', 'name': 'Shift Two', 'email': 'shf2@company.com',
+            'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+            'shift_start': '13:00', 'shift_end': '22:00',
+        })
+        assert resp.status_code == 201, resp.get_json()
+        detail = client.get('/api/users/SHF2').get_json()
+        assert detail['shift_start'] == '13:00' and detail['shift_end'] == '22:00'
+        listed = client.get('/api/users?search=shf2').get_json()['data']
+        assert any(u['emp_id'] == 'SHF2' and u['shift_start'] == '13:00' for u in listed)
+        resp = client.put('/api/users/SHF2', json={
+            'name': 'Shift Two', 'email': 'shf2@company.com', 'role': 'Employee',
+            'department': 'MIS', 'status': 'Active', 'shift_start': '08:00', 'shift_end': '17:00',
+        })
+        assert resp.status_code == 200, resp.get_json()
+        assert get_shift('SHF2') == ('08:00', '17:00')
+    finally:
+        _SHIFT_MODEL_CACHE.clear()
+        conn = get_db()
+        conn.execute("DROP TABLE IF EXISTS shift_assignments")
+        conn.close()
+
+
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg')
+    or os.getenv('APP_DB_SCHEMA', 'legacy') != 'public',
+    reason='the v2.0 shift_assignments path runs on the pure public schema',
+)
+def test_shift_assignments_path_on_public():
+    """v2.0 public: shifts resolve from shift_assignments, users has no columns."""
+    from app import _shift_model, get_shift, set_shift, _get_shift_start_dt
+    assert _shift_model() is True
+    conn = get_db()
+    cols = [r[0] for r in conn.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'users'"
+    ).fetchall()]
+    conn.close()
+    assert 'shift_start' not in cols, 'init_db must not mutate public.users'
+    assert get_shift('EMP001') == ('20:00', '05:00')  # boot-seeded assignment
+    set_shift('EMP001', '10:30', '19:30')
+    assert get_shift('EMP001') == ('10:30', '19:30')
+    set_shift('EMP001', '24x7', '24x7')
+    assert get_shift('EMP001') == ('24x7', '24x7')
+    sd = _get_shift_start_dt('EMP001', target_date=datetime(2030, 1, 15))
+    assert sd == datetime(2030, 1, 15, 0, 0, 0)
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT shift_type, shift_start, shift_end, effective_to FROM shift_assignments WHERE emp_id = 'EMP001'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == '24x7' and rows[0][3] is None
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

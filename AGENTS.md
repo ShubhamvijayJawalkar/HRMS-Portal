@@ -146,6 +146,23 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   probe re-fires the leaves-apply twice with the same key on pure v2.0
   `public` and asserts a single row.
 
+## Phase 3b (service-layer rewrite inc 2 — shifts)
+- Shift access is schema-scoped: `get_shift`/`set_shift` helpers resolve an
+  employee's current shift from `shift_assignments` on v2.0 `public`
+  (FR-ATT-17, effective-dated, `Fixed`/`24x7`) and from
+  `users.shift_start/shift_end` on the v1.0 shape (DuckDB/legacy).
+  `_shift_model()` introspects `information_schema` once per backend+schema.
+- `init_db` no longer `ALTER`s `shift_start/shift_end` onto v2.0 `public`
+  users (it used to silently re-add the columns the migration removed, and the
+  boot seed now writes shifts through `set_shift`).
+- Write surfaces for the v2.0-reshaped tables use explicit column lists
+  (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
+  allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
+  inserts would mis-target columns on `public`.
+- 7 new unit tests; DuckDB suite is 53 passed / 4 skipped (PG-gated). The
+  v2.0 shift branch is additionally exercised on DuckDB via a stand-in
+  `shift_assignments` table (flips the model flag at runtime).
+
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
-- Seed data includes 10 users, break types (Tea, Coffee, Lunch), sample sessions/breaks
+- Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks

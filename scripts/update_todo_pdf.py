@@ -40,6 +40,12 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-24", "Service-layer rewrite inc 2 (shift_assignments): shift service helpers "
+     "(get_shift/set_shift) replace ~10 direct users.shift_start/end touch points; init_db no "
+     "longer mutates v2.0 public.users; user CRUD reroutes to shift_assignments; tickets/"
+     "offer_letters/payroll_runs INSERTs made schema-explicit; DuckDB unit suite 53 green. "
+     "Probe write section extended to 26 flows (forgot/reset pwd, shifts, tickets, ATS offer, "
+     "payroll bank-file/TDS) — PG re-run pending."),
     ("2026-09-23", "CC-07 idempotent writes done: @idempotent decorator on 9 POST routes, "
      "idempotency_keys DDL + hourly purge, 6 unit tests green (DuckDB 40 / PG 43 / PG+Redis 43), "
      "probe replays on pure v2.0 JSONB -> 86/86 GET + 12/12 write. Next: service-layer rewrite."),
@@ -66,8 +72,9 @@ TASKS = [
     ("Phase 3b", "Write-flow probe + salary_structures seed data fix (CC-05)", "11/11 core write flows green on public (21480fe)", DONE),
     ("Phase 3b", "CC-09 transactional outbox (outbox.py + scheduler + admin endpoints)", "Atomic business-write + event; backoff -> dead-letter (7e52f88)", DONE),
     ("Phase 3b", "CC-07 idempotency: @idempotent decorator + idempotency_keys wired for keyed POST retries", "Replay-without-duplicate, 409 on body reuse, claim released on failure; 6 unit tests green on every stack; probe replays on pure v2.0 JSONB", DONE),
-    ("Phase 3b", "Service-layer rewrite onto public: notifications.category, shift_assignments, expanded audit_log", "Second-largest remaining phase; several increments", PENDING),
-    ("Phase 3b", "Extend probe write section: forgot-password, payroll bank-file/TDS, ticket/ATS", "Measurable backlog for the service-layer rewrite", PENDING),
+    ("Phase 3b", "Service-layer rewrite inc 1: expanded audit_log (actor/entity/entity_id/before/after/request_id, CC-13) + notifications.category (FR-NOT-03)", "8ff66bc; +6 unit tests; DuckDB 46 green", DONE),
+    ("Phase 3b", "Service-layer rewrite inc 2: shift_assignments replaces users.shift_start/shift_end (FR-ATT-17); init_db no longer mutates v2.0 public.users", "get_shift/set_shift helpers reroute ~10 touch points; user CRUD + seed via set_shift; 7 new unit tests; DuckDB 53 green", DONE),
+    ("Phase 3b", "Extend probe write section: forgot-password, payroll bank-file/TDS, ticket/ATS + verify against a clean public schema", "Probe extended to 26 write flows in code; tickets/offer_letters/payroll_runs INSERTs made schema-explicit; PG re-run pending", IN_PROGRESS),
     # ── Phase 4 ──────────────────────────────────────────────────────────
     ("Phase 4", "Attendance finalisation job (FR-JOB-01)", "SRS §14 Phase 4", PENDING),
     ("Phase 4", "Maker-checker payroll (FR-PAY-06)", "SRS §14 Phase 4", PENDING),
@@ -79,12 +86,12 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "40 passed, 3 skipped (PG-gated CC-01/boolean tests)"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "53 passed, 4 skipped (PG-gated CC-01/boolean/shift-public tests)"),
     ("Unit suite (tests/test_app.py)", "PostgreSQL", "43 passed"),
     ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "43 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "15 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 45 identity + 4 natural keys"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "86/86 GET + 12/12 write flows (incl. CC-07 replay), 0 seed rejections"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "86/86 GET + 12/12 write flows (measured pre-inc-2); write section extended to 26 flows - re-run pending"),
 ]
 
 DONE_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p and t[3] == DONE) for p in sorted({t[0] for t in TASKS})}
@@ -135,7 +142,7 @@ def build_pdf(path: str) -> None:
     summary_rows = [
         ["Completed tasks", f"{done_total} / {len(TASKS)}"],
         ["Current branch", _current_branch()],
-        ["Next task", "Service-layer rewrite onto public - notifications.category, shift_assignments, expanded audit_log"],
+        ["Next task", "Service-layer rewrite inc 3: PG re-run of extended probe (26 write flows) against clean hrms_probe, then fix any surfaced drift"],
     ]
     for phase in sorted(TOTAL_BY_PHASE):
         summary_rows.append([f"{phase} progress", f"{DONE_BY_PHASE[phase]} / {TOTAL_BY_PHASE[phase]} done"])

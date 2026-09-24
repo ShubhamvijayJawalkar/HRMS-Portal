@@ -321,6 +321,9 @@ v2.0 `public` schema on a throwaway database and measures the API surface:
 ```bash
 docker exec hrms-pg psql -U postgres -c "DROP DATABASE IF EXISTS hrms_probe" \
     -c "CREATE DATABASE hrms_probe"
+# The probe measures the app against the pure v2.0 schema — apply it first.
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_probe \
+  alembic -c migrations/alembic.ini upgrade head
 APP_DB=postgres APP_DB_SCHEMA=public \
   DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms_probe \
   python scripts/probe_public_flip.py
@@ -335,6 +338,12 @@ idempotency replay check — the same leave apply sent twice with the same
 `init_db` boots and fully self-seeds against the v2.0 schema — **zero
 seed-time rejections**. That is a complete measured readiness picture, not a
 leap of faith.
+
+*Since that measurement the write section has been extended to 26 flows
+(service-layer rewrite inc 3): password reset journey, shift assignment
+write, help-desk ticket create/comment/resolve, ATS candidate → offer →
+accept, and payroll run create/finalize → bank-file + TDS exports. Re-running
+the probe against a clean `hrms_probe` is the next gate.*
 
 #### Adapter compat added this phase
 Three small, schema-scoped pieces in `db_backend.py` made the flip possible.
@@ -359,12 +368,33 @@ suites on PostgreSQL):
 which violates the v2.0 CC-05 `no_overlapping_structure` exclusion constraint.
 The older sample structure now belongs to EMP001 — a data fix, not a schema one.
 
-#### Remaining flip backlog
-No seed-time or measured runtime failures remain on the GET + core-write
-surface. The remaining flip work is the actual service-layer rewrite: the
-renames below (§8), plus POST surfaces beyond the 12 core flows (forgot
-password, payroll bank-file/TDS export, ticket/ATS writes) — each measurable
-by extending the probe's write section.
+#### Service-layer rewrite (renames + shifted columns)
+
+The rename work below (§8) is being landed incrementally so every commit
+stays green on both the v1.0 (DuckDB/legacy) and v2.0 (`public`) shapes:
+
+- **Inc 1 (done, `8ff66bc`)** — expanded `audit_log`
+  (`actor/entity/entity_id/before/after/request_id`, CC-13) and
+  `notifications.category` (FR-NOT-03).
+- **Inc 2 (done)** — `shift_assignments` replaces `users.shift_start/end`
+  on `public`. The app now goes through schema-scoped `get_shift`/`set_shift`
+  helpers; `init_db` no longer runs `ALTER TABLE users ADD COLUMN shift_*` on
+  the v2.0 shape (it was silently re-adding the columns the migration
+  removed). All user CRUD, break timing and attendance workday math routes
+  through the helpers; on `public` a user's shift is a single open-ended
+  `shift_assignments` row (`Fixed` with TIME bounds, or `24x7`), on the v1.0
+  shape it is exactly the old column write. Effective-dated scheduling
+  (multiple periods) is Phase 4 (FR-ATT-17).
+- **Inc 3 (in progress)** — extended probe write section (26 flows) plus the
+  INSERT fixes it surfaced: `tickets`, `offer_letters` and `payroll_runs`
+  were written with bare `VALUES` (relying on v1.0 column order) — v2.0
+  adds `queue` mid-tickets, `basic_pct/hra_pct/allowances_pct` to
+  offer_letters, and maker-checker columns to payroll_runs. Each INSERT is
+  now an explicit column list valid on both shapes.
+
+Remaining measured POST surfaces are the Phase 4 corrected flows
+(ATS/onboarding/offboarding, maker-checker payroll), still to be verified on
+`public` by the same probe.
 
 ### CC-09 — transactional outbox (implemented)
 `outbox.py` implements the outbox pattern against the v2.0 `outbox_events`
@@ -421,10 +451,10 @@ verified against the *real* v2.0 `idempotency_keys` (`key` natural PK, `JSONB`
 
 ## 10. Next steps
 
-1. Phase 3b — remaining: the service-layer rewrite onto `public`
-   (notifications rename, `shift_assignments`, expanded `audit_log`),
-   extending the probe's write section to the remaining POST surfaces
-   (forgot password, payroll bank-file/TDS export, ticket/ATS writes).
+1. Phase 3b — service-layer rewrite inc 3: re-run the extended probe (26 write
+   flows) against a clean `hrms_probe` (`public`) and fix any drift it
+   surfaces. Inc 1 (audit_log + notifications.category) and inc 2
+   (shift_assignments) are already landed.
 2. Phase 4 — new capabilities: attendance finalisation job (FR-JOB-01),
    maker-checker payroll (FR-PAY-06), corrected ATS/onboarding/offboarding flows.
 3. Phase 5 — cutover; Phase 6 — decommission DuckDB.
