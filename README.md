@@ -29,6 +29,16 @@ fresh production target intentionally refuses demo seeding; load the approved
 ETL data first. For a disposable local demo only, set
 `HRMS_ALLOW_DEMO_SEED=1`.
 
+If the host blocks Docker bridge networking (common in Codespaces/WSL), use the
+included local override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+Then open <http://localhost:5000>. The local demo login is `EMP001` /
+`pass123`; change or remove demo credentials before using real data.
+
 ## Cutover preflight
 
 The preflight command is read-only and emits a JSON reconciliation report:

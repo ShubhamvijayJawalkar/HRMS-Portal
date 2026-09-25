@@ -1,0 +1,20 @@
+# Local Docker override for environments where the default bridge network
+# blocks container-to-container TCP connections (common in Codespaces/WSL).
+# Production deployments should continue using docker-compose.yml unchanged.
+services:
+  redis:
+    ports:
+      - "6379:6379"
+
+  migrate:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@host.docker.internal:5432/${POSTGRES_DB:-hrms}
+
+  hrms:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@host.docker.internal:5432/${POSTGRES_DB:-hrms}
+      REDIS_URL: redis://host.docker.internal:6379/0
