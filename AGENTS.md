@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 74 on DuckDB, 78 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 76 on DuckDB, 80 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (74 on DuckDB, 78 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (76 on DuckDB, 80 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (16 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -164,7 +164,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 8 new unit tests; DuckDB suite is 74 passed / 5 skipped (PG-gated). The
+- 10 new unit tests; DuckDB suite is 76 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
 
@@ -234,14 +234,18 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   migration service before the web process. `docker-compose.legacy.yml` is
   the explicit temporary rollback profile.
 - `scripts/cutover_preflight.py` is read-only: it verifies the target head,
-  required tables, identity keys, offer constraints, and emits count deltas;
-  it never drops data or switches traffic. A fresh Alembic-created public
+  required tables, identity keys/sequences, offer constraints, and emits count
+  deltas; it never drops data or switches traffic. Runtime generated IDs use
+  the sequence-safe allocator, and `init_db` advances sequences after any
+  compatibility seed rows, so explicit legacy IDs cannot regress public
+  identity sequences. A fresh Alembic-created public
   database was booted without the probe's tolerant wrapper using the explicit
   `HRMS_ALLOW_DEMO_SEED=1` validation override; production boot refuses an
   empty target so demo users/passwords cannot be created accidentally.
 - Disposable rehearsal `hrms_cutover_rehearsal` completed the frozen-source
   ETL with Phase-1/Phase-2 reconciliation, CC-05 cleanup, head stamping,
-  read-only preflight, and authenticated GET/write smoke coverage.
+  read-only preflight, authenticated GET/write smoke coverage, and a post-write
+  CC-01 sequence check.
 - The actual final delta sync, maintenance-window health check, DNS/load-
   balancer switch, and DuckDB read-only audit lock remain operator actions.
   Do not mark Phase 5 complete until the traffic switch and rollback window

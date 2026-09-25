@@ -116,6 +116,40 @@ def _identity_violations(conn: psycopg.Connection, schema: str) -> list[str]:
     ]
 
 
+def _sequence_violations(conn: psycopg.Connection, schema: str) -> list[str]:
+    """Return identity sequences that are behind explicit legacy IDs."""
+    rows = conn.execute(
+        """
+        SELECT t.relname, a.attname
+        FROM pg_class t
+        JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = %s
+        JOIN pg_index i ON i.indrelid = t.oid AND i.indisprimary
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey)
+        WHERE t.relkind = 'r' AND a.attidentity IN ('a', 'd')
+        ORDER BY t.relname, a.attname
+        """,
+        (schema,),
+    ).fetchall()
+    violations: list[str] = []
+    for table, column in rows:
+        sequence = conn.execute(
+            "SELECT pg_get_serial_sequence(%s, %s)",
+            (f"{schema}.{table}", column),
+        ).fetchone()[0]
+        if not sequence:
+            violations.append(f"{table}.{column}: backing sequence missing")
+            continue
+        last_value = int(conn.execute(f"SELECT last_value FROM {sequence}").fetchone()[0])
+        max_value = int(conn.execute(
+            f"SELECT COALESCE(MAX({column}), 0) FROM {_qualified(schema, table)}"
+        ).fetchone()[0])
+        if last_value < max_value:
+            violations.append(
+                f"{table}.{column}: sequence {last_value} is behind MAX {max_value}"
+            )
+    return violations
+
+
 def _alembic_version(conn: psycopg.Connection, schema: str) -> str | None:
     if "alembic_version" not in _table_names(conn, schema):
         return None
@@ -153,6 +187,7 @@ def _schema_report(conn: psycopg.Connection, schema: str) -> dict[str, Any]:
         "table_count": len(tables),
         "counts": counts,
         "identity_violations": _identity_violations(conn, schema) if tables else [],
+        "sequence_violations": _sequence_violations(conn, schema) if tables else [],
     }
 
 
@@ -183,6 +218,11 @@ def _run(args: argparse.Namespace) -> int:
             failures.append(
                 "public has non-identity surrogate keys: "
                 + ", ".join(public["identity_violations"])
+            )
+        if public["sequence_violations"]:
+            failures.append(
+                "public identity sequences are behind data: "
+                + ", ".join(public["sequence_violations"])
             )
         null_splits = conn.execute(
             f"SELECT COUNT(*) FROM {_qualified(target, 'offer_letters')} "

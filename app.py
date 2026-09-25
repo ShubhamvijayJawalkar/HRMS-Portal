@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -150,6 +151,36 @@ def _has_column(conn, table, column):
     return bool(conn.execute(f'PRAGMA table_info("{table}")').fetchall()) and any(
         row[1] == column for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
     )
+
+
+def _advance_public_identity_sequences(conn):
+    """Keep public identity sequences ahead after boot-time compatibility seeds."""
+    if not _is_public_target_schema():
+        return
+    import db_backend
+
+    schema = db_backend.app_schema()
+    rows = conn.execute(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = ? AND is_identity = 'YES'",
+        [schema],
+    ).fetchall()
+    identifier = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+    for table, column in rows:
+        if not identifier.fullmatch(table) or not identifier.fullmatch(column):
+            raise RuntimeError(f'unsafe public identity identifier: {table}.{column}')
+        sequence = conn.execute(
+            "SELECT pg_get_serial_sequence(?, ?)",
+            [f'{schema}.{table}', column],
+        ).fetchone()[0]
+        if not sequence:
+            raise RuntimeError(f'public identity sequence missing for {table}.{column}')
+        last_value = int(conn.execute(f'SELECT last_value FROM {sequence}').fetchone()[0])
+        max_value = int(conn.execute(
+            f'SELECT COALESCE(MAX({column}), 0) FROM {schema}.{table}'
+        ).fetchone()[0])
+        if last_value < max_value:
+            conn.execute('SELECT setval(?, ?, true)', [sequence, max_value])
 
 
 # ── Shift model (service-layer rewrite inc 2) ──────────────────────────────
@@ -1627,6 +1658,7 @@ def init_db():
 
     # ── Fix seed session/break dates to use shift-based dates ─────
     _fix_seed_shift_dates(conn, now)
+    _advance_public_identity_sequences(conn)
 
     conn.close()
     logger.info("Database initialized")
@@ -2323,7 +2355,8 @@ def login():
     if row[4] in ('Blocked', 'Inactive', 'Pre-hire'):
         return jsonify({'error': 'Account is blocked'}), 403
 
-    session_id = gen_id()
+    conn = get_db()
+    session_id = _next_generated_id(conn, 'user_sessions', 'session_id')
     session['emp_id'] = row[0]
     session['name'] = row[1]
     session['role'] = row[2]
@@ -2331,7 +2364,6 @@ def login():
     session['session_id'] = session_id
 
     now = datetime.now()
-    conn = get_db()
     shift_date = _get_shift_date_for_dt(row[0], now, conn)
     conn.execute(
         "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) VALUES (?, ?, ?, ?)",
@@ -2526,7 +2558,7 @@ def forgot_password():
     token = secrets.token_urlsafe(32)
     conn.execute(
         "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) VALUES (?, ?, ?, ?)",
-        [gen_id(), emp_id, _token_digest(token), datetime.now() + timedelta(hours=1)]
+        [_next_generated_id(conn, 'password_reset_tokens', 'token_id'), emp_id, _token_digest(token), datetime.now() + timedelta(hours=1)]
     )
     conn.close()
 
@@ -2597,8 +2629,8 @@ def dependents_api():
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('relationship'):
         return jsonify({'error': 'name and relationship required'}), 400
-    did = gen_id()
     conn = get_db()
+    did = _next_generated_id(conn, 'dependents', 'dependent_id')
     conn.execute("INSERT INTO dependents VALUES (?, ?, ?, ?, ?)",
                  [did, emp_id, data['name'], data['relationship'], parse_date(data.get('date_of_birth'))])
     conn.close()
@@ -2628,8 +2660,8 @@ def documents_api():
     data = request.get_json(silent=True) or {}
     if not data.get('doc_type'):
         return jsonify({'error': 'doc_type required'}), 400
-    did = gen_id()
     conn = get_db()
+    did = _next_generated_id(conn, 'employee_documents', 'doc_id')
     conn.execute("INSERT INTO employee_documents VALUES (?, ?, ?, ?, ?)",
                  [did, emp_id, data['doc_type'], data.get('file_name', ''), datetime.now()])
     conn.close()
@@ -2666,12 +2698,12 @@ def add_holiday():
     d = parse_date(data['date'])
     if d is None:
         return jsonify({'error': 'Invalid date format'}), 400
-    hid = gen_id()
     conn = get_db()
     try:
         dup = conn.execute("SELECT 1 FROM holidays WHERE holiday_date = ? AND name = ?", [d, data['name']]).fetchone()
         if dup:
             return jsonify({'error': 'Holiday with this name and date already exists'}), 409
+        hid = _next_generated_id(conn, 'holidays', 'holiday_id')
         conn.execute("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)",
                      [hid, data['name'], d, d.year, htype])
         return jsonify({'message': 'Holiday added', 'id': hid}), 201
@@ -2726,7 +2758,7 @@ def add_notification(emp_id, ntype, message, link=None, category=None):
             category = _notification_category(ntype)
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [gen_id(), emp_id, ntype, category, message, link, datetime.now()]
+            [_next_generated_id(conn, 'notifications', 'notification_id'), emp_id, ntype, category, message, link, datetime.now()]
         )
     except Exception as e:
         logger.warning("Notification failed: %s", e)
@@ -2802,7 +2834,7 @@ def regularization_api():
     ).fetchone():
         conn.close()
         return jsonify({'error': 'A pending request already exists for this date'}), 409
-    rid = gen_id()
+    rid = _next_generated_id(conn, 'regularization_requests', 'request_id')
     conn.execute(
         "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, status) VALUES (?, ?, ?, ?, 'Pending')",
         [rid, emp_id, d, data['reason']]
@@ -2929,12 +2961,12 @@ def assets_api():
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('asset_type'):
         return jsonify({'error': 'emp_id and asset_type required'}), 400
-    aid = gen_id()
     conn = get_db()
     employee = conn.execute("SELECT 1 FROM users WHERE emp_id = ? AND status = 'Active'", [data['emp_id']]).fetchone()
     if not employee:
         conn.close()
         return jsonify({'error': 'Employee not found or inactive'}), 400
+    aid = _next_generated_id(conn, 'assets', 'asset_id')
     conn.execute("INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [aid, data['emp_id'], data['asset_type'], data.get('asset_tag'), data.get('brand'), data.get('model'), data.get('serial_number'),
                   parse_date(data.get('issued_date'), datetime.now().date()), None, 'Issued', data.get('notes')])
@@ -3035,34 +3067,36 @@ def _validate_candidate_transition(current, target):
 
 
 def _next_generated_id(conn, table, column):
-    """Allocate a collision-free ID and keep public identity sequences ahead.
+    """Allocate an ID without regressing a public identity sequence.
 
-    Legacy schemas need explicit IDs; v2.0 public tables use identity keys but
-    the compatibility app still supplies one. Advancing the backing sequence
-    before the explicit insert preserves CC-01 after runtime lifecycle writes.
+    Legacy schemas need explicit IDs. On v2.0 ``public``, consume the
+    PostgreSQL identity sequence directly; this is concurrency-safe and keeps
+    CC-01 true even when compatibility routes still pass the returned value
+    back in an INSERT column list.
     """
+    if _is_public_target_schema():
+        try:
+            import db_backend
+            ident = conn.execute(
+                "SELECT is_identity FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+                [db_backend.app_schema(), table, column],
+            ).fetchone()
+            if not ident or str(ident[0]).upper() != 'YES':
+                raise RuntimeError(f'{table}.{column} is not a public identity key')
+            sequence = conn.execute(
+                "SELECT pg_get_serial_sequence(?, ?)",
+                [f"{db_backend.app_schema()}.{table}", column],
+            ).fetchone()
+            if not sequence or not sequence[0]:
+                raise RuntimeError(f'{table}.{column} has no public identity sequence')
+            return int(conn.execute("SELECT nextval(?::regclass)", [sequence[0]]).fetchone()[0])
+        except Exception as exc:
+            logger.error('could not allocate identity ID for %s.%s', table, column)
+            raise RuntimeError(f'identity allocation failed for {table}.{column}') from exc
     while True:
         value = gen_id()
         if not conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ?", [value]).fetchone():
-            if _is_public_target_schema():
-                try:
-                    import db_backend
-                    ident = conn.execute(
-                        "SELECT is_identity FROM information_schema.columns "
-                        "WHERE table_schema = ? AND table_name = ? AND column_name = ?",
-                        [db_backend.app_schema(), table, column],
-                    ).fetchone()
-                    if ident and str(ident[0]).upper() == 'YES':
-                        sequence = conn.execute(
-                            "SELECT pg_get_serial_sequence(?, ?)",
-                            [f"{db_backend.app_schema()}.{table}", column],
-                        ).fetchone()
-                        if sequence and sequence[0]:
-                            current = conn.execute(f"SELECT last_value FROM {sequence[0]}").fetchone()
-                            next_value = max(value, int(current[0])) if current else value
-                            conn.execute("SELECT setval(?, ?, true)", [sequence[0], next_value])
-                except Exception:
-                    logger.debug('could not advance identity sequence for %s.%s', table, column)
             return value
 
 
@@ -4962,8 +4996,8 @@ def salary_api():
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('basic'):
         return jsonify({'error': 'emp_id and basic required'}), 400
-    sid = gen_id()
     conn = get_db()
+    sid = _next_generated_id(conn, 'salary_structures', 'struct_id')
     conn.execute("INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from, effective_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  [sid, data['emp_id'], float(data['basic']), float(data.get('hra', 0)), float(data.get('allowances', 0)), float(data.get('deductions', 0)),
                   parse_date(data.get('effective_from'), datetime.now().date()),
@@ -5117,7 +5151,7 @@ def payroll_runs_api():
             return jsonify({'error': 'Payroll already processed for this period'}), 409
 
         period_start, period_end = _payroll_period_bounds(month, year)
-        rid = gen_id()
+        rid = _next_generated_id(conn, 'payroll_runs', 'run_id')
         conn.execute(
             "INSERT INTO payroll_runs "
             "(run_id, month, year, processed_at, status, adjustment_of_run_id) "
@@ -5142,7 +5176,7 @@ def payroll_runs_api():
                 "INSERT INTO payroll_items "
                 "(item_id, run_id, emp_id, gross_salary, deductions_total, net_salary, pf, esi, pt) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                [gen_id(), rid, emp_id, gross, total_ded, net, pf, esi, pt],
+                [_next_generated_id(conn, 'payroll_items', 'item_id'), rid, emp_id, gross, total_ded, net, pf, esi, pt],
             )
         conn.close()
     except Exception:
@@ -5345,8 +5379,8 @@ def goals_api():
     data = request.get_json(silent=True) or {}
     if not data.get('title'):
         return jsonify({'error': 'title required'}), 400
-    gid = gen_id()
     conn = get_db()
+    gid = _next_generated_id(conn, 'goals', 'goal_id')
     conn.execute("INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [gid, data.get('emp_id', session['emp_id']), data['title'], data.get('description'),
                   parse_date(data.get('target_date')), data.get('weight', 1), None, 'Active', datetime.now()])
@@ -5397,8 +5431,8 @@ def reviews_api():
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('reviewer_id') or not data.get('review_period'):
         return jsonify({'error': 'emp_id, reviewer_id, review_period required'}), 400
-    rid = gen_id()
     conn = get_db()
+    rid = _next_generated_id(conn, 'performance_reviews', 'review_id')
     conn.execute("INSERT INTO performance_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [rid, data['emp_id'], data['reviewer_id'], data['review_period'], None, None, 'Draft', datetime.now(), None])
     conn.close()
@@ -5434,8 +5468,8 @@ def feedback_api():
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('rating'):
         return jsonify({'error': 'emp_id and rating required'}), 400
-    fid = gen_id()
     conn = get_db()
+    fid = _next_generated_id(conn, 'feedback_360', 'feedback_id')
     conn.execute("INSERT INTO feedback_360 VALUES (?, ?, ?, ?, ?, ?, ?)",
                  [fid, data['emp_id'], session['emp_id'], data.get('category'), data['rating'], data.get('comment'), datetime.now()])
     conn.close()
@@ -5483,8 +5517,8 @@ def expenses_api():
     data = request.get_json(silent=True) or {}
     if not data.get('cat_id') or not data.get('amount'):
         return jsonify({'error': 'cat_id and amount required'}), 400
-    cid = gen_id()
     conn = get_db()
+    cid = _next_generated_id(conn, 'expense_claims', 'claim_id')
     conn.execute("INSERT INTO expense_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                  [cid, data.get('emp_id', session['emp_id']), data['cat_id'], float(data['amount']), data.get('description'), data.get('receipt_path'), 'Pending', None, datetime.now()])
     conn.close()
@@ -5536,8 +5570,8 @@ def tickets_api():
     data = request.get_json(silent=True) or {}
     if not data.get('subject'):
         return jsonify({'error': 'subject required'}), 400
-    tid = gen_id()
     conn = get_db()
+    tid = _next_generated_id(conn, 'tickets', 'ticket_id')
     conn.execute(
         "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, status, assigned_to, created_at, updated_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [tid, session['emp_id'], data['subject'], data.get('description'), data.get('category'), data.get('priority', 'Medium'),
@@ -5582,7 +5616,7 @@ def add_ticket_comment(tid):
     if not chk:
         conn.close()
         return jsonify({'error': 'Ticket not found'}), 404
-    cid = gen_id()
+    cid = _next_generated_id(conn, 'ticket_comments', 'comment_id')
     conn.execute("INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], datetime.now()])
     conn.execute("UPDATE tickets SET updated_at = ? WHERE ticket_id = ?", [datetime.now(), tid])
     conn.close()
@@ -6162,7 +6196,7 @@ def leaves_api():
         conn.close()
         return jsonify({'error': 'Overlapping leave request already exists for these dates'}), 409
 
-    leave_id = gen_id()
+    leave_id = _next_generated_id(conn, 'leave_requests', 'leave_id')
     conn.execute(
         "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')",
         [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', '')]
@@ -6571,7 +6605,7 @@ def start_break():
             [datetime.now(), active[0]]
         )
         conn.commit()
-    break_id = gen_id()
+    break_id = _next_generated_id(conn, 'breaks', 'break_id')
     now = datetime.now()
     utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
     shift_date = _get_shift_date_for_dt(emp_id, now, conn)
@@ -6660,7 +6694,7 @@ def break_approvals_api():
     ).fetchone():
         conn.close()
         return jsonify({'error': 'Pending approval already exists for today'}), 409
-    aid = gen_id()
+    aid = _next_generated_id(conn, 'break_approvals', 'approval_id')
     shift_date = _get_shift_date_for_dt(emp_id, datetime.now(), conn)
     conn.execute(
         "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) VALUES (?, ?, ?, ?, ?, 'Pending')",

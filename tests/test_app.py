@@ -166,6 +166,68 @@ def test_production_postgres_defaults_to_public_schema(monkeypatch):
     assert db_backend.app_schema() == 'legacy'
 
 
+def test_public_generated_id_uses_identity_sequence(monkeypatch):
+    import app as app_module
+
+    class Result:
+        def __init__(self, value):
+            self.value = value
+
+        def fetchone(self):
+            return (self.value,)
+
+    class FakeConnection:
+        def execute(self, sql, params=None):
+            if 'is_identity' in sql:
+                return Result('YES')
+            if 'pg_get_serial_sequence' in sql:
+                return Result('public.breaks_break_id_seq')
+            if 'nextval' in sql:
+                return Result(4242)
+            raise AssertionError(f'unexpected SQL: {sql}')
+
+    monkeypatch.setattr(app_module, '_is_public_target_schema', lambda: True)
+    assert app_module._next_generated_id(FakeConnection(), 'breaks', 'break_id') == 4242
+
+
+def test_public_seed_sequence_advancer_repairs_explicit_ids(monkeypatch):
+    import app as app_module
+
+    class Result:
+        def __init__(self, value=None, rows=None):
+            self.value = value
+            self.rows = rows or []
+
+        def fetchone(self):
+            return (self.value,)
+
+        def fetchall(self):
+            return self.rows
+
+    class FakeConnection:
+        def __init__(self):
+            self.setvals = []
+
+        def execute(self, sql, params=None):
+            if 'is_identity' in sql:
+                return Result(rows=[('breaks', 'break_id')])
+            if 'pg_get_serial_sequence' in sql:
+                return Result('public.breaks_break_id_seq')
+            if 'last_value' in sql:
+                return Result(5)
+            if 'COALESCE(MAX' in sql:
+                return Result(42)
+            if 'setval' in sql:
+                self.setvals.append(params)
+                return Result(None)
+            raise AssertionError(f'unexpected SQL: {sql}')
+
+    connection = FakeConnection()
+    monkeypatch.setattr(app_module, '_is_public_target_schema', lambda: True)
+    app_module._advance_public_identity_sequences(connection)
+    assert connection.setvals == [['public.breaks_break_id_seq', 42]]
+
+
 def test_etl_allows_missing_post_v1_payroll_approval_table():
     import duckdb
 
@@ -292,7 +354,6 @@ def test_cc01_surrogate_keys_are_identity():
         "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(i.indkey) "
         "WHERE t.relkind = 'r'"
     ).fetchall()
-    conn.close()
 
     natural = {('users', 'emp_id'), ('break_types', 'break_type'), ('idempotency_keys', 'key')}
     framework = {'alembic_version'}
@@ -302,6 +363,24 @@ def test_cc01_surrogate_keys_are_identity():
     ]
     assert not bad, f'non-identity surrogate PKs: {bad}'
     assert len(rows) >= 49, f'expected the 49-table target schema, found {len(rows)} PKs'
+
+    # Explicit legacy IDs are still used by compatibility routes. The public
+    # service must advance every identity sequence after such writes.
+    for table, column, identity in rows:
+        if identity not in ('a', 'd'):
+            continue
+        sequence = conn.execute(
+            f"SELECT pg_get_serial_sequence('public.{table}', '{column}')"
+        ).fetchone()[0]
+        assert sequence, f'{table}.{column}: identity sequence is missing'
+        last_value = conn.execute(f'SELECT last_value FROM {sequence}').fetchone()[0]
+        max_value = conn.execute(
+            f'SELECT COALESCE(MAX({column}), 0) FROM public.{table}'
+        ).fetchone()[0]
+        assert last_value >= max_value, (
+            f'{table}.{column}: sequence {last_value} is behind MAX {max_value}'
+        )
+    conn.close()
 
 
 @pytest.mark.skipif(

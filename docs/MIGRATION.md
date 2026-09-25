@@ -496,8 +496,8 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **74 DuckDB unit tests passed / 5 skipped**.
-- **78 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **76 DuckDB unit tests passed / 5 skipped**.
+- **80 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **16 Playwright tests passed on both DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
@@ -532,9 +532,9 @@ Draft → Submitted → Approved → Finalized
 
 Validation:
 
-- **74 DuckDB unit tests passed / 5 skipped**.
-- **78 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
-  also **78 passed / 1 skipped**.
+- **76 DuckDB unit tests passed / 5 skipped**.
+- **80 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **80 passed / 1 skipped**.
 - **16 Playwright tests passed on DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
   Finance-submit/Admin-approve/finalize payroll path and the complete
@@ -593,8 +593,11 @@ DATABASE_URL=postgresql://... \\
 ```
 
 It verifies the `0003_lifecycle_hardening` head, required public tables,
-CC-01 identity keys, offer percentage/active-offer constraints, and emits
-public-vs-legacy count deltas. Add `--fail-on-count-delta` when the operator
+CC-01 identity keys and backing sequences, offer percentage/active-offer
+constraints, and emits public-vs-legacy count deltas. Runtime-generated legacy
+IDs are routed through a sequence-safe allocator, and boot-time compatibility
+seed rows are followed by a sequence advance, so public identity sequences
+cannot fall behind explicit IDs. Add `--fail-on-count-delta` when the operator
 requires a zero-delta reconciliation gate. A fresh Alembic-created public
 database was booted without the probe's tolerant wrapper using the explicit
 `HRMS_ALLOW_DEMO_SEED=1` validation override; normal production startup
@@ -606,7 +609,8 @@ loaded from a read-only frozen DuckDB snapshot, and completed the full ETL
 (Phase-1 and Phase-2 reconciliation, constraint cleanup, PART B, identity
 sequence advance, and head stamping). The public preflight then passed, and
 an authenticated smoke test covered login, dashboard/profile/pipeline/break
-reads plus a Personal break start/end write.
+reads plus a Personal break start/end write, and the post-write CC-01 checker
+confirmed every identity sequence remained ahead of `MAX(id)`.
 
 ### Maintenance-window sequence
 
