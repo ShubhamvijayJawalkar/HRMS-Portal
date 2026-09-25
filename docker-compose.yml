@@ -57,6 +57,7 @@ services:
       FLASK_DEBUG: "0"
       FLASK_ENV: production
       LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+      HRMS_ALLOW_DEMO_SEED: ${HRMS_ALLOW_DEMO_SEED:-0}
       APP_DB: postgres
       APP_DB_SCHEMA: public
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-hrms}
