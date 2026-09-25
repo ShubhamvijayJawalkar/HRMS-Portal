@@ -36,6 +36,7 @@ import sys
 import traceback
 from collections import Counter
 from io import BytesIO
+from pathlib import Path
 
 import psycopg
 
@@ -118,6 +119,296 @@ def _put(cl, tok, url, body=None):
     return cl.put(url, json=body, headers=headers)
 
 
+def _delete_any(pc, statement: str, values) -> None:
+    if values:
+        pc.execute(statement, [list(values)])
+
+
+def _remove_probe_upload_files(paths: set[Path]) -> None:
+    """Best-effort removal of pre-boarding files owned by probe workflows."""
+    for path in sorted(paths, key=str):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            # A stale upload must not turn an otherwise clean database probe red.
+            continue
+
+
+def _cleanup_lifecycle_probe_residue(pc) -> set[Path]:
+    """Remove prior lifecycle journeys before exercising the same journey again.
+
+    Cleanup is driven by the probe candidate/user markers, then expanded through
+    their workflow IDs. This also reaches children whose marker relationship was
+    lost in an interrupted earlier run. Returned file paths are removed only
+    after the surrounding database transaction commits.
+    """
+    candidate_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%'"
+        ).fetchall()
+    }
+    user_ids = {
+        row[0]
+        for row in pc.execute(
+            """
+            SELECT u.emp_id
+            FROM users u
+            WHERE u.candidate_id IN (
+                SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%'
+            ) OR (u.name = 'Probe Candidate' AND u.email LIKE 'probe-cand-%')
+            """
+        ).fetchall()
+    }
+
+    workflow_rows = pc.execute(
+        "SELECT workflow_id, candidate_id, emp_id FROM onboarding_workflow"
+    ).fetchall()
+    workflow_ids = {
+        row[0]
+        for row in workflow_rows
+        if row[1] in candidate_ids or row[2] in user_ids
+    }
+    user_ids.update(
+        row[2]
+        for row in workflow_rows
+        if row[1] in candidate_ids and row[2]
+    )
+    offer_ids = {
+        row[0]
+        for row in pc.execute("SELECT offer_id, candidate_id FROM offer_letters").fetchall()
+        if row[1] in candidate_ids
+    }
+    resignation_rows = pc.execute(
+        "SELECT resignation_id, emp_id, reason FROM resignations"
+    ).fetchall()
+    resignation_ids = {
+        row[0]
+        for row in resignation_rows
+        if row[1] in user_ids or row[2] == "public lifecycle probe"
+    }
+    user_ids.update(
+        row[1]
+        for row in resignation_rows
+        if row[2] == "public lifecycle probe" and row[1]
+    )
+    offboarding_rows = pc.execute(
+        "SELECT offboard_id, resignation_id, emp_id FROM offboarding_workflow"
+    ).fetchall()
+    offboard_ids = {
+        row[0]
+        for row in offboarding_rows
+        if row[1] in resignation_ids or row[2] in user_ids
+    }
+    user_ids.update(
+        row[2]
+        for row in offboarding_rows
+        if row[1] in resignation_ids and row[2]
+    )
+    checklist_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT item_id, workflow_id FROM onboarding_checklist"
+        ).fetchall()
+        if row[1] in workflow_ids
+    }
+    onboarding_task_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT task_id, emp_id FROM onboarding_tasks"
+        ).fetchall()
+        if row[1] in user_ids
+    }
+    offboarding_task_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT task_id, emp_id FROM offboarding_tasks"
+        ).fetchall()
+        if row[1] in user_ids
+    }
+    exit_interview_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT interview_id, emp_id, offboard_id FROM exit_interviews"
+        ).fetchall()
+        if row[1] in user_ids or row[2] in offboard_ids
+    }
+    interview_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT interview_id, candidate_id FROM interviews"
+        ).fetchall()
+        if row[1] in candidate_ids
+    }
+    payroll_run_ids = {
+        row[0]
+        for row in pc.execute(
+            "SELECT run_id FROM payroll_runs WHERE year >= 2099"
+        ).fetchall()
+    }
+
+    # Capture both the metadata path and the workflow-id prefix before deleting
+    # lifecycle rows. The basename-only join prevents a database path from
+    # escaping the repository's upload directory.
+    upload_root = Path(__file__).resolve().parents[1] / "uploads"
+    upload_paths: set[Path] = set()
+    for workflow_id in workflow_ids:
+        upload_paths.update(upload_root.glob(f"preboarding_{workflow_id}_*"))
+    for emp_id, file_path in pc.execute(
+        "SELECT emp_id, file_path FROM documents WHERE file_path LIKE 'preboarding_%'"
+    ).fetchall():
+        name = Path(str(file_path)).name
+        workflow_prefixes = tuple(f"preboarding_{workflow_id}_" for workflow_id in workflow_ids)
+        if emp_id in user_ids or name.startswith(workflow_prefixes):
+            upload_paths.add(upload_root / name)
+
+    # Outbox rows have no FK to their aggregate. Delete them by both aggregate
+    # and payload, including PRE-prefixed lifecycle events left without parents.
+    outbox_conditions = [
+        "(event_type = 'offer.created' AND payload->>'email' LIKE ANY(%s))",
+        "(event_type IN ('offer.accepted', 'candidate.hired', 'credentials.issued') "
+        "AND payload->>'emp_id' LIKE ANY(%s))",
+    ]
+    outbox_params = [["probe-cand-%"], ["PRE%"]]
+    for aggregate, payload_key, values in (
+        ("candidates", "candidate_id", candidate_ids),
+        ("offer_letters", "offer_id", offer_ids),
+        ("users", "emp_id", user_ids),
+        ("onboarding_workflow", "workflow_id", workflow_ids),
+        ("payroll_runs", "run_id", payroll_run_ids),
+    ):
+        if values:
+            string_values = [str(value) for value in values]
+            outbox_conditions.append(
+                f"(aggregate = '{aggregate}' AND aggregate_id = ANY(%s))"
+            )
+            outbox_params.append(string_values)
+            outbox_conditions.append(
+                f"(payload->>'{payload_key}' = ANY(%s))"
+            )
+            outbox_params.append(string_values)
+    pc.execute(
+        "DELETE FROM outbox_events WHERE " + " OR ".join(outbox_conditions),
+        outbox_params,
+    )
+
+    notification_conditions = []
+    notification_params = []
+    if user_ids:
+        notification_conditions.append("emp_id = ANY(%s)")
+        notification_params.append(list(user_ids))
+    if candidate_ids:
+        notification_conditions.append(
+            "type = 'Onboarding' AND message = ANY(%s)"
+        )
+        notification_params.append([
+            f"Candidate {candidate_id} accepted — onboarding workflow started"
+            for candidate_id in candidate_ids
+        ])
+    if payroll_run_ids:
+        notification_conditions.append(
+            "type = 'Payroll' AND message LIKE ANY(%s)"
+        )
+        notification_params.append([
+            f"Salary for run {run_id} credited:%" for run_id in payroll_run_ids
+        ])
+    if notification_conditions:
+        pc.execute(
+            "DELETE FROM notifications WHERE " + " OR ".join(notification_conditions),
+            notification_params,
+        )
+
+    audit_conditions = []
+    audit_params = []
+    if user_ids:
+        audit_conditions.extend(("emp_id = ANY(%s)", "actor = ANY(%s)"))
+        audit_params.extend((list(user_ids), list(user_ids)))
+    for entity, values in (
+        ("users", user_ids),
+        ("candidates", candidate_ids),
+        ("interviews", interview_ids),
+        ("offer_letters", offer_ids),
+        ("onboarding_workflow", workflow_ids),
+        ("onboarding_checklist", checklist_ids),
+        ("onboarding_tasks", onboarding_task_ids),
+        ("resignations", resignation_ids),
+        ("offboarding_workflow", offboard_ids),
+        ("offboarding_tasks", offboarding_task_ids),
+        ("exit_interviews", exit_interview_ids),
+    ):
+        if values:
+            audit_conditions.append("(entity = %s AND entity_id = ANY(%s))")
+            audit_params.extend((entity, [str(value) for value in values]))
+    # This detail is unique to the probe and catches an audit whose parent row
+    # was lost before this cleanup version could associate it by ID.
+    audit_conditions.append("details = 'Added candidate Probe Candidate'")
+    pc.execute(
+        "DELETE FROM audit_log WHERE " + " OR ".join(audit_conditions),
+        audit_params,
+    )
+
+    # Child-first order is required by the canonical lifecycle foreign keys.
+    _delete_any(
+        pc,
+        "DELETE FROM onboarding_checklist WHERE workflow_id = ANY(%s)",
+        workflow_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM offboarding_settlements WHERE offboard_id = ANY(%s)",
+        offboard_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM offboarding_approvals WHERE offboard_id = ANY(%s)",
+        offboard_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM exit_interviews WHERE interview_id = ANY(%s)",
+        exit_interview_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM offboarding_tasks WHERE task_id = ANY(%s)",
+        offboarding_task_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM offboarding_workflow WHERE offboard_id = ANY(%s)",
+        offboard_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM resignations WHERE resignation_id = ANY(%s)",
+        resignation_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM onboarding_tasks WHERE task_id = ANY(%s)",
+        onboarding_task_ids,
+    )
+    _delete_any(
+        pc,
+        "DELETE FROM onboarding_workflow WHERE workflow_id = ANY(%s)",
+        workflow_ids,
+    )
+    _delete_any(pc, "DELETE FROM salary_structures WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM documents WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM assets WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM user_sessions WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM employee_documents WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM user_permissions WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM password_reset_tokens WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM shift_assignments WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM users WHERE emp_id = ANY(%s)", user_ids)
+    _delete_any(pc, "DELETE FROM interviews WHERE interview_id = ANY(%s)", interview_ids)
+    _delete_any(pc, "DELETE FROM offer_letters WHERE offer_id = ANY(%s)", offer_ids)
+    _delete_any(pc, "DELETE FROM candidates WHERE candidate_id = ANY(%s)", candidate_ids)
+
+    return {path for path in upload_paths if path.is_file() or path.is_symlink()}
+
+
 def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     """Fire the core state-changing flows against ``public`` exactly as the
     legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
@@ -131,74 +422,15 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     state: dict = {}
 
     # Clear residue from prior probe runs so dedupe guards don't mask results.
-    with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+    pg_dsn = dsn.replace("postgresql+psycopg://", "postgresql://")
+    with psycopg.connect(pg_dsn) as pc:
+        upload_paths = _cleanup_lifecycle_probe_residue(pc)
         pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
         pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
         pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
         pc.execute("DELETE FROM ticket_comments WHERE comment = 'probe comment'")
         pc.execute("DELETE FROM tickets WHERE subject = 'public write probe'")
-        pc.execute("DELETE FROM onboarding_checklist WHERE workflow_id IN ("
-                   "SELECT w.workflow_id FROM onboarding_workflow w JOIN candidates c "
-                   "ON c.candidate_id = w.candidate_id WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM offboarding_settlements WHERE offboard_id IN ("
-                   "SELECT w.offboard_id FROM offboarding_workflow w JOIN users u ON u.emp_id = w.emp_id "
-                   "JOIN candidates c ON c.candidate_id = u.candidate_id WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM offboarding_approvals WHERE offboard_id IN ("
-                   "SELECT w.offboard_id FROM offboarding_workflow w JOIN users u ON u.emp_id = w.emp_id "
-                   "JOIN candidates c ON c.candidate_id = u.candidate_id WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM offboarding_workflow WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM resignations WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM onboarding_tasks WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM offboarding_tasks WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM exit_interviews WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM onboarding_workflow WHERE candidate_id IN "
-                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM salary_structures WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM documents WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM assets WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM notifications WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM audit_log WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM user_sessions WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM employee_documents WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM user_permissions WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM password_reset_tokens WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM shift_assignments WHERE emp_id IN ("
-                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
-                   "WHERE c.email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM users WHERE candidate_id IN "
-                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM offer_letters WHERE candidate_id IN "
-                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
-        pc.execute("DELETE FROM candidates WHERE email LIKE 'probe-cand-%'")
         pc.execute("DELETE FROM payroll_approvals WHERE run_id IN "
                    "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_items WHERE run_id IN "
@@ -214,6 +446,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             "DELETE FROM user_sessions WHERE emp_id = 'EMP002' AND session_date = %s",
             [attendance_date],
         )
+    _remove_probe_upload_files(upload_paths)
 
     def run(name, fn):
         try:

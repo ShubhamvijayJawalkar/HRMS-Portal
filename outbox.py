@@ -122,7 +122,7 @@ def _backoff_seconds(attempts: int) -> int:
 
 def _handle_payroll_finalized(conn, row) -> bool:
     """Post-payroll: notify every employee on the run with their net pay."""
-    from app import gen_id  # lazy
+    from app import _is_public_target_schema, _next_generated_id, gen_id  # lazy
     payload = _payload(row) or {}
     run_id = int(payload.get('run_id', row[3] or 0))
     try:
@@ -136,7 +136,8 @@ def _handle_payroll_finalized(conn, row) -> bool:
             conn.execute(
                 "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
                 "VALUES (?, ?, 'Payroll', 'Payroll', ?, '/my-payslips', ?)",
-                [gen_id(), emp_id, f'Salary for run {run_id} credited: Rs.{float(net):,.2f}', now],
+                [(_next_generated_id(conn, 'notifications', 'notification_id') if _is_public_target_schema() else gen_id()),
+                 emp_id, f'Salary for run {run_id} credited: Rs.{float(net):,.2f}', now],
             )
         return True
     except Exception as exc:
@@ -158,8 +159,7 @@ def _handle_offer_created(conn, row) -> bool:
         f"(salary Rs.{payload.get('salary', 0):,}) is ready. Please review and respond."
     )
     try:
-        send_email(email, subject, body)
-        return True
+        return bool(send_email(email, subject, body))
     except Exception as exc:
         logger.warning('outbox offer.created email failed: %s', exc)
         return False
@@ -167,7 +167,7 @@ def _handle_offer_created(conn, row) -> bool:
 
 def _handle_offer_accepted(conn, row) -> bool:
     """Onboarding: notify HR/Admin that the guarded hire workflow started."""
-    from app import gen_id  # lazy
+    from app import _is_public_target_schema, _next_generated_id, gen_id  # lazy
     payload = _payload(row) or {}
     cid = payload.get('candidate_id')
     try:
@@ -180,7 +180,8 @@ def _handle_offer_accepted(conn, row) -> bool:
             conn.execute(
                 "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
                 "VALUES (?, ?, 'Onboarding', 'Onboarding', ?, '/onboarding', ?)",
-                [gen_id(), recipient, f'Candidate {cid} accepted — onboarding workflow started', datetime.now()],
+                [(_next_generated_id(conn, 'notifications', 'notification_id') if _is_public_target_schema() else gen_id()),
+                 recipient, f'Candidate {cid} accepted — onboarding workflow started', datetime.now()],
             )
         return True
     except Exception as exc:
@@ -190,21 +191,22 @@ def _handle_offer_accepted(conn, row) -> bool:
 
 def _handle_credentials_issued(conn, row) -> bool:
     """Email the one-time credential link after provisioning completes."""
-    from app import send_email  # lazy
+    from app import _decrypt_lifecycle_secret, send_email  # lazy
     payload = _payload(row) or {}
     emp_id = payload.get('emp_id')
-    if not emp_id or not payload.get('reset_token'):
+    encrypted_token = payload.get('reset_token_encrypted')
+    if not emp_id or not encrypted_token:
         return False
     try:
+        reset_token = _decrypt_lifecycle_secret(encrypted_token)
         user = conn.execute("SELECT email, name FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         if not user:
             return False
-        send_email(
+        return bool(send_email(
             user[0], 'Your HRMS login is ready',
             f"Hi {user[1]}, your HRMS account is active. Use this one-time password reset token: "
-            f"{payload['reset_token']} (valid for 24 hours).",
-        )
-        return True
+            f"{reset_token} (valid for 24 hours).",
+        ))
     except Exception as exc:
         logger.warning('outbox credentials.issued handler failed: %s', exc)
         return False

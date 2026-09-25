@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 68 on DuckDB, 72 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 72 on DuckDB, 76 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (68 on DuckDB, 72 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (72 on DuckDB, 76 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (16 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -164,7 +164,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 7 new unit tests; DuckDB suite is 68 passed / 5 skipped (PG-gated). The
+- 7 new unit tests; DuckDB suite is 72 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
 
@@ -221,7 +221,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 - Compatibility DDL is additive for DuckDB/legacy. The canonical target adds
   task stage columns, workflow timestamps, exit-workflow linkage,
   `offboarding_approvals`, and `offboarding_settlements` via Alembic revision
-  `0002_lifecycle_workflows`; the public schema is not
+  `0002_lifecycle_workflows` plus `0003_lifecycle_hardening`; the public schema is not
   silently reshaped at boot.
 - The public-flip probe now exercises the complete guarded hire → pre-boarding
   → offboarding journey in addition to the existing GET/write matrix.

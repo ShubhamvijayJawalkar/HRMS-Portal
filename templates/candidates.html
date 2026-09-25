@@ -94,6 +94,7 @@
     </div>
 </div>
 <script>
+function esc(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 document.addEventListener('DOMContentLoaded', async () => {
     const r = await fetch('/api/jobs');
     const jobs = await r.json();
@@ -108,10 +109,10 @@ async function loadCandidates() {
     const tbody = document.getElementById('candTable');
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No candidates</td></tr>'; return; }
     tbody.innerHTML = data.map(c => `<tr>
-        <td><strong>${c.name}</strong></td><td>${c.email}</td><td>${c.phone || '-'}</td>
-        <td>${c.job_title}</td>
-        <td><span class="status-${c.status}">${c.status}</span></td>
-        <td>${c.applied_at ? new Date(c.applied_at).toLocaleDateString() : '-'}</td>
+        <td><strong>${esc(c.name)}</strong></td><td>${esc(c.email)}</td><td>${esc(c.phone || '-')}</td>
+        <td>${esc(c.job_title)}</td>
+        <td><span class="status-${esc(c.status)}">${esc(c.status)}</span></td>
+        <td>${c.applied_at ? esc(new Date(c.applied_at).toLocaleDateString()) : '-'}</td>
         <td>
             <select class="form-select form-select-sm d-inline-block w-auto" onchange="updateStatus(${c.id}, this.value)">
                 <option value="Applied" ${c.status==='Applied'?'selected':''}>Applied</option>

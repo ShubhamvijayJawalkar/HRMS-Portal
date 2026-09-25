@@ -149,7 +149,7 @@ def init_csrf(app) -> None:
         # Scoped pre-boarding links authenticate with their signed token and
         # intentionally have no normal login/CSRF session. The lifecycle route
         # validates the token before accepting any mutation.
-        if request.path.startswith("/api/preboarding/"):
+        if request.path.startswith(("/api/preboarding/", "/api/v1/preboarding/")):
             return None
         established = session.get(CSRF_KEY)
 

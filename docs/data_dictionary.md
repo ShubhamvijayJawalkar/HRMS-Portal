@@ -1,6 +1,6 @@
 # HRMS v2.0 — Data Dictionary
 
-_Generated 2026-09-25T09:14:08.929021+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
+_Generated 2026-09-25T10:18:08.316406+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
 
 Corresponds to SRS v2.0 §7 (Data model & database constraints). 
 Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4), `audit-indefinite-with-review`. PII columns are permission-gated behind `pii_reveal`.
@@ -270,7 +270,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 - Retention class: **transactional**
 - Primary key: `interview_id`
-- Foreign keys: `emp_id` → `users.emp_id`
+- Foreign keys: `emp_id` → `users.emp_id`; `offboard_id` → `offboarding_workflow.offboard_id`
 - Unique indexes: none
 
 | Column | Type | Null | Default | PII |
@@ -639,9 +639,9 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `offer_id` | bigint | N | `` |  |
 | `candidate_id` | bigint | N | `` |  |
 | `offered_salary` | numeric | Y | `` |  |
-| `basic_pct` | numeric | Y | `` |  |
-| `hra_pct` | numeric | Y | `` |  |
-| `allowances_pct` | numeric | Y | `` |  |
+| `basic_pct` | numeric | N | `` |  |
+| `hra_pct` | numeric | N | `` |  |
+| `allowances_pct` | numeric | N | `` |  |
 | `offer_date` | date | N | `` |  |
 | `status` | character varying | N | `'Pending'::character varying` |  |
 | `accepted_at` | timestamp with time zone | Y | `` |  |
@@ -848,7 +848,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 - Retention class: **transactional**
 - Primary key: `resignation_id`
 - Foreign keys: `emp_id` → `users.emp_id`
-- Unique indexes: `uq_active_resignation` (emp_id) WHERE ((status)::text <> 'Cancelled'::text)
+- Unique indexes: `uq_active_resignation` (emp_id) WHERE ((status)::text <> ALL ((ARRAY['Cancelled'::character varying, 'Revoked'::character varying])::text[]))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|

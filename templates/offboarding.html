@@ -88,13 +88,14 @@
     </div>
 </div>
 <script>
+function esc(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 document.addEventListener('DOMContentLoaded', () => { loadTasks(); loadWorkflows(); });
 async function loadWorkflows() {
     const r = await fetch('/api/offboarding-workflows');
     const data = await r.json();
     const tbody = document.getElementById('workflowTable');
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No offboarding workflows</td></tr>'; return; }
-    tbody.innerHTML = data.map(w => `<tr><td><strong>${w.employee}</strong><div class="small text-muted">${w.emp_id}</div></td><td>${w.last_working_day}</td><td>${w.stages.stage1}</td><td>${w.stages.stage2}</td><td>${w.stages.stage3}</td><td>${w.stages.stage4}</td><td>${w.stages.stage5}</td></tr>`).join('');
+    tbody.innerHTML = data.map(w => `<tr><td><strong>${esc(w.employee)}</strong><div class="small text-muted">${esc(w.emp_id)}</div></td><td>${esc(w.last_working_day)}</td><td>${esc(w.stages.stage1)}</td><td>${esc(w.stages.stage2)}</td><td>${esc(w.stages.stage3)}</td><td>${esc(w.stages.stage4)}</td><td>${esc(w.stages.stage5)}</td></tr>`).join('');
 }
 async function loadTasks() {
     const r = await fetch('/api/offboarding-tasks');
@@ -102,10 +103,10 @@ async function loadTasks() {
     const tbody = document.getElementById('tasksTable');
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No tasks</td></tr>'; return; }
     tbody.innerHTML = data.map(t => `<tr>
-        <td>${t.task}</td><td>${t.assigned_to}</td>
-        <td>${t.due_date || '-'}</td>
-        <td><span class="status-${t.status}">${t.status}</span></td>
-        <td>${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
+        <td>${esc(t.task)}</td><td>${esc(t.assigned_to)}</td>
+        <td>${esc(t.due_date || '-')}</td>
+        <td><span class="status-${esc(t.status)}">${esc(t.status)}</span></td>
+        <td>${t.completed_at ? esc(new Date(t.completed_at).toLocaleString()) : '-'}</td>
     </tr>`).join('');
 }
 </script>

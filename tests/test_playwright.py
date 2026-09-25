@@ -327,4 +327,5 @@ def test_ats_offer_and_preboarding_browser_flow(page):
     page.wait_for_timeout(500)
     assert 'Current step: 2 of 5' in page.text_content('body')
     page.goto(BASE_URL + '/admin/candidates')
+    page.wait_for_selector('select option[value="Hired"]', state='attached', timeout=10000)
     assert page.locator('option[value="Hired"]').first.is_disabled()

@@ -88,6 +88,7 @@
     </div>
 </div>
 <script>
+function esc(value) { return String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;'); }
 document.addEventListener('DOMContentLoaded', () => { loadTasks(); loadWorkflows(); });
 async function loadWorkflows() {
     const r = await fetch('/api/onboarding-workflows');
@@ -96,7 +97,7 @@ async function loadWorkflows() {
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No active onboarding workflows</td></tr>'; return; }
     tbody.innerHTML = data.map(w => {
         const completed = Object.values(w.steps || {}).filter(v => v === 'Completed').length;
-        return `<tr><td><strong>${w.employee}</strong><div class="small text-muted">${w.emp_id}</div></td><td>${w.current_step} / 5</td><td>${completed} / 5</td><td>${w.days_in_step}</td></tr>`;
+        return `<tr><td><strong>${esc(w.employee)}</strong><div class="small text-muted">${esc(w.emp_id)}</div></td><td>${esc(w.current_step)} / 5</td><td>${esc(completed)} / 5</td><td>${esc(w.days_in_step)}</td></tr>`;
     }).join('');
 }
 async function loadTasks() {
@@ -105,10 +106,10 @@ async function loadTasks() {
     const tbody = document.getElementById('tasksTable');
     if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No tasks</td></tr>'; return; }
     tbody.innerHTML = data.map(t => `<tr>
-        <td>${t.task}</td><td>${t.assigned_to}</td>
-        <td>${t.due_date || '-'}</td>
-        <td><span class="status-${t.status}">${t.status}</span></td>
-        <td>${t.completed_at ? new Date(t.completed_at).toLocaleString() : '-'}</td>
+        <td>${esc(t.task)}</td><td>${esc(t.assigned_to)}</td>
+        <td>${esc(t.due_date || '-')}</td>
+        <td><span class="status-${esc(t.status)}">${esc(t.status)}</span></td>
+        <td>${t.completed_at ? esc(new Date(t.completed_at).toLocaleString()) : '-'}</td>
     </tr>`).join('');
 }
 </script>

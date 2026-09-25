@@ -43,8 +43,9 @@ UPDATE_LOG = [
     ("2026-09-25", "FR-ATS/FR-ONB/FR-OFF corrected lifecycle implemented: guarded ATS state machine, "
      "100% offer splits, atomic accepted-offer conversion, signed pre-boarding tokens and real-file "
      "validation, five-step guarded onboarding, parallel offboarding with F&F maker-checker, and "
-     "IST LWD access revocation. DuckDB 68 passed / 5 skipped; PostgreSQL 72 passed / 1 skipped; "
-     "Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
+     "IST LWD access revocation, plus lifecycle hardening (strict split precision, ETL preservation, "
+     "session revocation, encrypted credential delivery, and document authorization). DuckDB 72 passed / "
+     "5 skipped; PostgreSQL 76 passed / 1 skipped; Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
     ("2026-09-24", "FR-PAY-06 maker-checker payroll implemented: Draft → Submitted → Approved → "
      "Finalized, Finance/Admin authorization, self-approval rejection, payroll_approvals trail, "
      "adjustment-run reference, Finance UI access, and public probe coverage. DuckDB 64 passed / "
@@ -66,7 +67,7 @@ UPDATE_LOG = [
 TASKS = [
     # ── Phase 0-1 ────────────────────────────────────────────────────────
     ("Phase 0-1", "Freeze the v1.0 DuckDB schema; inventory tables for ETL", "Schema freeze note in docs/MIGRATION.md (08f7e40)", DONE),
-    ("Phase 0-1", "Build v2.0 target schema (db/postgres_schema.sql + Alembic baseline)", "49-table public schema, CC-01..CC-16 documented (08f7e40)", DONE),
+    ("Phase 0-1", "Build v2.0 target schema (db/postgres_schema.sql + Alembic baseline)", "50-table public schema, CC-01..CC-16 documented (08f7e40)", DONE),
     ("Phase 0-1", "One-time DuckDB -> PostgreSQL ETL with reconciliation", "hrms DB seeded; counts reconciled (08f7e40)", DONE),
     # ── Phase 2 ──────────────────────────────────────────────────────────
     ("Phase 2", "DuckDB->psycopg adapter (db_backend.py): translate/strftime/autocommit", "App runs on PostgreSQL legacy schema (b9164f2)", DONE),
@@ -96,9 +97,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "68 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "72 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "72 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "72 passed, 5 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "76 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "76 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),

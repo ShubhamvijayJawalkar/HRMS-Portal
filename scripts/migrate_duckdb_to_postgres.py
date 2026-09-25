@@ -64,13 +64,21 @@ PARENT_KEY = {
     "expense_categories": "cat_id",
     "tickets": "ticket_id",
     "payroll_runs": "run_id",
+    "resignations": "resignation_id",
+    "onboarding_workflow": "workflow_id",
+    "offboarding_workflow": "offboard_id",
 }
 
 # child_table -> list of (fk_column, parent_table, nullable)
 #   nullable=True  → orphaned value becomes NULL (recorded)
 #   nullable=False → the whole row is skipped (recorded)
 FKS: dict[str, list[tuple[str, str, bool]]] = {
-    "users": [("manager_emp_id", "users", True)],
+    "users": [
+        ("manager_emp_id", "users", True),
+        # A pre-hire points back to the candidate that produced it.  The
+        # candidate parent is loaded before users in REGISTRY.
+        ("candidate_id", "candidates", True),
+    ],
     "user_sessions": [("emp_id", "users", False)],
     "break_approvals": [
         ("emp_id", "users", False),
@@ -90,9 +98,39 @@ FKS: dict[str, list[tuple[str, str, bool]]] = {
     "candidates": [("job_id", "job_postings", True)],
     "interviews": [("candidate_id", "candidates", False)],
     "offer_letters": [("candidate_id", "candidates", False)],
-    "onboarding_tasks": [("emp_id", "users", False), ("assigned_to", "users", False)],
-    "offboarding_tasks": [("emp_id", "users", False), ("assigned_to", "users", False)],
-    "exit_interviews": [("emp_id", "users", False)],
+    # assigned_to is a symbolic owner (HR/IT/Finance/Manager) or an employee
+    # id, not a required users FK in the lifecycle task tables.
+    "onboarding_tasks": [("emp_id", "users", False)],
+    "onboarding_workflow": [
+        ("emp_id", "users", False),
+        ("candidate_id", "candidates", True),
+    ],
+    "onboarding_checklist": [
+        ("workflow_id", "onboarding_workflow", False),
+        ("reviewed_by", "users", True),
+    ],
+    "offboarding_tasks": [("emp_id", "users", False)],
+    "resignations": [
+        ("emp_id", "users", False),
+        ("initiated_by", "users", False),
+    ],
+    "offboarding_workflow": [
+        ("resignation_id", "resignations", False),
+        ("emp_id", "users", False),
+    ],
+    "offboarding_approvals": [
+        ("offboard_id", "offboarding_workflow", False),
+        ("actor_emp_id", "users", False),
+    ],
+    "offboarding_settlements": [
+        ("offboard_id", "offboarding_workflow", False),
+        ("prepared_by", "users", False),
+        ("approved_by", "users", True),
+    ],
+    "exit_interviews": [
+        ("emp_id", "users", False),
+        ("offboard_id", "offboarding_workflow", True),
+    ],
     "salary_structures": [("emp_id", "users", False)],
     "payroll_runs": [
         ("submitted_by", "users", True), ("approved_by", "users", True),
@@ -180,6 +218,67 @@ def checksum(rows) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _quote_identifier(identifier: str) -> str:
+    """Quote a source identifier used in a generated DuckDB SELECT."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _source_catalog(src) -> dict[str, set[str]]:
+    """Return the DuckDB main-schema table/column catalog.
+
+    The corrected lifecycle columns and tables were added after the original
+    v1.0 ETL.  Introspecting the source lets this migration preserve them when
+    present while still accepting an older DuckDB file.
+    """
+    catalog: dict[str, set[str]] = {}
+    rows = src.execute("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'main'
+    """).fetchall()
+    for table_name, column_name in rows:
+        catalog.setdefault(str(table_name).lower(), set()).add(str(column_name).lower())
+    return catalog
+
+
+def _source_select(entry: dict, available_columns: set[str]) -> str:
+    """Build a source query, using safe defaults for optional legacy columns.
+
+    Entries without ``source_names`` retain their hand-written query.  For
+    lifecycle-aware entries, ``source_names`` is aligned with ``columns`` and
+    ``source_defaults`` supplies a SQL expression when a source column is
+    absent (or NULL when present).  This is deliberately data-shape aware,
+    rather than relying on a hard-coded old v1.0 SELECT.
+    """
+    source_names = entry.get("source_names")
+    if not source_names:
+        return entry["select"]
+
+    columns = entry["columns"]
+    if len(source_names) != len(columns):
+        raise ValueError(f"{entry['table']}: source_names/columns length mismatch")
+
+    defaults = entry.get("source_defaults", {})
+    expressions = []
+    for target_column, source_name in zip(columns, source_names):
+        default = defaults.get(target_column, "NULL")
+        if source_name is None or source_name.lower() not in available_columns:
+            expression = default
+        elif default == "NULL":
+            expression = _quote_identifier(source_name)
+        else:
+            expression = f"COALESCE({_quote_identifier(source_name)}, {default})"
+        expressions.append(f"{expression} AS {_quote_identifier(target_column)}")
+
+    order_by = ""
+    first_source = source_names[0]
+    if first_source and first_source.lower() in available_columns:
+        order_by = f" ORDER BY {_quote_identifier(first_source)}"
+    return (
+        f"SELECT {', '.join(expressions)} FROM {_quote_identifier(entry['table'])}{order_by}"
+    )
+
+
 def split_sql_statements(sql: str) -> list[str]:
     """Split a SQL script on top-level semicolons, ignoring comments, string
     literals and quoted identifiers (so `-- ... load directly; ` doesn't cut)."""
@@ -252,7 +351,32 @@ def _row_fn_none(row):
     return tuple(row)
 
 
+def _offer_row_fn(row):
+    """Keep percentage values at the target NUMERIC(5,2) scale."""
+    percentages = tuple(
+        Decimal(str(value)).quantize(Decimal("0.01")) if value is not None else None
+        for value in row[3:6]
+    )
+    return (*row[:3], *percentages, *row[6:])
+
+
 REGISTRY: list[dict] = [
+    # Load candidates before users: users.candidate_id is the durable link from
+    # an accepted offer to its pre-hire account.
+    dict(
+        table="job_postings",
+        columns=["job_id", "title", "department", "location", "description", "requirements", "status", "created_at"],
+        select="SELECT job_id, title, department, location, description, requirements, status, created_at FROM job_postings ORDER BY job_id",
+        row_fn=_row_fn_none,
+        pk="job_id",
+    ),
+    dict(
+        table="candidates",
+        columns=["candidate_id", "job_id", "name", "email", "phone", "resume_text", "status", "applied_at"],
+        select="SELECT candidate_id, job_id, name, email, phone, resume_text, status, applied_at FROM candidates ORDER BY candidate_id",
+        row_fn=_row_fn_none,
+        pk="candidate_id",
+    ),
     dict(
         table="users",
         columns=[
@@ -265,10 +389,28 @@ REGISTRY: list[dict] = [
             SELECT emp_id, name, email, password, role, department, designation,
                    manager_emp_id, phone, date_of_birth, date_of_joining, address,
                    emergency_contact_name, emergency_contact_phone, status, allow_login,
-                   allow_breaks, first_login, created_at
+                   allow_breaks, first_login, created_at, is_super_admin, candidate_id
             FROM users ORDER BY emp_id
         """,
-        row_fn=lambda r: (*r[:15], _to_bool(r[15]), _to_bool(r[16]), *r[17:], False, None),
+        source_names=[
+            "emp_id", "name", "email", "password", "role", "department", "designation",
+            "manager_emp_id", "phone", "date_of_birth", "date_of_joining", "address",
+            "emergency_contact_name", "emergency_contact_phone", "status", "allow_login",
+            "allow_breaks", "first_login", "created_at", "is_super_admin", "candidate_id",
+        ],
+        source_defaults={
+            "role": "'Employee'",
+            "status": "'Active'",
+            "allow_login": "TRUE",
+            "allow_breaks": "TRUE",
+            "created_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+            "is_super_admin": "FALSE",
+            "candidate_id": "NULL",
+        },
+        row_fn=lambda r: (
+            *r[:15], _to_bool(r[15]), _to_bool(r[16]), *r[17:19],
+            _to_bool(r[19]) if r[19] is not None else False, r[20],
+        ),
         pk="emp_id",
     ),
     dict(
@@ -277,13 +419,6 @@ REGISTRY: list[dict] = [
         select="SELECT cat_id, name, description FROM expense_categories ORDER BY cat_id",
         row_fn=_row_fn_none,
         pk="cat_id",
-    ),
-    dict(
-        table="job_postings",
-        columns=["job_id", "title", "department", "location", "description", "requirements", "status", "created_at"],
-        select="SELECT job_id, title, department, location, description, requirements, status, created_at FROM job_postings ORDER BY job_id",
-        row_fn=_row_fn_none,
-        pk="job_id",
     ),
     dict(
         table="break_types",
@@ -404,46 +539,219 @@ REGISTRY: list[dict] = [
         pk="asset_id",
     ),
     dict(
-        table="candidates",
-        columns=["candidate_id", "job_id", "name", "email", "phone", "resume_text", "status", "applied_at"],
-        select="SELECT candidate_id, job_id, name, email, phone, resume_text, status, applied_at FROM candidates ORDER BY candidate_id",
-        row_fn=_row_fn_none,
-        pk="candidate_id",
-    ),
-    dict(
         table="interviews",
         columns=["interview_id", "candidate_id", "scheduled_at", "interviewer", "mode", "feedback", "status"],
         select="SELECT interview_id, candidate_id, scheduled_at, interviewer, mode, feedback, status FROM interviews ORDER BY interview_id",
         row_fn=_row_fn_none,
         pk="interview_id",
     ),
-    # v1.0's fixed 50/20/20 split summed to 90% (A-20); migrated offers get a
-    # validated legacy split 50/30/20 so split_sums_100 holds for old rows.
+    # Old v1.0 offers had no percentage columns (and its fixed split was
+    # 50/20/20).  Corrected source offers are read as-is; only absent/NULL
+    # legacy values receive the validated 50/30/20 compatibility split.
     dict(
         table="offer_letters",
         columns=["offer_id", "candidate_id", "offered_salary", "basic_pct", "hra_pct", "allowances_pct", "offer_date", "status", "accepted_at", "notes"],
-        select="SELECT offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes FROM offer_letters ORDER BY offer_id",
-        row_fn=lambda r: (r[0], r[1], r[2], Decimal("50.00"), Decimal("30.00"), Decimal("20.00"), *r[3:]),
+        select="""
+            SELECT offer_id, candidate_id, offered_salary, basic_pct, hra_pct,
+                   allowances_pct, offer_date, status, accepted_at, notes
+            FROM offer_letters ORDER BY offer_id
+        """,
+        source_names=[
+            "offer_id", "candidate_id", "offered_salary", "basic_pct", "hra_pct",
+            "allowances_pct", "offer_date", "status", "accepted_at", "notes",
+        ],
+        source_defaults={
+            "basic_pct": "CAST(50.00 AS DECIMAL(5,2))",
+            "hra_pct": "CAST(30.00 AS DECIMAL(5,2))",
+            "allowances_pct": "CAST(20.00 AS DECIMAL(5,2))",
+            "offer_date": "CURRENT_DATE",
+            "status": "'Pending'",
+        },
+        row_fn=_offer_row_fn,
         pk="offer_id",
     ),
     dict(
         table="onboarding_tasks",
         columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
-        select="SELECT task_id, emp_id, task_name, assigned_to, status, due_date, completed_at FROM onboarding_tasks ORDER BY task_id",
-        row_fn=lambda r: (*r, 1),
+        select="""
+            SELECT task_id, emp_id, task_name, assigned_to, status, due_date,
+                   completed_at, stage
+            FROM onboarding_tasks ORDER BY task_id
+        """,
+        source_names=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
+        source_defaults={"assigned_to": "'HR'", "status": "'Pending'", "stage": "1"},
+        row_fn=_row_fn_none,
         pk="task_id",
     ),
     dict(
         table="offboarding_tasks",
         columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
-        select="SELECT task_id, emp_id, task_name, assigned_to, status, due_date, completed_at FROM offboarding_tasks ORDER BY task_id",
-        row_fn=lambda r: (*r, 1),
+        select="""
+            SELECT task_id, emp_id, task_name, assigned_to, status, due_date,
+                   completed_at, stage
+            FROM offboarding_tasks ORDER BY task_id
+        """,
+        source_names=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
+        source_defaults={"assigned_to": "'HR'", "status": "'Pending'", "stage": "1"},
+        row_fn=_row_fn_none,
         pk="task_id",
+    ),
+    # Corrected lifecycle tables are optional for old v1.0 DuckDB files.  When
+    # present, every source row and its status/timestamp is carried forward.
+    dict(
+        table="onboarding_workflow",
+        columns=[
+            "workflow_id", "emp_id", "candidate_id", "current_step", "step_started_at",
+            "step1_status", "step2_status", "step3_status", "step4_status", "step5_status",
+            "completed", "completed_at", "created_at",
+        ],
+        select="""
+            SELECT workflow_id, emp_id, candidate_id, current_step, step_started_at,
+                   step1_status, step2_status, step3_status, step4_status, step5_status,
+                   completed, completed_at, created_at
+            FROM onboarding_workflow ORDER BY workflow_id
+        """,
+        source_names=[
+            "workflow_id", "emp_id", "candidate_id", "current_step", "step_started_at",
+            "step1_status", "step2_status", "step3_status", "step4_status", "step5_status",
+            "completed", "completed_at", "created_at",
+        ],
+        source_defaults={
+            "current_step": "1",
+            "step_started_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+            "step1_status": "'InProgress'",
+            "step2_status": "'Pending'",
+            "step3_status": "'Pending'",
+            "step4_status": "'Pending'",
+            "step5_status": "'Pending'",
+            "completed": "FALSE",
+            "created_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+        },
+        row_fn=lambda r: (*r[:10], _to_bool(r[10]), *r[11:]),
+        pk="workflow_id",
+        source_optional=True,
+    ),
+    dict(
+        table="onboarding_checklist",
+        columns=["item_id", "workflow_id", "doc_type", "status", "uploaded_at", "reviewed_by", "review_note", "reviewed_at"],
+        select="""
+            SELECT item_id, workflow_id, doc_type, status, uploaded_at,
+                   reviewed_by, review_note, reviewed_at
+            FROM onboarding_checklist ORDER BY item_id
+        """,
+        source_names=["item_id", "workflow_id", "doc_type", "status", "uploaded_at", "reviewed_by", "review_note", "reviewed_at"],
+        source_defaults={"status": "'Pending'"},
+        row_fn=_row_fn_none,
+        pk="item_id",
+        source_optional=True,
+    ),
+    dict(
+        table="resignations",
+        columns=["resignation_id", "emp_id", "notice_date", "last_working_day", "reason", "initiated_by", "status", "created_at", "version"],
+        select="""
+            SELECT resignation_id, emp_id, notice_date, last_working_day, reason,
+                   initiated_by, status, created_at, version
+            FROM resignations ORDER BY resignation_id
+        """,
+        source_names=["resignation_id", "emp_id", "notice_date", "last_working_day", "reason", "initiated_by", "status", "created_at", "version"],
+        source_defaults={
+            "notice_date": "CURRENT_DATE",
+            "last_working_day": "CURRENT_DATE",
+            "status": "'Pending'",
+            "created_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+            "version": "1",
+        },
+        row_fn=_row_fn_none,
+        pk="resignation_id",
+        source_optional=True,
+    ),
+    dict(
+        table="offboarding_workflow",
+        columns=[
+            "offboard_id", "resignation_id", "emp_id", "stage1_status", "stage2_status",
+            "stage3_status", "stage4_status", "stage5_status", "completed",
+            "completed_at", "created_at",
+        ],
+        select="""
+            SELECT offboard_id, resignation_id, emp_id, stage1_status, stage2_status,
+                   stage3_status, stage4_status, stage5_status, completed,
+                   completed_at, created_at
+            FROM offboarding_workflow ORDER BY offboard_id
+        """,
+        source_names=[
+            "offboard_id", "resignation_id", "emp_id", "stage1_status", "stage2_status",
+            "stage3_status", "stage4_status", "stage5_status", "completed",
+            "completed_at", "created_at",
+        ],
+        source_defaults={
+            "stage1_status": "'Pending'",
+            "stage2_status": "'Pending'",
+            "stage3_status": "'Pending'",
+            "stage4_status": "'Pending'",
+            "stage5_status": "'Pending'",
+            "completed": "FALSE",
+            "created_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+        },
+        row_fn=lambda r: (*r[:8], _to_bool(r[8]), *r[9:]),
+        pk="offboard_id",
+        source_optional=True,
+    ),
+    dict(
+        table="offboarding_approvals",
+        columns=["approval_id", "offboard_id", "actor_emp_id", "action", "from_status", "to_status", "created_at"],
+        select="""
+            SELECT approval_id, offboard_id, actor_emp_id, action, from_status,
+                   to_status, created_at
+            FROM offboarding_approvals ORDER BY approval_id
+        """,
+        source_names=["approval_id", "offboard_id", "actor_emp_id", "action", "from_status", "to_status", "created_at"],
+        source_defaults={"created_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)"},
+        row_fn=_row_fn_none,
+        pk="approval_id",
+        source_optional=True,
+    ),
+    dict(
+        table="offboarding_settlements",
+        columns=[
+            "settlement_id", "offboard_id", "pending_payroll", "lop_adjustment",
+            "leave_encashment", "deductions", "asset_damage", "total_amount", "status",
+            "prepared_by", "prepared_at", "approved_by", "approved_at",
+        ],
+        select="""
+            SELECT settlement_id, offboard_id, pending_payroll, lop_adjustment,
+                   leave_encashment, deductions, asset_damage, total_amount, status,
+                   prepared_by, prepared_at, approved_by, approved_at
+            FROM offboarding_settlements ORDER BY settlement_id
+        """,
+        source_names=[
+            "settlement_id", "offboard_id", "pending_payroll", "lop_adjustment",
+            "leave_encashment", "deductions", "asset_damage", "total_amount", "status",
+            "prepared_by", "prepared_at", "approved_by", "approved_at",
+        ],
+        source_defaults={
+            "pending_payroll": "CAST(0 AS DECIMAL(14,2))",
+            "lop_adjustment": "CAST(0 AS DECIMAL(14,2))",
+            "leave_encashment": "CAST(0 AS DECIMAL(14,2))",
+            "deductions": "CAST(0 AS DECIMAL(14,2))",
+            "asset_damage": "CAST(0 AS DECIMAL(14,2))",
+            "total_amount": "CAST(0 AS DECIMAL(14,2))",
+            "status": "'Prepared'",
+            "prepared_at": "CAST(CURRENT_TIMESTAMP AS TIMESTAMP)",
+        },
+        row_fn=_row_fn_none,
+        pk="settlement_id",
+        source_optional=True,
     ),
     dict(
         table="exit_interviews",
-        columns=["interview_id", "emp_id", "reason", "feedback", "exit_date", "created_at"],
-        select="SELECT interview_id, emp_id, reason, feedback, exit_date, created_at FROM exit_interviews ORDER BY interview_id",
+        columns=["interview_id", "emp_id", "reason", "feedback", "exit_date", "created_at", "offboard_id"],
+        select="""
+            SELECT interview_id, emp_id, reason, feedback, exit_date, created_at,
+                   offboard_id
+            FROM exit_interviews ORDER BY interview_id
+        """,
+        source_names=["interview_id", "emp_id", "reason", "feedback", "exit_date", "created_at", "offboard_id"],
+        source_defaults={"offboard_id": "NULL"},
         row_fn=_row_fn_none,
         pk="interview_id",
     ),
@@ -564,6 +872,11 @@ CLEANUP_RULES = {
     "dup_payroll_run": (
         "uq_payroll_period (FR-PAY-05): duplicate runs for the same month/year — "
         "earliest kept, later runs become Cancelled"
+    ),
+    "dup_active_offer": (
+        "uq_active_offer_candidate (FR-ATS-04): one active offer per candidate — "
+        "an Accepted offer wins, then the lowest offer_id wins ties; later rows "
+        "are removed"
     ),
     "dup_email": (
         "uq_users_email_ci (FR-USR-02): duplicate email addresses — REPORT ONLY, "
@@ -759,7 +1072,42 @@ def _execute_cleanup(pg, ledger, apply: bool) -> list[str]:
         """,
     )
 
-    # 8. overlapping/open-ended salary structures per employee (A-10) → close
+    # 8. duplicate active offers per candidate → retain one deterministically.
+    #    Prefer an Accepted row, then the lowest offer_id.  This mirrors the
+    #    lifecycle migration and removes only the later conflicting records
+    #    before the partial unique index is applied in PART B.
+    run(
+        "dup_active_offer", "offer_letters",
+        count_sql="""
+            WITH ranked AS (
+                SELECT offer_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY candidate_id
+                           ORDER BY CASE WHEN status = 'Accepted' THEN 0 ELSE 1 END,
+                                    offer_id
+                       ) AS rn
+                FROM offer_letters
+                WHERE status IN ('Pending', 'Accepted')
+            ) SELECT COUNT(*) FROM ranked WHERE rn > 1
+        """,
+        fix_sql="""
+            WITH ranked AS (
+                SELECT offer_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY candidate_id
+                           ORDER BY CASE WHEN status = 'Accepted' THEN 0 ELSE 1 END,
+                                    offer_id
+                       ) AS rn
+                FROM offer_letters
+                WHERE status IN ('Pending', 'Accepted')
+            )
+            DELETE FROM offer_letters o
+             USING ranked r
+             WHERE o.offer_id = r.offer_id AND r.rn > 1
+        """,
+    )
+
+    # 9. overlapping/open-ended salary structures per employee (A-10) → close
     #    earlier rows at the next effective_from − 1 day; latest stays open.
     structures = pg.execute(text("""
         SELECT struct_id, emp_id, effective_from, effective_to
@@ -787,7 +1135,7 @@ def _execute_cleanup(pg, ledger, apply: bool) -> list[str]:
                     {"d": closed_on, "id": sid},
                 )
 
-    # 9. duplicate emails (case-insensitive) → report only, blocks Part B
+    # 10. duplicate emails (case-insensitive) → report only, blocks Part B
     dup_emails = pg.execute(text("""
         SELECT lower(email), array_agg(emp_id ORDER BY emp_id)
         FROM users
@@ -847,6 +1195,7 @@ def main() -> int:
 
     engine = create_engine(args.database_url)
     src = duckdb.connect(str(duck_path), read_only=True)
+    source_catalog = _source_catalog(src)
 
     report: dict = {
         "started_at": datetime.now(UTC).isoformat(),
@@ -876,9 +1225,13 @@ def main() -> int:
 
     with engine.begin() as pg:
         for entry in REGISTRY:
-            table, columns, select, row_fn = entry["table"], entry["columns"], entry["select"], entry["row_fn"]
-
-            raw = src.execute(select).fetchall()
+            table, columns, row_fn = entry["table"], entry["columns"], entry["row_fn"]
+            source_present = table in source_catalog
+            if entry.get("source_optional") and not source_present:
+                raw = []
+            else:
+                select = _source_select(entry, source_catalog.get(table, set()))
+                raw = src.execute(select).fetchall()
             rows = [tuple(to_pg(v) for v in row_fn(r)) for r in raw]
             assert all(len(r) == len(columns) for r in rows), f"{table}: row/column length mismatch"
 
@@ -934,6 +1287,7 @@ def main() -> int:
 
             loaded_rows[table] = filtered
             report["tables"][table] = dict(
+                source_table_present=source_present,
                 source_count=len(raw),
                 loaded_count=len(filtered),
                 skipped_orphans=len(skipped),

@@ -496,8 +496,8 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **68 DuckDB unit tests passed / 5 skipped**.
-- **72 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **72 DuckDB unit tests passed / 5 skipped**.
+- **76 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **16 Playwright tests passed on both DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
@@ -532,9 +532,9 @@ Draft → Submitted → Approved → Finalized
 
 Validation:
 
-- **68 DuckDB unit tests passed / 5 skipped**.
-- **72 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
-  also **72 passed / 1 skipped**.
+- **72 DuckDB unit tests passed / 5 skipped**.
+- **76 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **76 passed / 1 skipped**.
 - **16 Playwright tests passed on DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
   Finance-submit/Admin-approve/finalize payroll path and the complete
@@ -568,9 +568,10 @@ schemas and the v2.0 `public` schema:
   closes sessions, clears permissions, disables login, and marks employees
   Inactive on LWD.
 - **Schema:** compatibility DDL is additive; canonical changes are in
-  `db/postgres_schema.sql` and Alembic `0002_lifecycle_workflows`, including
-  task stage columns, workflow timestamps, exit-workflow linkage,
-  `offboarding_approvals`, and `offboarding_settlements`.
+  `db/postgres_schema.sql` and Alembic revisions `0002_lifecycle_workflows` plus
+  `0003_lifecycle_hardening`, including task stage columns, workflow timestamps,
+  exit-workflow linkage, strict offer-split constraints, `offboarding_approvals`,
+  and `offboarding_settlements`.
 
 ## 13. Next steps
 

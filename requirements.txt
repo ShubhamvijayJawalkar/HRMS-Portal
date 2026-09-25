@@ -16,4 +16,5 @@ SQLAlchemy>=2.0
 psycopg[binary]>=3.1
 # ── Phase 3a auth hardening (SRS CC-06) ──
 argon2-cffi>=23.1
+cryptography>=42.0
 redis>=5.0

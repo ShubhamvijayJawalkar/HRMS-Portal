@@ -1601,6 +1601,121 @@ def test_offboarding_parallel_clearance_settlement_and_lwd_revocation(client):
     assert sessions == 0
 
 
+def test_offer_percentage_precision_and_offered_state_guards(client):
+    _idem_session(client, 99106)
+    candidate_id = _lifecycle_candidate(client, f'precision-{gen_id()}@example.com')
+    assert client.put(f'/api/candidates/{candidate_id}/status', json={'status': 'Screened'}).status_code == 200
+    assert client.put(f'/api/candidates/{candidate_id}/status', json={'status': 'Interviewed'}).status_code == 200
+    over_precision = client.post('/api/offers', json={
+        'candidate_id': candidate_id, 'offered_salary': 100000,
+        'basic_pct': 33.333, 'hra_pct': 33.333, 'allowances_pct': 33.334,
+    })
+    assert over_precision.status_code == 400
+    non_finite = client.post('/api/offers', json={
+        'candidate_id': candidate_id, 'offered_salary': 100000,
+        'basic_pct': float('nan'), 'hra_pct': 30, 'allowances_pct': 20,
+    })
+    assert non_finite.status_code == 400
+    valid_candidate = _lifecycle_candidate(client, f'precision-valid-{gen_id()}@example.com')
+    _lifecycle_offer(client, valid_candidate, 'precision')
+    assert client.put(f'/api/candidates/{valid_candidate}/status', json={'status': 'Rejected'}).status_code == 409
+
+
+def test_onboarding_review_requires_submission_and_reupload(client):
+    _idem_session(client, 99107)
+    candidate_id = _lifecycle_candidate(client, f'review-{gen_id()}@example.com')
+    offer_id = _lifecycle_offer(client, candidate_id, 'review')
+    accepted = client.post(f'/api/offers/{offer_id}/accept').get_json()
+    token = accepted['preboarding_token']
+    conn = get_db()
+    item_id, doc_type = conn.execute(
+        'SELECT item_id, doc_type FROM onboarding_checklist WHERE workflow_id = ? ORDER BY item_id LIMIT 1',
+        [accepted['workflow_id']],
+    ).fetchone()
+    conn.close()
+    assert client.post(f'/api/onboarding-checklist/{item_id}/review', json={'status': 'Rejected', 'note': 'too early'}).status_code == 409
+    assert client.post(
+        f'/api/preboarding/{token}/documents/{doc_type.replace(" ", "%20")}',
+        data={'file': (BytesIO(b'%PDF-1.4\\nreview'), 'review.pdf', 'application/pdf')},
+    ).status_code == 201
+    assert client.post(f'/api/preboarding/{token}/submit').status_code == 200
+    assert client.post(f'/api/onboarding-checklist/{item_id}/review', json={'status': 'Rejected'}).status_code == 400
+    assert client.post(f'/api/onboarding-checklist/{item_id}/review', json={'status': 'Rejected', 'note': 'reupload please'}).status_code == 200
+    conn = get_db()
+    assert conn.execute('SELECT status FROM onboarding_checklist WHERE item_id = ?', [item_id]).fetchone() == ('Rejected',)
+    conn.close()
+    assert client.post(
+        f'/api/preboarding/{token}/documents/{doc_type.replace(" ", "%20")}',
+        data={'file': (BytesIO(b'%PDF-1.4\\nreview2'), 'review2.pdf', 'application/pdf')},
+    ).status_code == 201
+    conn = get_db()
+    assert conn.execute('SELECT status FROM onboarding_checklist WHERE item_id = ?', [item_id]).fetchone() == ('Uploaded',)
+    conn.close()
+
+
+def test_revoked_signed_cookie_session_is_rejected(client):
+    emp_id = f'SESS{gen_id() % 1000000:06d}'
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO users (emp_id, name, email, password, role, department, status, allow_login, allow_breaks) "
+        "VALUES (?, ?, ?, ?, 'Employee', 'Operations', 'Active', 1, 1)",
+        [emp_id, 'Session Test', f'{emp_id.lower()}@example.com', hash_password('pass123')],
+    )
+    conn.close()
+    try:
+        with client.session_transaction() as sess:
+            sess.update({'emp_id': emp_id, 'name': 'Session Test', 'role': 'Employee', 'department': 'Operations', 'session_id': 99108})
+        conn = get_db()
+        conn.execute("UPDATE users SET status = 'Inactive', allow_login = 0 WHERE emp_id = ?", [emp_id])
+        conn.close()
+        response = client.get('/api/notifications')
+        assert response.status_code in (302, 401)
+        with client.session_transaction() as sess:
+            assert 'emp_id' not in sess
+    finally:
+        conn = get_db()
+        conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
+        conn.close()
+
+
+def test_document_download_is_owner_or_privileged_only(client):
+    import app as app_module
+    suffix = gen_id() % 1000000
+    owner = f'DOC{suffix}O'
+    other = f'DOC{suffix}X'
+    filename = f'test-doc-{suffix}.pdf'
+    path = os.path.join(app_module.UPLOAD_FOLDER, filename)
+    with open(path, 'wb') as handle:
+        handle.write(b'%PDF-1.4\nowner')
+    conn = get_db()
+    for emp_id, name in ((owner, 'Document Owner'), (other, 'Other Employee')):
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, password, role, department, status, allow_login, allow_breaks) "
+            "VALUES (?, ?, ?, ?, 'Employee', 'Operations', 'Active', 1, 1)",
+            [emp_id, name, f'{emp_id.lower()}@example.com', hash_password('pass123')],
+        )
+    did = gen_id()
+    conn.execute(
+        "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, 'Test', ?, ?, ?)",
+        [did, owner, 'private.pdf', filename, os.path.getsize(path), datetime.now()],
+    )
+    conn.close()
+    try:
+        with client.session_transaction() as sess:
+            sess.update({'emp_id': other, 'name': 'Other Employee', 'role': 'Employee', 'department': 'Operations', 'session_id': 99109})
+        assert client.get(f'/api/documents/{did}/download').status_code == 404
+        with client.session_transaction() as sess:
+            sess.update({'emp_id': owner, 'name': 'Document Owner', 'role': 'Employee', 'department': 'Operations', 'session_id': 99110})
+        assert client.get(f'/api/documents/{did}/download').status_code == 200
+    finally:
+        conn = get_db()
+        conn.execute('DELETE FROM documents WHERE doc_id = ?', [did])
+        conn.execute('DELETE FROM users WHERE emp_id IN (?, ?)', [owner, other])
+        conn.close()
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def test_lifecycle_scheduler_job_registered():
     import app as app_module
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
