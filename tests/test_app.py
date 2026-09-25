@@ -166,6 +166,19 @@ def test_production_postgres_defaults_to_public_schema(monkeypatch):
     assert db_backend.app_schema() == 'legacy'
 
 
+def test_etl_allows_missing_post_v1_payroll_approval_table():
+    import duckdb
+
+    from scripts.migrate_duckdb_to_postgres import REGISTRY, _read_source_rows, _source_catalog
+
+    entry = next(item for item in REGISTRY if item['table'] == 'payroll_approvals')
+    source = duckdb.connect(':memory:')
+    present, rows = _read_source_rows(source, entry, _source_catalog(source))
+    source.close()
+    assert not present
+    assert rows == []
+
+
 def test_seed_data_has_multiple_entries_per_model(client):
     conn = get_db()
     tables = [

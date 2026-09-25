@@ -40,15 +40,15 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
-    ("2026-09-25", "Phase 5 cutover readiness started: production PostgreSQL public default, expand/contract "
-     "migrations, Postgres/Redis compose, legacy rollback profile, and a read-only cutover preflight report. "
-     "Traffic switch remains a maintenance-window operation."),
+    ("2026-09-25", "Phase 5 cutover rehearsal completed: frozen-source ETL accepted a missing post-v1.0 "
+     "payroll_approvals table, reconciled Phase-1/Phase-2 data, applied CC-05 cleanup, stamped head, "
+     "passed read-only preflight, and served an authenticated GET/write smoke test. Traffic switch remains a maintenance-window operation."),
     ("2026-09-25", "FR-ATS/FR-ONB/FR-OFF corrected lifecycle implemented: guarded ATS state machine, "
      "100% offer splits, atomic accepted-offer conversion, signed pre-boarding tokens and real-file "
      "validation, five-step guarded onboarding, parallel offboarding with F&F maker-checker, and "
      "IST LWD access revocation, plus lifecycle hardening (strict split precision, ETL preservation, "
-     "session revocation, encrypted credential delivery, and document authorization). DuckDB 73 passed / "
-     "5 skipped; PostgreSQL 77 passed / 1 skipped; Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
+     "session revocation, encrypted credential delivery, and document authorization). DuckDB 74 passed / "
+     "5 skipped; PostgreSQL 78 passed / 1 skipped; Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
     ("2026-09-24", "FR-PAY-06 maker-checker payroll implemented: Draft → Submitted → Approved → "
      "Finalized, Finance/Admin authorization, self-approval rejection, payroll_approvals trail, "
      "adjustment-run reference, Finance UI access, and public probe coverage. DuckDB 64 passed / "
@@ -94,20 +94,21 @@ TASKS = [
     ("Phase 4", "Maker-checker payroll (FR-PAY-06)", "Strict state machine + approval trail + Finance/Admin UI; clean public probe 94/94 GET + 42/42 write", DONE),
     ("Phase 4", "Corrected ATS / onboarding / offboarding flows", "FR-ATS/FR-ONB/FR-OFF acceptance suite + 94/42 public probe", DONE),
     # ── Phase 5-6 ────────────────────────────────────────────────────────
-    ("Phase 5", "Final cutover: flip APP_DB_SCHEMA to public, retire legacy", "Preflight + production default/compose ready; maintenance-window traffic switch pending", IN_PROGRESS),
+    ("Phase 5", "Final cutover: flip APP_DB_SCHEMA to public, retire legacy", "Disposable rehearsal passed ETL/preflight/authenticated smoke; maintenance-window traffic switch pending", IN_PROGRESS),
     ("Phase 6", "Decommission DuckDB runtime", "Out of the ETL blueprint; tracked in SRS", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "73 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "77 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "77 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "74 passed, 5 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "78 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "78 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 42/42 write flows; lifecycle paths included"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0003, identity rules, required tables, and delta report generated"),
+    ("Disposable Phase 5 rehearsal", "hrms_cutover_rehearsal", "ETL Phase-1/2 + CC-05 cleanup + preflight + authenticated GET/write smoke passed"),
 ]
 
 DONE_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p and t[3] == DONE) for p in sorted({t[0] for t in TASKS})}

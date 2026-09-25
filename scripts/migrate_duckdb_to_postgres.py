@@ -279,6 +279,16 @@ def _source_select(entry: dict, available_columns: set[str]) -> str:
     )
 
 
+def _read_source_rows(src, entry: dict, source_catalog: dict[str, set[str]]) -> tuple[bool, list]:
+    """Read one registry entry, allowing explicitly post-v1.0 tables to be absent."""
+    table = entry["table"]
+    source_present = table.lower() in source_catalog
+    if not source_present and entry.get("source_optional"):
+        return False, []
+    select = _source_select(entry, source_catalog.get(table.lower(), set()))
+    return source_present, src.execute(select).fetchall()
+
+
 def split_sql_statements(sql: str) -> list[str]:
     """Split a SQL script on top-level semicolons, ignoring comments, string
     literals and quoted identifiers (so `-- ... load directly; ` doesn't cut)."""
@@ -769,12 +779,16 @@ REGISTRY: list[dict] = [
         row_fn=lambda r: (*r, None, None, None, None, None, None),
         pk="run_id",
     ),
+    # Maker-checker approvals were added after the v1.0 DuckDB shape. An
+    # absent source table means there is no approval trail to preserve; the
+    # target table is still created by PART A and remains empty.
     dict(
         table="payroll_approvals",
         columns=["approval_id", "run_id", "actor_emp_id", "action", "from_status", "to_status", "created_at"],
         select="SELECT approval_id, run_id, actor_emp_id, action, from_status, to_status, created_at FROM payroll_approvals ORDER BY approval_id",
         row_fn=_row_fn_none,
         pk="approval_id",
+        source_optional=True,
     ),
     dict(
         table="payroll_items",
@@ -1226,12 +1240,7 @@ def main() -> int:
     with engine.begin() as pg:
         for entry in REGISTRY:
             table, columns, row_fn = entry["table"], entry["columns"], entry["row_fn"]
-            source_present = table in source_catalog
-            if entry.get("source_optional") and not source_present:
-                raw = []
-            else:
-                select = _source_select(entry, source_catalog.get(table, set()))
-                raw = src.execute(select).fetchall()
+            source_present, raw = _read_source_rows(src, entry, source_catalog)
             rows = [tuple(to_pg(v) for v in row_fn(r)) for r in raw]
             assert all(len(r) == len(columns) for r in rows), f"{table}: row/column length mismatch"
 

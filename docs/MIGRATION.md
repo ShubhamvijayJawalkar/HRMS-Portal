@@ -496,8 +496,8 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **73 DuckDB unit tests passed / 5 skipped**.
-- **77 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **74 DuckDB unit tests passed / 5 skipped**.
+- **78 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **16 Playwright tests passed on both DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
@@ -532,9 +532,9 @@ Draft → Submitted → Approved → Finalized
 
 Validation:
 
-- **73 DuckDB unit tests passed / 5 skipped**.
-- **77 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
-  also **77 passed / 1 skipped**.
+- **74 DuckDB unit tests passed / 5 skipped**.
+- **78 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **78 passed / 1 skipped**.
 - **16 Playwright tests passed on DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
   Finance-submit/Admin-approve/finalize payroll path and the complete
@@ -600,6 +600,13 @@ database was booted without the probe's tolerant wrapper using the explicit
 `HRMS_ALLOW_DEMO_SEED=1` validation override; normal production startup
 refuses an empty target so demo users/passwords cannot be created accidentally.
 The preflight never mutates either schema or changes traffic.
+
+A disposable `hrms_cutover_rehearsal` database was created from Alembic head,
+loaded from a read-only frozen DuckDB snapshot, and completed the full ETL
+(Phase-1 and Phase-2 reconciliation, constraint cleanup, PART B, identity
+sequence advance, and head stamping). The public preflight then passed, and
+an authenticated smoke test covered login, dashboard/profile/pipeline/break
+reads plus a Personal break start/end write.
 
 ### Maintenance-window sequence
 
