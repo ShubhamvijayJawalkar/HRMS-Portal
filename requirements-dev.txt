@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# Test and CI tooling
+pytest>=8.0
+playwright>=1.40
+ruff>=0.6
