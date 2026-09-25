@@ -92,9 +92,11 @@
 </div>
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
-    const r = await fetch('/api/users');
-    const users = await r.json();
+    const r = await fetch('/api/users?per_page=1000');
+    const payload = await r.json();
+    const users = Array.isArray(payload) ? payload : (payload.data || []);
     const sel = document.getElementById('empSelect');
+    sel.innerHTML = '<option value="">Select employee</option>';
     users.forEach(u => { const o = document.createElement('option'); o.value = u.emp_id; o.textContent = `${u.name} (${u.emp_id})`; sel.appendChild(o); });
     loadSalaries();
 });
