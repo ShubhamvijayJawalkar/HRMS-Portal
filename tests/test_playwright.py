@@ -1,5 +1,8 @@
-import os, sys, json, tempfile
+import os
+import sys
+import tempfile
 from datetime import datetime
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{datetime.now().timestamp()}.duckdb')
@@ -10,10 +13,13 @@ if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     import db_backend
     db_backend.reset_schema()
 
+import threading
+import time
+
 import pytest
-from app import app
-import threading, time
 from playwright.sync_api import sync_playwright
+
+from app import app
 
 BASE_URL = 'http://localhost:8787'
 

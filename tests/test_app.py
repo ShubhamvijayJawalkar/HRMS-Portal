@@ -1,6 +1,6 @@
+import json
 import os
 import sys
-import json
 import tempfile
 from datetime import datetime, timedelta
 
@@ -15,7 +15,8 @@ if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     db_backend.reset_schema()
 
 import pytest
-from app import app, get_db, hash_password, check_password, gen_id
+
+from app import app, check_password, gen_id, get_db, hash_password
 
 
 def _attach_csrf(c):
@@ -182,6 +183,7 @@ def test_password_hashing():
 def test_legacy_bcrypt_hash_still_verifies():
     """v1.0 bcrypt hashes must keep working until re-hashed on login (CC-06)."""
     import bcrypt
+
     from security import needs_rehash
     legacy = bcrypt.hashpw(b'test123', bcrypt.gensalt()).decode()
     assert check_password('test123', legacy)
@@ -1301,7 +1303,7 @@ def test_get_shift_resolves_v1_and_unknown(client):
 
 def test_get_shift_start_end_math(client):
     """20:00-05:00 shift: start at 20:00 of the target day, end at 05:00 next day."""
-    from app import _get_shift_start_dt, _get_shift_end_dt
+    from app import _get_shift_end_dt, _get_shift_start_dt
     sd = _get_shift_start_dt('EMP002', target_date=datetime(2030, 1, 15))
     assert sd == datetime(2030, 1, 15, 20, 0, 0)
     ed = _get_shift_end_dt('EMP002', sd)
@@ -1341,7 +1343,7 @@ def test_user_create_roundtrips_shift(client):
 
 def test_shift_24x7_roundtrip(client):
     """'24x7' stays a recognised shift and workday math falls back to midnight."""
-    from app import get_shift, _get_shift_start_dt
+    from app import _get_shift_start_dt, get_shift
     conn = get_db()
     conn.execute("UPDATE users SET shift_start = '24x7', shift_end = '24x7' WHERE emp_id = 'EMP002'")
     conn.close()
@@ -1355,8 +1357,7 @@ def test_shift_assignments_branch_executes_on_duckdb(client):
     for public: create the table, flip the cached model flag, and drive
     get_shift/set_shift/user-CRUD through the assignment branch (inc 2).
     """
-    from app import _shift_model, _SHIFT_MODEL_CACHE, get_shift, set_shift, \
-        _get_shift_start_dt, _get_shift_end_dt
+    from app import _SHIFT_MODEL_CACHE, _get_shift_end_dt, _get_shift_start_dt, _shift_model, get_shift, set_shift
     conn = get_db()
     conn.execute(
         "CREATE TABLE IF NOT EXISTS shift_assignments (emp_id VARCHAR, shift_type VARCHAR, "
@@ -1418,7 +1419,7 @@ def test_shift_assignments_branch_executes_on_duckdb(client):
 )
 def test_shift_assignments_path_on_public():
     """v2.0 public: shifts resolve from shift_assignments, users has no columns."""
-    from app import _shift_model, get_shift, set_shift, _get_shift_start_dt
+    from app import _get_shift_start_dt, _shift_model, get_shift, set_shift
     assert _shift_model() is True
     conn = get_db()
     cols = [r[0] for r in conn.execute(

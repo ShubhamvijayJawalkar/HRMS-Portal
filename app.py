@@ -1,33 +1,32 @@
-import os
-import logging
-import secrets
 import json
+import logging
+import os
+import secrets
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from io import BytesIO
 
 import duckdb
 import pandas as pd
+from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for, send_file, g
+from flasgger import Swagger
+from flask import Flask, g, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 from security import (
-    hash_password,
     check_password,
-    needs_rehash,
+    hash_password,
     init_csrf,
     maybe_enable_redis_sessions,
+    needs_rehash,
 )
-
-from flasgger import Swagger, swag_from
-from apscheduler.schedulers.background import BackgroundScheduler
 
 load_dotenv()
 
-import outbox  # CC-09 transactional outbox (dispatcher job + enqueue helper)
-from idempotency import idempotent  # CC-07 idempotent writes (Idempotency-Key replay)
+import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
+from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
 log_level = getattr(logging, os.getenv('LOG_LEVEL', 'INFO').upper(), logging.INFO)
@@ -3763,9 +3762,9 @@ def delete_document(did):
 #  PHASE 3 — EMAIL NOTIFICATIONS
 # ══════════════════════════════════════════════════════════════════════
 
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import smtplib  # noqa: E402
+from email.mime.multipart import MIMEMultipart  # noqa: E402
+from email.mime.text import MIMEText  # noqa: E402
 
 SMTP_HOST = os.getenv('SMTP_HOST', '')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
@@ -3900,10 +3899,10 @@ def analytics_performance():
 #  PHASE 3 — FULL PAYROLL (Payslip PDF, Bank File, TDS)
 # ══════════════════════════════════════════════════════════════════════
 
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+from reportlab.lib import colors  # noqa: E402
+from reportlab.lib.pagesizes import A4  # noqa: E402
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # noqa: E402
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle  # noqa: E402
 
 
 def generate_payslip_pdf(run_id, emp_id):
@@ -4043,7 +4042,6 @@ def tds_report(rid):
         [rid]
     ).fetchall()
     conn.close()
-    annual_est = float(run[1])
     result = []
     for r in rows:
         monthly_gross = float(r[2])
@@ -4212,7 +4210,9 @@ def export_leaves():
     finally:
         conn.close()
 
-    import io, pandas as pd
+    import io
+
+    import pandas as pd
     data = [{
         'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
         'From': r[3].isoformat(), 'To': r[4].isoformat(), 'Days': (r[4] - r[3]).days + 1,
@@ -4866,8 +4866,10 @@ def get_user_calendar():
     sess_map = {}
     for s in sessions:
         d = s[0].isoformat() if s[0] else None
-        if not d: continue
-        if d not in sess_map: sess_map[d] = []
+        if not d:
+            continue
+        if d not in sess_map:
+            sess_map[d] = []
         sess_map[d].append({
             'login': s[1].strftime('%H:%M') if s[1] else None,
             'logout': s[2].strftime('%H:%M') if s[2] else 'Active',
@@ -4877,8 +4879,10 @@ def get_user_calendar():
     brk_map = {}
     for b in breaks:
         d = b[0].isoformat() if b[0] else None
-        if not d: continue
-        if d not in brk_map: brk_map[d] = []
+        if not d:
+            continue
+        if d not in brk_map:
+            brk_map[d] = []
         brk_map[d].append({
             'type': b[1],
             'start': b[2].strftime('%H:%M') if b[2] else None,
@@ -4888,11 +4892,11 @@ def get_user_calendar():
         })
 
     leave_map = {}
-    for l in leaves:
-        ld_start = l[0]
-        ld_end = l[1]
-        leave_type = l[2]
-        leave_status = l[3]
+    for leave in leaves:
+        ld_start = leave[0]
+        ld_end = leave[1]
+        leave_type = leave[2]
+        leave_status = leave[3]
         current = ld_start
         while current <= ld_end:
             d = current.isoformat()
@@ -4902,7 +4906,8 @@ def get_user_calendar():
     holiday_map = {}
     for h in holidays:
         d = h[0].isoformat() if h[0] else None
-        if d: holiday_map[d] = h[1]
+        if d:
+            holiday_map[d] = h[1]
 
     attendance_map = {}
     for row in attendance_rows:
