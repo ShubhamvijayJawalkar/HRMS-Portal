@@ -134,6 +134,8 @@ def downgrade() -> None:
             breaks,
             break_types,
             exit_interviews,
+            offboarding_settlements,
+            offboarding_approvals,
             offboarding_workflow,
             offboarding_tasks,
             resignations,

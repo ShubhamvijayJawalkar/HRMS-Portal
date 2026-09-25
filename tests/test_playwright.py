@@ -282,3 +282,49 @@ def test_can_apply_leave(page):
         return data.map(l => l.leave_type).join(',');
     }''')
     assert 'Casual' in result, f'Expected "Casual" in leave list, got "{result}"'
+
+
+def test_ats_offer_and_preboarding_browser_flow(page):
+    """The guarded hire path and token-scoped document page work in a browser."""
+    marker = f'browser-lifecycle-{int(time.time() * 1000)}@example.com'
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_url(BASE_URL + '/dashboard')
+    result = page.evaluate('''async (marker) => {
+        const post = async (url, body) => {
+            const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+            return {status: r.status, body: await r.json()};
+        };
+        const put = async (url, body) => {
+            const r = await fetch(url, {method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+            return {status: r.status, body: await r.json()};
+        };
+        const candidate = await post('/api/candidates', {name: 'Browser Candidate', email: marker});
+        const cid = candidate.body.id;
+        await put(`/api/candidates/${cid}/status`, {status: 'Screened'});
+        await put(`/api/candidates/${cid}/status`, {status: 'Interviewed'});
+        const offer = await post('/api/offers', {candidate_id: cid, offered_salary: 400000, basic_pct: 50, hra_pct: 30, allowances_pct: 20});
+        const accepted = await post(`/api/offers/${offer.body.id}/accept`, {});
+        return {candidate, offer, accepted};
+    }''', marker)
+    assert result['candidate']['status'] == 201, result
+    assert result['offer']['status'] == 201, result
+    assert result['accepted']['status'] == 200, result
+    token = result['accepted']['body']['preboarding_token']
+    page.goto(f'{BASE_URL}/preboarding/{token}')
+    assert 'Pre-boarding' in page.title()
+    file_input = page.locator('input[type="file"]').first
+    file_input.set_input_files({'name': 'id-proof.pdf', 'mimeType': 'application/pdf', 'buffer': b'%PDF-1.4\nbrowser'})
+    with page.expect_response(lambda r: '/documents/' in r.url, timeout=10000) as upload_response:
+        page.locator('button[onclick^="upload"]').first.click()
+    assert upload_response.value.status == 201
+    page.wait_for_timeout(1000)
+    with page.expect_response(lambda r: r.url.endswith('/submit'), timeout=10000) as submit_response:
+        page.get_by_role('button', name='Submit pre-boarding').click()
+    assert submit_response.value.status == 200
+    page.wait_for_timeout(500)
+    assert 'Current step: 2 of 5' in page.text_content('body')
+    page.goto(BASE_URL + '/admin/candidates')
+    assert page.locator('option[value="Hired"]').first.is_disabled()

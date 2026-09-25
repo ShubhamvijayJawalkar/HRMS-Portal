@@ -1,6 +1,6 @@
 # HRMS v2.0 — Data Dictionary
 
-_Generated 2026-09-23T11:56:55.212905+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
+_Generated 2026-09-25T09:14:08.929021+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
 
 Corresponds to SRS v2.0 §7 (Data model & database constraints). 
 Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4), `audit-indefinite-with-review`. PII columns are permission-gated behind `pii_reveal`.
@@ -9,6 +9,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 | Table | Rows | Retention | PII cols |
 |-------|-----:|-----------|----------|
+| `alembic_version` | 1 | transactional | — |
 | `approval_delegations` | 0 | transactional | — |
 | `assets` | 2 | transactional | — |
 | `attendance_days` | 0 | statutory-7y | — |
@@ -36,6 +37,8 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `mfa_credentials` | 0 | transactional | — |
 | `monthly_leave_grants` | 0 | transactional | — |
 | `notifications` | 2 | transactional | — |
+| `offboarding_approvals` | 0 | transactional | — |
+| `offboarding_settlements` | 0 | transactional | — |
 | `offboarding_tasks` | 2 | transactional | — |
 | `offboarding_workflow` | 0 | transactional | — |
 | `offer_letters` | 2 | transactional | — |
@@ -59,6 +62,16 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `users` | 2 | transactional | — |
 
 ---
+
+## `alembic_version`
+
+- Retention class: **transactional**
+- Primary key: `version_num`
+- Unique indexes: none
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `version_num` | character varying | N | `` |  |
 
 ## `approval_delegations`
 
@@ -268,6 +281,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `feedback` | character varying | Y | `` |  |
 | `exit_date` | date | N | `` |  |
 | `created_at` | timestamp with time zone | N | `now()` |  |
+| `offboard_id` | bigint | Y | `` |  |
 
 ## `expense_categories`
 
@@ -533,6 +547,47 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `is_read` | boolean | N | `false` |  |
 | `created_at` | timestamp with time zone | N | `now()` |  |
 
+## `offboarding_approvals`
+
+- Retention class: **transactional**
+- Primary key: `approval_id`
+- Foreign keys: `actor_emp_id` → `users.emp_id`; `offboard_id` → `offboarding_workflow.offboard_id`
+- Unique indexes: none
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `approval_id` | bigint | N | `` |  |
+| `offboard_id` | bigint | N | `` |  |
+| `actor_emp_id` | character varying | N | `` |  |
+| `action` | character varying | N | `` |  |
+| `from_status` | character varying | N | `` |  |
+| `to_status` | character varying | N | `` |  |
+| `created_at` | timestamp with time zone | N | `now()` |  |
+
+## `offboarding_settlements`
+
+- Retention class: **transactional**
+- Primary key: `settlement_id`
+- Foreign keys: `approved_by` → `users.emp_id`; `offboard_id` → `offboarding_workflow.offboard_id`; `prepared_by` → `users.emp_id`
+- Unique indexes: `offboarding_settlements_offboard_id_key` (offboard_id)
+- Exclusion constraints: `offboarding_settlements_offboard_id_key` ()
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `settlement_id` | bigint | N | `` |  |
+| `offboard_id` | bigint | N | `` |  |
+| `pending_payroll` | numeric | N | `0` |  |
+| `lop_adjustment` | numeric | N | `0` |  |
+| `leave_encashment` | numeric | N | `0` |  |
+| `deductions` | numeric | N | `0` |  |
+| `asset_damage` | numeric | N | `0` |  |
+| `total_amount` | numeric | N | `0` |  |
+| `status` | character varying | N | `'Prepared'::character varying` |  |
+| `prepared_by` | character varying | N | `` |  |
+| `prepared_at` | timestamp with time zone | N | `now()` |  |
+| `approved_by` | character varying | Y | `` |  |
+| `approved_at` | timestamp with time zone | Y | `` |  |
+
 ## `offboarding_tasks`
 
 - Retention class: **transactional**
@@ -549,6 +604,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `status` | character varying | N | `'Pending'::character varying` |  |
 | `due_date` | date | Y | `` |  |
 | `completed_at` | timestamp with time zone | Y | `` |  |
+| `stage` | integer | N | `1` |  |
 
 ## `offboarding_workflow`
 
@@ -576,7 +632,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 - Retention class: **transactional**
 - Primary key: `offer_id`
 - Foreign keys: `candidate_id` → `candidates.candidate_id`
-- Unique indexes: none
+- Unique indexes: `uq_active_offer_candidate` (candidate_id) WHERE ((status)::text = ANY ((ARRAY['Pending'::character varying, 'Accepted'::character varying])::text[]))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
@@ -626,6 +682,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `status` | character varying | N | `'Pending'::character varying` |  |
 | `due_date` | date | Y | `` |  |
 | `completed_at` | timestamp with time zone | Y | `` |  |
+| `stage` | integer | N | `1` |  |
 
 ## `onboarding_workflow`
 
@@ -648,6 +705,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `completed` | boolean | N | `false` |  |
 | `completed_at` | timestamp with time zone | Y | `` |  |
 | `created_at` | timestamp with time zone | N | `now()` |  |
+| `step_started_at` | timestamp with time zone | N | `now()` |  |
 
 ## `outbox_events`
 

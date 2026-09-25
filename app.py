@@ -1,10 +1,13 @@
+import hashlib
 import json
 import logging
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import duckdb
 import pandas as pd
@@ -14,6 +17,8 @@ from flasgger import Swagger
 from flask import Flask, g, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from werkzeug.utils import secure_filename
 
 from security import (
     check_password,
@@ -64,6 +69,7 @@ init_csrf(app)
 maybe_enable_redis_sessions(app)
 
 DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
+IST = ZoneInfo('Asia/Kolkata')
 
 # ── Rate Limiter ──────────────────────────────────────────────────────
 limiter = Limiter(
@@ -122,6 +128,27 @@ def get_db():
     except Exception:
         pass
     return conn
+
+
+def _is_public_target_schema():
+    """True when the app is serving the immutable v2.0 ``public`` schema."""
+    if os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'):
+        return False
+    import db_backend
+    return db_backend.app_schema() == 'public'
+
+
+def _has_column(conn, table, column):
+    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
+        import db_backend
+        return bool(conn.execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_schema = ? "
+            "AND table_name = ? AND column_name = ?",
+            [db_backend.app_schema(), table, column],
+        ).fetchone())
+    return bool(conn.execute(f'PRAGMA table_info("{table}")').fetchall()) and any(
+        row[1] == column for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    )
 
 
 # ── Shift model (service-layer rewrite inc 2) ──────────────────────────────
@@ -439,6 +466,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # FR-ATS-03: the v2.0 public users table owns candidate_id; compatibility
+    # schemas receive the same nullable link during boot.
+    if not _is_public_target_schema() and not _has_column(conn, 'users', 'candidate_id'):
+        conn.execute("ALTER TABLE users ADD COLUMN candidate_id BIGINT")
 
     # ── User Sessions ──────────────────────────────────────────────
     conn.execute('''
@@ -450,6 +481,20 @@ def init_db():
             total_hours DECIMAL(10,2),
             session_date DATE,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+
+    # ── RBAC compatibility (public already owns the v2.0 table) ─────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS user_permissions (
+            perm_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            module VARCHAR NOT NULL,
+            allow INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            UNIQUE (emp_id, module)
         )
     ''')
 
@@ -771,8 +816,18 @@ def init_db():
             FOREIGN KEY (candidate_id) REFERENCES candidates(candidate_id)
         )
     ''')
+    # FR-ATS-04: compatibility schemas need the same salary split columns as
+    # the canonical public offer_letters table.
+    if not _is_public_target_schema():
+        for column, definition in {
+            'basic_pct': 'DECIMAL(5,2)',
+            'hra_pct': 'DECIMAL(5,2)',
+            'allowances_pct': 'DECIMAL(5,2)',
+        }.items():
+            if not _has_column(conn, 'offer_letters', column):
+                conn.execute(f"ALTER TABLE offer_letters ADD COLUMN {column} {definition}")
 
-    # ── Onboarding Tasks (Phase 2) ──────────────────────────────────
+    # ── Onboarding Tasks (Phase 2 / FR-ONB) ──────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS onboarding_tasks (
             task_id INTEGER PRIMARY KEY,
@@ -782,11 +837,51 @@ def init_db():
             status VARCHAR DEFAULT 'Pending',
             due_date DATE,
             completed_at TIMESTAMP,
+            stage INTEGER DEFAULT 1,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    if not _is_public_target_schema() and not _has_column(conn, 'onboarding_tasks', 'stage'):
+        conn.execute("ALTER TABLE onboarding_tasks ADD COLUMN stage INTEGER DEFAULT 1")
 
-    # ── Offboarding Tasks (Phase 2) ─────────────────────────────────
+    # ── Corrected onboarding workflow (FR-ONB-01..06) ───────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS onboarding_workflow (
+            workflow_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            candidate_id INTEGER,
+            current_step INTEGER DEFAULT 1,
+            step1_status VARCHAR DEFAULT 'InProgress',
+            step2_status VARCHAR DEFAULT 'Pending',
+            step3_status VARCHAR DEFAULT 'Pending',
+            step4_status VARCHAR DEFAULT 'Pending',
+            step5_status VARCHAR DEFAULT 'Pending',
+            completed INTEGER DEFAULT 0,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            FOREIGN KEY (candidate_id) REFERENCES candidates(candidate_id)
+        )
+    ''')
+    if not _is_public_target_schema() and not _has_column(conn, 'onboarding_workflow', 'step_started_at'):
+        conn.execute("ALTER TABLE onboarding_workflow ADD COLUMN step_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS onboarding_checklist (
+            item_id INTEGER PRIMARY KEY,
+            workflow_id INTEGER NOT NULL,
+            doc_type VARCHAR NOT NULL,
+            status VARCHAR DEFAULT 'Pending',
+            uploaded_at TIMESTAMP,
+            reviewed_by VARCHAR,
+            review_note VARCHAR,
+            reviewed_at TIMESTAMP,
+            FOREIGN KEY (workflow_id) REFERENCES onboarding_workflow(workflow_id),
+            FOREIGN KEY (reviewed_by) REFERENCES users(emp_id),
+            UNIQUE (workflow_id, doc_type)
+        )
+    ''')
+
+    # ── Offboarding Tasks (Phase 2 / FR-OFF) ─────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS offboarding_tasks (
             task_id INTEGER PRIMARY KEY,
@@ -796,11 +891,14 @@ def init_db():
             status VARCHAR DEFAULT 'Pending',
             due_date DATE,
             completed_at TIMESTAMP,
+            stage INTEGER DEFAULT 1,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    if not _is_public_target_schema() and not _has_column(conn, 'offboarding_tasks', 'stage'):
+        conn.execute("ALTER TABLE offboarding_tasks ADD COLUMN stage INTEGER DEFAULT 1")
 
-    # ── Exit Interviews (Phase 2) ───────────────────────────────────
+    # ── Exit Interviews (Phase 2 / FR-OFF-02) ───────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS exit_interviews (
             interview_id INTEGER PRIMARY KEY,
@@ -809,9 +907,82 @@ def init_db():
             feedback VARCHAR,
             exit_date DATE NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            offboard_id INTEGER,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    if not _is_public_target_schema() and not _has_column(conn, 'exit_interviews', 'offboard_id'):
+        conn.execute("ALTER TABLE exit_interviews ADD COLUMN offboard_id INTEGER")
+
+    # ── Corrected offboarding workflow (FR-OFF-01..03) ──────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS resignations (
+            resignation_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            notice_date DATE NOT NULL,
+            last_working_day DATE NOT NULL,
+            reason VARCHAR,
+            initiated_by VARCHAR NOT NULL,
+            status VARCHAR DEFAULT 'Pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            version INTEGER DEFAULT 1,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            FOREIGN KEY (initiated_by) REFERENCES users(emp_id)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS offboarding_workflow (
+            offboard_id INTEGER PRIMARY KEY,
+            resignation_id INTEGER NOT NULL,
+            emp_id VARCHAR NOT NULL,
+            stage1_status VARCHAR DEFAULT 'Pending',
+            stage2_status VARCHAR DEFAULT 'Pending',
+            stage3_status VARCHAR DEFAULT 'Pending',
+            stage4_status VARCHAR DEFAULT 'Pending',
+            stage5_status VARCHAR DEFAULT 'Pending',
+            completed INTEGER DEFAULT 0,
+            completed_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (resignation_id) REFERENCES resignations(resignation_id),
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+    if not _is_public_target_schema():
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS offboarding_approvals (
+                approval_id INTEGER PRIMARY KEY,
+                offboard_id INTEGER NOT NULL,
+                actor_emp_id VARCHAR NOT NULL,
+                action VARCHAR NOT NULL,
+                from_status VARCHAR NOT NULL,
+                to_status VARCHAR NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (offboard_id) REFERENCES offboarding_workflow(offboard_id),
+                FOREIGN KEY (actor_emp_id) REFERENCES users(emp_id)
+            )
+        ''')
+
+    if not _is_public_target_schema():
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS offboarding_settlements (
+                settlement_id INTEGER PRIMARY KEY,
+                offboard_id INTEGER NOT NULL UNIQUE,
+                pending_payroll DECIMAL(14,2) DEFAULT 0,
+                lop_adjustment DECIMAL(14,2) DEFAULT 0,
+                leave_encashment DECIMAL(14,2) DEFAULT 0,
+                deductions DECIMAL(14,2) DEFAULT 0,
+                asset_damage DECIMAL(14,2) DEFAULT 0,
+                total_amount DECIMAL(14,2) DEFAULT 0,
+                status VARCHAR DEFAULT 'Prepared',
+                prepared_by VARCHAR NOT NULL,
+                prepared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                approved_by VARCHAR,
+                approved_at TIMESTAMP,
+                FOREIGN KEY (offboard_id) REFERENCES offboarding_workflow(offboard_id),
+                FOREIGN KEY (prepared_by) REFERENCES users(emp_id),
+                FOREIGN KEY (approved_by) REFERENCES users(emp_id)
+            )
+        ''')
 
     # ── Salary Structures (Phase 2) ─────────────────────────────────
     conn.execute('''
@@ -1243,7 +1414,7 @@ def init_db():
         )
         conn.execute(
             "INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 24, base_id + 22, 'Mihir Shah', 'mihir@example.com', '9999999002', 'HR operations background', 'Screening', now - timedelta(days=1)]
+            [base_id + 24, base_id + 22, 'Mihir Shah', 'mihir@example.com', '9999999002', 'HR operations background', 'Screened', now - timedelta(days=1)]
         )
 
     if conn.execute("SELECT COUNT(*) FROM interviews").fetchone()[0] < 2:
@@ -1258,32 +1429,32 @@ def init_db():
 
     if conn.execute("SELECT COUNT(*) FROM offer_letters").fetchone()[0] < 2:
         conn.execute(
-            "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 27, base_id + 23, 1800000.00, now.date(), 'Pending', None, 'Standard package']
+            "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, basic_pct, hra_pct, allowances_pct, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 27, base_id + 23, 1800000.00, 50, 30, 20, now.date(), 'Pending', None, 'Standard package']
         )
         conn.execute(
-            "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 28, base_id + 24, 1200000.00, (now - timedelta(days=1)).date(), 'Accepted', now, 'Offer accepted']
+            "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, basic_pct, hra_pct, allowances_pct, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 28, base_id + 24, 1200000.00, 50, 30, 20, (now - timedelta(days=1)).date(), 'Accepted', now, 'Offer accepted']
         )
 
     if conn.execute("SELECT COUNT(*) FROM onboarding_tasks").fetchone()[0] < 2:
         conn.execute(
-            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 29, 'EMP002', 'Laptop setup', 'EMP001', 'Pending', (now + timedelta(days=2)).date(), None]
+            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 29, 'EMP002', 'Laptop setup', 'EMP001', 'Pending', (now + timedelta(days=2)).date(), None, 3]
         )
         conn.execute(
-            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 30, 'EMP002', 'HR paperwork', 'EMP002', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(hours=3)]
+            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 30, 'EMP002', 'HR paperwork', 'EMP002', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(hours=3), 2]
         )
 
     if conn.execute("SELECT COUNT(*) FROM offboarding_tasks").fetchone()[0] < 2:
         conn.execute(
-            "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 31, 'EMP002', 'Collect company assets', 'EMP001', 'Pending', (now + timedelta(days=5)).date(), None]
+            "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 31, 'EMP002', 'Collect company assets', 'EMP001', 'Pending', (now + timedelta(days=5)).date(), None, 3]
         )
         conn.execute(
-            "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 32, 'EMP002', 'Revoke access', 'EMP001', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(days=1)]
+            "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 32, 'EMP002', 'Revoke access', 'EMP001', 'Completed', (now - timedelta(days=1)).date(), now - timedelta(days=1), 5]
         )
 
     if conn.execute("SELECT COUNT(*) FROM exit_interviews").fetchone()[0] < 2:
@@ -1445,7 +1616,11 @@ def audit_log(emp_id, action, details=None, *, actor=None, entity=None, entity_i
     conn = None
     try:
         conn = get_db()
-        log_id = int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
+        log_id = (
+            _next_generated_id(conn, 'audit_log', 'log_id')
+            if _is_public_target_schema()
+            else int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
+        )
         if actor is None:
             actor = session.get('name') or session.get('emp_id') or emp_id
         request_id = getattr(g, '_hrms_request_id', None)
@@ -1480,6 +1655,15 @@ def parse_date(date_string, default=None):
     try:
         return datetime.strptime(date_string, '%Y-%m-%d').date()
     except ValueError:
+        return default
+
+
+def parse_datetime(value, default=None):
+    if not value:
+        return default
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).replace(tzinfo=None)
+    except (TypeError, ValueError):
         return default
 
 
@@ -1935,7 +2119,7 @@ def admin_required(f):
         conn = get_db()
         row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         conn.close()
-        if not row or row[0] != 'Admin':
+        if not row or row[0] not in ('Admin', 'Super Admin'):
             if request.is_json:
                 return jsonify({'error': 'Forbidden'}), 403
             return redirect(url_for('dashboard'))
@@ -1957,7 +2141,7 @@ def hr_or_admin_required(f):
         conn.close()
         if not row:
             return jsonify({'error': 'Forbidden'}), 403
-        if row[0] == 'Admin' or row[1] == 'HR':
+        if row[0] in ('Admin', 'Super Admin', 'HR') or row[1] == 'HR':
             return f(*args, **kwargs)
         return jsonify({'error': 'Forbidden - HR access required'}), 403
     return decorated
@@ -1975,7 +2159,7 @@ def finance_or_admin_required(f):
         conn = get_db()
         row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
         conn.close()
-        if not row or str(row[0]).lower() not in ('finance', 'admin'):
+        if not row or str(row[0]).lower() not in ('finance', 'admin', 'super admin'):
             return jsonify({'error': 'Forbidden - Finance access required'}), 403
         return f(*args, **kwargs)
     return decorated
@@ -2074,7 +2258,7 @@ def login():
 
     if not row[5]:
         return jsonify({'error': 'Login is not allowed for this user'}), 403
-    if row[4] == 'Blocked':
+    if row[4] in ('Blocked', 'Inactive', 'Pre-hire'):
         return jsonify({'error': 'Account is blocked'}), 403
 
     session_id = gen_id()
@@ -2280,7 +2464,7 @@ def forgot_password():
     token = secrets.token_urlsafe(32)
     conn.execute(
         "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) VALUES (?, ?, ?, ?)",
-        [gen_id(), emp_id, token, datetime.now() + timedelta(hours=1)]
+        [gen_id(), emp_id, _token_digest(token), datetime.now() + timedelta(hours=1)]
     )
     conn.close()
 
@@ -2319,8 +2503,9 @@ def reset_password():
 
     conn = get_db()
     row = conn.execute(
-        "SELECT token_id, emp_id FROM password_reset_tokens WHERE token = ? AND used = 0 AND expires_at > ?",
-        [token, datetime.now()]
+        "SELECT token_id, emp_id FROM password_reset_tokens "
+        "WHERE token IN (?, ?) AND used = 0 AND expires_at > ?",
+        [token, _token_digest(token), datetime.now()]
     ).fetchone()
     if not row:
         conn.close()
@@ -2706,6 +2891,419 @@ def return_asset(aid):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  CORRECTED LIFECYCLE HELPERS (FR-ATS / FR-ONB / FR-OFF)
+# ══════════════════════════════════════════════════════════════════════
+
+ONBOARDING_REQUIRED_DOCS = (
+    'ID Proof',
+    'Address Proof',
+    'Education',
+    'Certification',
+    'Bank Details',
+)
+PREBOARDING_TOKEN_MAX_AGE = 14 * 24 * 60 * 60
+_PREBOARDING_SALT = 'hrms-preboarding-v1'
+
+
+class LifecycleError(Exception):
+    """Domain error raised inside a lifecycle transaction."""
+
+    def __init__(self, status_code, message, **details):
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+        self.details = details
+
+
+def _lifecycle_error_payload(error):
+    payload = {'error': error.message}
+    if error.details:
+        payload['details'] = error.details
+    return payload
+
+
+def _iso(value):
+    return value.isoformat() if hasattr(value, 'isoformat') else value
+
+
+def _preboarding_serializer():
+    return URLSafeTimedSerializer(app.secret_key, salt=_PREBOARDING_SALT)
+
+
+def _issue_preboarding_token(workflow_id):
+    return _preboarding_serializer().dumps({'workflow_id': int(workflow_id)})
+
+
+def _decode_preboarding_token(token):
+    try:
+        payload = _preboarding_serializer().loads(token, max_age=PREBOARDING_TOKEN_MAX_AGE)
+    except SignatureExpired as exc:
+        raise LifecycleError(410, 'Pre-boarding link has expired') from exc
+    except BadSignature as exc:
+        raise LifecycleError(401, 'Invalid pre-boarding link') from exc
+    if not isinstance(payload, dict) or not payload.get('workflow_id'):
+        raise LifecycleError(401, 'Invalid pre-boarding link')
+    try:
+        return int(payload['workflow_id'])
+    except (TypeError, ValueError) as exc:
+        raise LifecycleError(401, 'Invalid pre-boarding link') from exc
+
+
+def _candidate_stage(value):
+    """Normalise the legacy seed spelling without weakening the state machine."""
+    return 'Screened' if value == 'Screening' else value
+
+
+def _validate_candidate_transition(current, target):
+    current = _candidate_stage(current)
+    if target in ('Hired', 'Offered'):
+        raise LifecycleError(409, 'Hired and Offered are reached through their guarded workflows')
+    if target not in ('Screened', 'Interviewed', 'Rejected', 'Withdrawn'):
+        raise LifecycleError(400, 'Invalid candidate status')
+    if current in ('Hired', 'Rejected', 'Withdrawn'):
+        raise LifecycleError(409, 'Candidate is already in a terminal state')
+    if target in ('Rejected', 'Withdrawn'):
+        return target
+    expected = {'Applied': 'Screened', 'Screened': 'Interviewed'}.get(current)
+    if expected != target:
+        raise LifecycleError(409, f'Invalid candidate transition: {current} -> {target}')
+    return target
+
+
+def _next_generated_id(conn, table, column):
+    """Allocate a collision-free ID and keep public identity sequences ahead.
+
+    Legacy schemas need explicit IDs; v2.0 public tables use identity keys but
+    the compatibility app still supplies one. Advancing the backing sequence
+    before the explicit insert preserves CC-01 after runtime lifecycle writes.
+    """
+    while True:
+        value = gen_id()
+        if not conn.execute(f"SELECT 1 FROM {table} WHERE {column} = ?", [value]).fetchone():
+            if _is_public_target_schema():
+                try:
+                    import db_backend
+                    ident = conn.execute(
+                        "SELECT is_identity FROM information_schema.columns "
+                        "WHERE table_schema = ? AND table_name = ? AND column_name = ?",
+                        [db_backend.app_schema(), table, column],
+                    ).fetchone()
+                    if ident and str(ident[0]).upper() == 'YES':
+                        sequence = conn.execute(
+                            "SELECT pg_get_serial_sequence(?, ?)",
+                            [f"{db_backend.app_schema()}.{table}", column],
+                        ).fetchone()
+                        if sequence and sequence[0]:
+                            current = conn.execute(f"SELECT last_value FROM {sequence[0]}").fetchone()
+                            next_value = max(value, int(current[0])) if current else value
+                            conn.execute("SELECT setval(?, ?, true)", [sequence[0], next_value])
+                except Exception:
+                    logger.debug('could not advance identity sequence for %s.%s', table, column)
+            return value
+
+
+def _onboarding_workflow_row(conn, workflow_id):
+    return conn.execute(
+        "SELECT w.workflow_id, w.emp_id, w.candidate_id, w.current_step, "
+        "w.step1_status, w.step2_status, w.step3_status, w.step4_status, w.step5_status, "
+        "w.completed, w.completed_at, w.created_at, u.name, u.email, u.status, u.allow_login "
+        "FROM onboarding_workflow w JOIN users u ON u.emp_id = w.emp_id WHERE w.workflow_id = ?",
+        [workflow_id],
+    ).fetchone()
+
+
+def _onboarding_workflow_summary(conn, row):
+    checklist = conn.execute(
+        "SELECT item_id, doc_type, status, uploaded_at, reviewed_by, review_note, reviewed_at "
+        "FROM onboarding_checklist WHERE workflow_id = ? ORDER BY item_id",
+        [row[0]],
+    ).fetchall()
+    tasks = conn.execute(
+        "SELECT task_id, task_name, assigned_to, status, due_date, completed_at, stage "
+        "FROM onboarding_tasks WHERE emp_id = ? ORDER BY COALESCE(stage, 1), task_id",
+        [row[1]],
+    ).fetchall()
+    step_started = conn.execute(
+        "SELECT step_started_at FROM onboarding_workflow WHERE workflow_id = ?", [row[0]]
+    ).fetchone()
+    step_base = step_started[0] if step_started and step_started[0] else row[11]
+    created = step_base.date() if hasattr(step_base, 'date') else None
+    days_in_step = max((datetime.now(IST).date() - created).days, 0) if created else 0
+    return {
+        'workflow_id': row[0],
+        'emp_id': row[1],
+        'candidate_id': row[2],
+        'employee': row[12],
+        'email': row[13],
+        'user_status': row[14],
+        'allow_login': bool(row[15]),
+        'current_step': row[3],
+        'steps': {
+            'step1': row[4],
+            'step2': row[5],
+            'step3': row[6],
+            'step4': row[7],
+            'step5': row[8],
+        },
+        'completed': bool(row[9]),
+        'completed_at': _iso(row[10]),
+        'created_at': _iso(row[11]),
+        'days_in_step': days_in_step,
+        'checklist': [{
+            'id': item[0], 'doc_type': item[1], 'status': item[2],
+            'uploaded_at': _iso(item[3]), 'reviewed_by': item[4],
+            'review_note': item[5], 'reviewed_at': _iso(item[6]),
+        } for item in checklist],
+        'tasks': [{
+            'id': task[0], 'task': task[1], 'assigned_to': task[2],
+            'status': task[3], 'due_date': _iso(task[4]),
+            'completed_at': _iso(task[5]), 'stage': task[6],
+        } for task in tasks],
+    }
+
+
+def _set_onboarding_step(conn, workflow_id, step, status, current_step=None):
+    columns = {
+        1: 'step1_status', 2: 'step2_status', 3: 'step3_status',
+        4: 'step4_status', 5: 'step5_status',
+    }
+    if step not in columns:
+        raise LifecycleError(400, 'Invalid onboarding step')
+    conn.execute(
+        f"UPDATE onboarding_workflow SET {columns[step]} = ?, current_step = ?, step_started_at = ? WHERE workflow_id = ?",
+        [status, current_step if current_step is not None else step, datetime.now(), workflow_id],
+    )
+
+
+def _create_onboarding_workflow(conn, offer_row, candidate_row, percentages):
+    """Create the pre-hire, salary structure, checklist and guarded tasks.
+
+    Called inside the same transaction as offer acceptance.  The explicit
+    column lists also make this safe on the reshaped v2.0 public tables.
+    """
+    candidate_id = int(candidate_row[0])
+    existing = conn.execute(
+        "SELECT workflow_id FROM onboarding_workflow WHERE candidate_id = ? AND completed = 0 LIMIT 1",
+        [candidate_id],
+    ).fetchone()
+    if existing:
+        raise LifecycleError(409, 'An active onboarding workflow already exists for this candidate',
+                             workflow_id=existing[0])
+
+    job = conn.execute(
+        "SELECT title, department FROM job_postings WHERE job_id = ?", [candidate_row[3]]
+    ).fetchone()
+    department = job[1] if job else None
+    designation = job[0] if job else None
+    manager = conn.execute(
+        "SELECT emp_id FROM users WHERE department = ? AND role IN ('Team Leader', 'Admin') "
+        "ORDER BY emp_id LIMIT 1", [department]
+    ).fetchone()
+    manager_id = manager[0] if manager else None
+
+    base_emp_id = f"PRE{candidate_id}"
+    emp_id = base_emp_id
+    suffix = 1
+    while conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [emp_id]).fetchone():
+        suffix += 1
+        emp_id = f'{base_emp_id}-{suffix}'
+
+    now = datetime.now()
+    offer_date = offer_row[2] if offer_row[2] else now.date()
+    conn.execute(
+        "INSERT INTO users (emp_id, name, email, password, role, department, designation, "
+        "manager_emp_id, phone, date_of_joining, status, allow_login, allow_breaks, "
+        "first_login, created_at, candidate_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [emp_id, candidate_row[1], candidate_row[2], hash_password(secrets.token_urlsafe(24)),
+         'Employee', department, designation, manager_id, candidate_row[4], offer_date,
+         'Pre-hire', 0, 0, None, now, candidate_id],
+    )
+    workflow_id = _next_generated_id(conn, 'onboarding_workflow', 'workflow_id')
+    conn.execute(
+        "INSERT INTO onboarding_workflow (workflow_id, emp_id, candidate_id, current_step, "
+        "step1_status, step2_status, step3_status, step4_status, step5_status, completed, created_at) "
+        "VALUES (?, ?, ?, 1, 'InProgress', 'Pending', 'Pending', 'Pending', 'Pending', 0, ?)",
+        [workflow_id, emp_id, candidate_id, now],
+    )
+    for doc_type in ONBOARDING_REQUIRED_DOCS:
+        conn.execute(
+            "INSERT INTO onboarding_checklist (item_id, workflow_id, doc_type, status) VALUES (?, ?, ?, 'Pending')",
+            [_next_generated_id(conn, 'onboarding_checklist', 'item_id'), workflow_id, doc_type],
+        )
+
+    # IT/physical/orientation work is assigned to owners, never to the new hire.
+    task_specs = (
+        ('Provision accounts & equipment', manager_id or 'IT', 3),
+        ('Allocate workstation and issue ID card', 'IT', 4),
+        ('Orientation and buddy assignment', manager_id or 'HR', 5),
+    )
+    for task_name, assigned_to, stage in task_specs:
+        conn.execute(
+            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) "
+            "VALUES (?, ?, ?, ?, 'Pending', ?, NULL, ?)",
+            [_next_generated_id(conn, 'onboarding_tasks', 'task_id'), emp_id, task_name,
+             assigned_to, now.date() + timedelta(days=stage), stage],
+        )
+
+    offered_salary = float(offer_row[1] or 0)
+    basic_pct, hra_pct, allowances_pct = percentages
+    conn.execute(
+        "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from, effective_to) "
+        "VALUES (?, ?, ?, ?, ?, 0, ?, NULL)",
+        [_next_generated_id(conn, 'salary_structures', 'struct_id'), emp_id,
+         round(offered_salary * basic_pct / 100, 2), round(offered_salary * hra_pct / 100, 2),
+         round(offered_salary * allowances_pct / 100, 2), offer_date],
+    )
+    return {
+        'workflow_id': workflow_id,
+        'emp_id': emp_id,
+        'preboarding_token': _issue_preboarding_token(workflow_id),
+    }
+
+
+def _workflow_for_token(conn, token):
+    workflow_id = _decode_preboarding_token(token)
+    row = _onboarding_workflow_row(conn, workflow_id)
+    if not row:
+        raise LifecycleError(404, 'Onboarding workflow not found')
+    return row
+
+
+def _token_digest(token):
+    return hashlib.sha256(str(token).encode()).hexdigest()
+
+
+def _issue_lifecycle_reset_token(conn, emp_id):
+    token = secrets.token_urlsafe(32)
+    conn.execute(
+        "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at, used, created_at) "
+        "VALUES (?, ?, ?, ?, 0, ?)",
+        [_next_generated_id(conn, 'password_reset_tokens', 'token_id'), emp_id, _token_digest(token),
+         datetime.now() + timedelta(hours=24), datetime.now()],
+    )
+    return token
+
+
+def _insert_lifecycle_notification(conn, emp_id, message, link, category):
+    conn.execute(
+        "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [_next_generated_id(conn, 'notifications', 'notification_id'), emp_id, category, category,
+         message, link, datetime.now()],
+    )
+
+
+def _revoke_redis_sessions(emp_id):
+    """Best-effort invalidation of server-side Flask sessions for an exit."""
+    redis_url = os.getenv('REDIS_URL')
+    if not redis_url:
+        return
+    try:
+        import redis
+        client = redis.from_url(redis_url, decode_responses=True)
+        prefix = 'hrms:session:'
+        for key in client.scan_iter(match=f'{prefix}*'):
+            raw = client.get(key)
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if data.get('emp_id') == emp_id:
+                client.delete(key)
+    except Exception as exc:
+        logger.warning('Redis session revocation failed for %s: %s', emp_id, exc)
+
+
+def revoke_offboarding_access(target_date=None, conn=None, offboard_id=None):
+    """Revoke LWD access atomically through the backend transaction helper."""
+    if conn is not None:
+        return _revoke_offboarding_access_impl(target_date, conn, offboard_id)
+    with outbox.transaction() as tx:
+        return _revoke_offboarding_access_impl(target_date, tx, offboard_id)
+
+
+def _revoke_offboarding_access_impl(target_date, conn, offboard_id=None):
+    """Revoke access for every resignation whose LWD has arrived (FR-OFF-03).
+
+    The function is deliberately callable with a date so tests and the
+    nightly scheduler exercise the same idempotent implementation.
+    """
+    own_conn = conn is None
+    if own_conn:
+        conn = get_db()
+    if target_date is None:
+        target_date = datetime.now(IST).date()
+    elif isinstance(target_date, datetime):
+        target_date = target_date.date()
+    revoked = []
+    try:
+        query = (
+            "SELECT r.resignation_id, r.emp_id, w.offboard_id FROM resignations r "
+            "JOIN offboarding_workflow w ON w.resignation_id = r.resignation_id "
+            "WHERE r.last_working_day <= ? AND r.status NOT IN ('Cancelled', 'Revoked')"
+        )
+        params = [target_date]
+        if offboard_id is not None:
+            query += " AND w.offboard_id = ?"
+            params.append(offboard_id)
+        rows = conn.execute(query, params).fetchall()
+        now = datetime.now()
+        for resignation_id, emp_id, offboard_id in rows:
+            active_sessions = conn.execute(
+                "SELECT session_id, login_time FROM user_sessions "
+                "WHERE emp_id = ? AND logout_time IS NULL", [emp_id]
+            ).fetchall()
+            for session_id, login_time in active_sessions:
+                hours = max((now - login_time).total_seconds() / 3600, 0) if login_time else 0
+                conn.execute(
+                    "UPDATE user_sessions SET logout_time = ?, total_hours = ? WHERE session_id = ?",
+                    [now, round(hours, 2), session_id],
+                )
+            conn.execute(
+                "UPDATE users SET allow_login = 0, status = 'Inactive' WHERE emp_id = ?", [emp_id]
+            )
+            try:
+                conn.execute("DELETE FROM user_permissions WHERE emp_id = ?", [emp_id])
+            except Exception:
+                # Older compatibility schemas may not have the optional RBAC table.
+                pass
+            conn.execute(
+                "UPDATE offboarding_workflow SET stage5_status = 'Completed', completed = 1, completed_at = ? "
+                "WHERE offboard_id = ?", [now, offboard_id]
+            )
+            conn.execute("UPDATE resignations SET status = 'Revoked' WHERE resignation_id = ?", [resignation_id])
+            admins = conn.execute(
+                "SELECT emp_id FROM users WHERE role IN ('Admin', 'Super Admin')"
+            ).fetchall()
+            for admin in admins:
+                _insert_lifecycle_notification(
+                    conn, admin[0], f'Access revoked for {emp_id} on last working day', '/offboarding', 'Offboarding'
+                )
+            _revoke_redis_sessions(emp_id)
+            revoked.append({'emp_id': emp_id, 'resignation_id': resignation_id, 'offboard_id': offboard_id})
+        return revoked
+    finally:
+        if own_conn:
+            conn.close()
+
+
+def run_offboarding_access_revocation():
+    try:
+        with app.app_context():
+            revoked = revoke_offboarding_access(datetime.now(IST).date())
+            for item in revoked:
+                audit_log(item['emp_id'], 'ACCESS_REVOKED', 'Last working day reached',
+                          actor='SYSTEM:LWD', entity='resignations', entity_id=item['resignation_id'],
+                          after={'allow_login': False, 'status': 'Inactive'})
+        return revoked
+    except Exception as exc:
+        logger.warning('offboarding access revocation failed: %s', exc)
+        return []
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  PHASE 2 — RECRUITMENT / ATS
 # ══════════════════════════════════════════════════════════════════════
 
@@ -2725,7 +3323,7 @@ def admin_candidates():
 
 @app.route('/api/v1/jobs', methods=['GET', 'POST'])
 @app.route('/api/jobs', methods=['GET', 'POST'])
-@admin_required
+@hr_or_admin_required
 def jobs_api():
     if request.method == 'GET':
         conn = get_db()
@@ -2740,17 +3338,92 @@ def jobs_api():
     conn.execute("INSERT INTO job_postings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                  [jid, data['title'], data.get('department'), data.get('location'), data.get('description'), data.get('requirements'), 'Open', datetime.now()])
     conn.close()
+    audit_log(session['emp_id'], 'JOB_CREATE', f'Created job {data["title"]}', entity='job_postings', entity_id=jid)
     return jsonify({'message': 'Job created', 'id': jid}), 201
 
 
 @app.route('/api/v1/jobs/<int:jid>/close', methods=['POST'])
 @app.route('/api/jobs/<int:jid>/close', methods=['POST'])
-@admin_required
+@hr_or_admin_required
 def close_job(jid):
     conn = get_db()
-    conn.execute("UPDATE job_postings SET status = 'Closed' WHERE job_id = ?", [jid])
+    result = conn.execute("UPDATE job_postings SET status = 'Closed' WHERE job_id = ?", [jid])
     conn.close()
+    if result.rowcount == 0:
+        return jsonify({'error': 'Job not found'}), 404
+    audit_log(session['emp_id'], 'JOB_CLOSE', f'Closed job {jid}', entity='job_postings', entity_id=jid)
     return jsonify({'message': 'Job closed'}), 200
+
+
+@app.route('/api/v1/jobs/<int:jid>', methods=['PUT', 'DELETE'])
+@app.route('/api/jobs/<int:jid>', methods=['PUT', 'DELETE'])
+@hr_or_admin_required
+def job_detail(jid):
+    conn = get_db()
+    row = conn.execute("SELECT job_id FROM job_postings WHERE job_id = ?", [jid]).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 404
+    if request.method == 'DELETE':
+        active = conn.execute(
+            "SELECT 1 FROM candidates WHERE job_id = ? AND status NOT IN ('Rejected', 'Withdrawn')", [jid]
+        ).fetchone()
+        if active:
+            conn.close()
+            return jsonify({'error': 'Close the job before deleting it'}), 409
+        conn.execute("DELETE FROM job_postings WHERE job_id = ?", [jid])
+        conn.close()
+        audit_log(session['emp_id'], 'JOB_DELETE', f'Deleted job {jid}', entity='job_postings', entity_id=jid)
+        return jsonify({'message': 'Job deleted'}), 200
+    data = request.get_json(silent=True) or {}
+    if not data.get('title'):
+        conn.close()
+        return jsonify({'error': 'title required'}), 400
+    if data.get('status', 'Open') not in ('Open', 'Closed'):
+        conn.close()
+        return jsonify({'error': 'Invalid job status'}), 400
+    conn.execute(
+        "UPDATE job_postings SET title = ?, department = ?, location = ?, description = ?, requirements = ?, status = ? WHERE job_id = ?",
+        [data['title'], data.get('department'), data.get('location'), data.get('description'),
+         data.get('requirements'), data.get('status', 'Open'), jid],
+    )
+    conn.close()
+    audit_log(session['emp_id'], 'JOB_UPDATE', f'Updated job {jid}', entity='job_postings', entity_id=jid)
+    return jsonify({'message': 'Job updated'}), 200
+
+
+@app.route('/api/v1/pipeline', methods=['GET'])
+@app.route('/api/pipeline', methods=['GET'])
+@hr_or_admin_required
+def recruitment_pipeline():
+    """Aggregate ATS stage counts and accepted-offer conversions per job."""
+    conn = get_db()
+    jobs = conn.execute("SELECT job_id, title, status FROM job_postings ORDER BY created_at DESC").fetchall()
+    result = []
+    stages = ('Applied', 'Screened', 'Interviewed', 'Offered', 'Hired', 'Rejected', 'Withdrawn')
+    for job_id, title, job_status in jobs:
+        counts = {stage: 0 for stage in stages}
+        rows = conn.execute(
+            "SELECT status, COUNT(*) FROM candidates WHERE job_id = ? GROUP BY status", [job_id]
+        ).fetchall()
+        for status, count in rows:
+            counts[_candidate_stage(status)] = int(count)
+        converted = {'pre_hire': 0, 'onboarding': 0, 'active': 0}
+        converted_rows = conn.execute(
+            "SELECT u.status, w.completed FROM users u LEFT JOIN onboarding_workflow w ON w.emp_id = u.emp_id "
+            "WHERE u.candidate_id IN (SELECT candidate_id FROM candidates WHERE job_id = ?)", [job_id]
+        ).fetchall()
+        for user_status, completed in converted_rows:
+            if completed:
+                converted['active'] += 1
+            elif user_status == 'Pre-hire':
+                converted['pre_hire'] += 1
+            else:
+                converted['onboarding'] += 1
+        result.append({'job_id': job_id, 'title': title, 'status': job_status,
+                       'stages': counts, 'converted': converted})
+    conn.close()
+    return jsonify({'jobs': result, 'pipeline': result}), 200
 
 
 # ── Candidates ────────────────────────────────────────────────────
@@ -2771,12 +3444,50 @@ def candidates_api():
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('email'):
         return jsonify({'error': 'name and email required'}), 400
-    cid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) VALUES (?, ?, ?, ?, ?, ?, 'Applied', ?)",
-                 [cid, data.get('job_id'), data['name'], data['email'], data.get('phone'), data.get('resume_text', ''), datetime.now()])
-    conn.close()
+    try:
+        cid = _next_generated_id(conn, 'candidates', 'candidate_id')
+        if data.get('job_id') and not conn.execute("SELECT 1 FROM job_postings WHERE job_id = ?", [data['job_id']]).fetchone():
+            return jsonify({'error': 'Job not found'}), 400
+        conn.execute("INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) VALUES (?, ?, ?, ?, ?, ?, 'Applied', ?)",
+                     [cid, data.get('job_id'), data['name'], data['email'], data.get('phone'), data.get('resume_text', ''), datetime.now()])
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'CANDIDATE_CREATE', f'Added candidate {data["name"]}', entity='candidates', entity_id=cid)
     return jsonify({'message': 'Candidate added', 'id': cid}), 201
+
+
+@app.route('/api/v1/candidates/<int:cid>', methods=['PUT', 'DELETE'])
+@app.route('/api/candidates/<int:cid>', methods=['PUT', 'DELETE'])
+@hr_or_admin_required
+def candidate_detail(cid):
+    conn = get_db()
+    row = conn.execute("SELECT name, email, phone, job_id, status FROM candidates WHERE candidate_id = ?", [cid]).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Candidate not found'}), 404
+    if request.method == 'DELETE':
+        if row[4] in ('Hired', 'Offered'):
+            conn.close()
+            return jsonify({'error': 'Hired or offered candidates cannot be deleted'}), 409
+        conn.execute("DELETE FROM candidates WHERE candidate_id = ?", [cid])
+        conn.close()
+        audit_log(session['emp_id'], 'CANDIDATE_DELETE', f'Deleted candidate {cid}', entity='candidates', entity_id=cid)
+        return jsonify({'message': 'Candidate deleted'}), 200
+    data = request.get_json(silent=True) or {}
+    if not data.get('name') or not data.get('email'):
+        conn.close()
+        return jsonify({'error': 'name and email required'}), 400
+    if data.get('job_id') and not conn.execute("SELECT 1 FROM job_postings WHERE job_id = ?", [data['job_id']]).fetchone():
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 400
+    conn.execute(
+        "UPDATE candidates SET name = ?, email = ?, phone = ?, job_id = ?, resume_text = ? WHERE candidate_id = ?",
+        [data['name'], data['email'], data.get('phone'), data.get('job_id'), data.get('resume_text', ''), cid],
+    )
+    conn.close()
+    audit_log(session['emp_id'], 'CANDIDATE_UPDATE', f'Updated candidate {cid}', entity='candidates', entity_id=cid)
+    return jsonify({'message': 'Candidate updated'}), 200
 
 
 @app.route('/api/v1/candidates/<int:cid>/status', methods=['PUT'])
@@ -2784,13 +3495,28 @@ def candidates_api():
 @hr_or_admin_required
 def update_candidate_status(cid):
     data = request.get_json(silent=True) or {}
-    status = data.get('status')
-    if status not in ('Applied', 'Screened', 'Interviewed', 'Offered', 'Hired', 'Rejected'):
-        return jsonify({'error': 'Invalid status'}), 400
+    target = data.get('status')
+    if target in ('Hired', 'Offered'):
+        return jsonify({'error': 'Hired and Offered are reached through their guarded workflows'}), 409
     conn = get_db()
-    conn.execute("UPDATE candidates SET status = ? WHERE candidate_id = ?", [status, cid])
-    conn.close()
-    return jsonify({'message': f'Status updated to {status}'}), 200
+    try:
+        row = conn.execute("SELECT status FROM candidates WHERE candidate_id = ?", [cid]).fetchone()
+        if not row:
+            return jsonify({'error': 'Candidate not found'}), 404
+        try:
+            target = _validate_candidate_transition(row[0], target)
+        except LifecycleError as exc:
+            return _lifecycle_error_payload(exc), exc.status_code
+        result = conn.execute(
+            "UPDATE candidates SET status = ? WHERE candidate_id = ? AND status = ?",
+            [target, cid, row[0]],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'Candidate changed concurrently; retry the transition'}), 409
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'CANDIDATE_STATUS', f'Candidate {cid} moved to {target}', entity='candidates', entity_id=cid, after={'status': target})
+    return jsonify({'message': f'Status updated to {target}', 'status': target}), 200
 
 
 # ── Interviews ────────────────────────────────────────────────────
@@ -2809,13 +3535,25 @@ def interviews_api():
         conn.close()
         return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'scheduled_at': r[3].isoformat() if r[3] else None, 'interviewer': r[4], 'mode': r[5], 'feedback': r[6], 'status': r[7]} for r in rows]), 200
     data = request.get_json(silent=True) or {}
-    if not data.get('candidate_id') or not data.get('scheduled_at'):
-        return jsonify({'error': 'candidate_id and scheduled_at required'}), 400
-    iid = gen_id()
+    scheduled_at = parse_datetime(data.get('scheduled_at'))
+    if not data.get('candidate_id') or not scheduled_at:
+        return jsonify({'error': 'candidate_id and a valid scheduled_at are required'}), 400
     conn = get_db()
-    conn.execute("INSERT INTO interviews VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [iid, data['candidate_id'], parse_date(data['scheduled_at']), data.get('interviewer'), data.get('mode', 'In-person'), data.get('feedback'), 'Scheduled'])
-    conn.close()
+    try:
+        candidate = conn.execute("SELECT status FROM candidates WHERE candidate_id = ?", [data['candidate_id']]).fetchone()
+        if not candidate:
+            return jsonify({'error': 'Candidate not found'}), 404
+        if _candidate_stage(candidate[0]) not in ('Screened', 'Interviewed'):
+            return jsonify({'error': 'Candidate must be screened before scheduling an interview'}), 409
+        iid = _next_generated_id(conn, 'interviews', 'interview_id')
+        conn.execute(
+            "INSERT INTO interviews (interview_id, candidate_id, scheduled_at, interviewer, mode, feedback, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'Scheduled')",
+            [iid, data['candidate_id'], scheduled_at, data.get('interviewer'), data.get('mode', 'In-person'), data.get('feedback')],
+        )
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'INTERVIEW_SCHEDULE', f'Scheduled interview {iid}', entity='interviews', entity_id=iid)
     return jsonify({'message': 'Interview scheduled', 'id': iid}), 201
 
 
@@ -2824,9 +3562,21 @@ def interviews_api():
 @hr_or_admin_required
 def interview_feedback(iid):
     data = request.get_json(silent=True) or {}
+    feedback = (data.get('feedback') or '').strip()
+    if not feedback:
+        return jsonify({'error': 'feedback is required'}), 400
     conn = get_db()
-    conn.execute("UPDATE interviews SET feedback = ?, status = 'Completed' WHERE interview_id = ?", [data.get('feedback', ''), iid])
-    conn.close()
+    try:
+        row = conn.execute("SELECT status, candidate_id FROM interviews WHERE interview_id = ?", [iid]).fetchone()
+        if not row:
+            return jsonify({'error': 'Interview not found'}), 404
+        if row[0] == 'Completed':
+            return jsonify({'error': 'Interview feedback is already completed'}), 409
+        conn.execute("UPDATE interviews SET feedback = ?, status = 'Completed' WHERE interview_id = ?", [feedback, iid])
+        conn.execute("UPDATE candidates SET status = 'Interviewed' WHERE candidate_id = ? AND status = 'Screened'", [row[1]])
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'INTERVIEW_FEEDBACK', f'Saved interview feedback {iid}', entity='interviews', entity_id=iid)
     return jsonify({'message': 'Feedback saved'}), 200
 
 
@@ -2839,26 +3589,78 @@ def interview_feedback(iid):
 def offers_api():
     if request.method == 'GET':
         conn = get_db()
-        rows = conn.execute("SELECT o.offer_id, o.candidate_id, c.name, c.email, o.offered_salary, o.offer_date, o.status, o.accepted_at, o.notes FROM offer_letters o JOIN candidates c ON o.candidate_id = c.candidate_id ORDER BY o.offer_date DESC").fetchall()
+        rows = conn.execute(
+            "SELECT o.offer_id, o.candidate_id, c.name, c.email, o.offered_salary, "
+            "o.basic_pct, o.hra_pct, o.allowances_pct, o.offer_date, o.status, "
+            "o.accepted_at, o.notes FROM offer_letters o JOIN candidates c "
+            "ON o.candidate_id = c.candidate_id ORDER BY o.offer_date DESC"
+        ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3], 'salary': float(r[4]) if r[4] else 0, 'offer_date': r[5].isoformat() if r[5] else None, 'status': r[6], 'accepted_at': r[7].isoformat() if r[7] else None, 'notes': r[8]} for r in rows]), 200
+        return jsonify([{
+            'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3],
+            'salary': float(r[4]) if r[4] else 0,
+            'basic_pct': float(r[5]) if r[5] is not None else None,
+            'hra_pct': float(r[6]) if r[6] is not None else None,
+            'allowances_pct': float(r[7]) if r[7] is not None else None,
+            'offer_date': r[8].isoformat() if r[8] else None, 'status': r[9],
+            'accepted_at': r[10].isoformat() if r[10] else None, 'notes': r[11],
+        } for r in rows]), 200
+
     data = request.get_json(silent=True) or {}
-    if not data.get('candidate_id') or not data.get('offered_salary'):
-        return jsonify({'error': 'candidate_id and offered_salary required'}), 400
-    oid = gen_id()
+    try:
+        candidate_id = int(data.get('candidate_id'))
+        offered_salary = float(data.get('offered_salary'))
+        basic_decimal = Decimal(str(data.get('basic_pct')))
+        hra_decimal = Decimal(str(data.get('hra_pct')))
+        allowances_decimal = Decimal(str(data.get('allowances_pct')))
+    except (TypeError, ValueError, InvalidOperation):
+        return jsonify({'error': 'candidate_id, offered_salary and all three percentages are required'}), 400
+    if offered_salary <= 0:
+        return jsonify({'error': 'offered_salary must be positive'}), 400
+    decimal_percentages = (basic_decimal, hra_decimal, allowances_decimal)
+    if any(pct < 0 or pct > 100 for pct in decimal_percentages) or sum(decimal_percentages) != Decimal('100'):
+        return jsonify({'error': 'basic_pct + hra_pct + allowances_pct must equal 100'}), 400
+    percentages = tuple(float(pct) for pct in decimal_percentages)
+    basic_pct, hra_pct, allowances_pct = percentages
+
+    result = None
     try:
         with outbox.transaction() as conn:
-            conn.execute("INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         [oid, data['candidate_id'], float(data['offered_salary']), datetime.now().date(), 'Pending', None, data.get('notes')])
-            cand = conn.execute("SELECT name, email FROM candidates WHERE candidate_id = ?", [data['candidate_id']]).fetchone()
-            payload = {'offer_id': oid, 'candidate_id': data['candidate_id'], 'salary': float(data['offered_salary'])}
-            if cand:
-                payload.update({'name': cand[0], 'email': cand[1]})
-            outbox.enqueue(conn, 'offer.created', 'offer_letters', str(oid), payload)
-    except Exception as e:
-        logger.warning('create offer failed: %s', e)
-        return jsonify({'error': 'Failed to send offer'}), 500
-    return jsonify({'message': 'Offer sent', 'id': oid}), 201
+            candidate = conn.execute(
+                "SELECT candidate_id, name, email, job_id, phone, status FROM candidates WHERE candidate_id = ?",
+                [candidate_id],
+            ).fetchone()
+            if not candidate:
+                raise LifecycleError(404, 'Candidate not found')
+            if _candidate_stage(candidate[5]) != 'Interviewed':
+                raise LifecycleError(409, 'Candidate must be Interviewed before an offer is created')
+            if conn.execute(
+                "SELECT 1 FROM offer_letters WHERE candidate_id = ? AND status IN ('Pending', 'Accepted')",
+                [candidate_id],
+            ).fetchone():
+                raise LifecycleError(409, 'Candidate already has an active offer')
+            oid = _next_generated_id(conn, 'offer_letters', 'offer_id')
+            conn.execute(
+                "INSERT INTO offer_letters (offer_id, candidate_id, offered_salary, basic_pct, hra_pct, "
+                "allowances_pct, offer_date, status, accepted_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', NULL, ?)",
+                [oid, candidate_id, offered_salary, basic_pct, hra_pct, allowances_pct,
+                 datetime.now().date(), data.get('notes')],
+            )
+            conn.execute("UPDATE candidates SET status = 'Offered' WHERE candidate_id = ?", [candidate_id])
+            outbox.enqueue(
+                conn, 'offer.created', 'offer_letters', str(oid),
+                {'offer_id': oid, 'candidate_id': candidate_id, 'name': candidate[1],
+                 'email': candidate[2], 'salary': offered_salary,
+                 'basic_pct': basic_pct, 'hra_pct': hra_pct, 'allowances_pct': allowances_pct},
+            )
+            result = oid
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('create offer failed: %s', exc)
+        return jsonify({'error': 'Failed to create offer'}), 500
+    audit_log(session['emp_id'], 'OFFER_CREATE', f'Created offer {result}', entity='offer_letters', entity_id=result)
+    return jsonify({'message': 'Offer sent', 'id': result, 'status': 'Pending'}), 201
 
 
 @app.route('/api/v1/offers/<int:oid>/accept', methods=['POST'])
@@ -2866,20 +3668,88 @@ def offers_api():
 @hr_or_admin_required
 @idempotent
 def accept_offer(oid):
+    result = None
     try:
         with outbox.transaction() as conn:
-            conn.execute("UPDATE offer_letters SET status = 'Accepted', accepted_at = ? WHERE offer_id = ?", [datetime.now(), oid])
-            row = conn.execute("SELECT candidate_id FROM offer_letters WHERE offer_id = ?", [oid]).fetchone()
-            cid = None
-            if row:
-                cid = row[0]
-                conn.execute("UPDATE candidates SET status = 'Hired' WHERE candidate_id = ?", [cid])
-            outbox.enqueue(conn, 'offer.accepted', 'offer_letters', str(oid),
-                           {'offer_id': oid, 'candidate_id': cid})
-    except Exception as e:
-        logger.warning('accept_offer failed: %s', e)
+            offer = conn.execute(
+                "SELECT offer_id, offered_salary, offer_date, status, basic_pct, hra_pct, allowances_pct, candidate_id "
+                "FROM offer_letters WHERE offer_id = ?", [oid]
+            ).fetchone()
+            if not offer:
+                raise LifecycleError(404, 'Offer not found')
+            if offer[3] != 'Pending':
+                raise LifecycleError(409, 'Offer has already been decided')
+            candidate = conn.execute(
+                "SELECT candidate_id, name, email, job_id, phone, status FROM candidates WHERE candidate_id = ?",
+                [offer[7]],
+            ).fetchone()
+            if not candidate:
+                raise LifecycleError(404, 'Candidate not found')
+            if _candidate_stage(candidate[5]) != 'Offered':
+                raise LifecycleError(409, 'Candidate is not in the Offered stage')
+            percentages = (float(offer[4] or 0), float(offer[5] or 0), float(offer[6] or 0))
+            if round(sum(percentages), 2) != 100:
+                raise LifecycleError(409, 'Offer salary split is invalid')
+            onboarding = _create_onboarding_workflow(conn, (oid, offer[1], offer[2]), candidate, percentages)
+            now = datetime.now()
+            accepted = conn.execute(
+                "UPDATE offer_letters SET status = 'Accepted', accepted_at = ? "
+                "WHERE offer_id = ? AND status = 'Pending'", [now, oid]
+            )
+            if accepted.rowcount == 0:
+                raise LifecycleError(409, 'Offer was decided concurrently; retry the request')
+            conn.execute("UPDATE candidates SET status = 'Hired' WHERE candidate_id = ?", [candidate[0]])
+            outbox.enqueue(
+                conn, 'offer.accepted', 'offer_letters', str(oid),
+                {'offer_id': oid, 'candidate_id': candidate[0], 'emp_id': onboarding['emp_id'],
+                 'workflow_id': onboarding['workflow_id'], 'preboarding_token': onboarding['preboarding_token']},
+            )
+            outbox.enqueue(
+                conn, 'candidate.hired', 'candidates', str(candidate[0]),
+                {'candidate_id': candidate[0], 'offer_id': oid, 'emp_id': onboarding['emp_id'],
+                 'workflow_id': onboarding['workflow_id']},
+            )
+            result = {**onboarding, 'candidate_id': candidate[0], 'offer_id': oid}
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('accept_offer failed: %s', exc)
         return jsonify({'error': 'Failed to accept offer'}), 500
-    return jsonify({'message': 'Offer accepted'}), 200
+    result['preboarding_url'] = url_for('preboarding_page', token=result['preboarding_token'], _external=True)
+    audit_log(session['emp_id'], 'OFFER_ACCEPT', f'Accepted offer {oid}', entity='offer_letters', entity_id=oid,
+              after={'candidate_id': result['candidate_id'], 'workflow_id': result['workflow_id']})
+    return jsonify({'message': 'Offer accepted', **result}), 200
+
+
+@app.route('/api/v1/offers/<int:oid>/reject', methods=['POST'])
+@app.route('/api/offers/<int:oid>/reject', methods=['POST'])
+@hr_or_admin_required
+@idempotent
+def reject_offer(oid):
+    data = request.get_json(silent=True) or {}
+    candidate_status = data.get('candidate_status', 'Rejected')
+    if candidate_status not in ('Rejected', 'Interviewed'):
+        return jsonify({'error': 'candidate_status must be Rejected or Interviewed'}), 400
+    try:
+        with outbox.transaction() as conn:
+            offer = conn.execute("SELECT status, candidate_id FROM offer_letters WHERE offer_id = ?", [oid]).fetchone()
+            if not offer:
+                raise LifecycleError(404, 'Offer not found')
+            if offer[0] != 'Pending':
+                raise LifecycleError(409, 'Offer has already been decided')
+            rejected = conn.execute(
+                "UPDATE offer_letters SET status = 'Rejected' WHERE offer_id = ? AND status = 'Pending'", [oid]
+            )
+            if rejected.rowcount == 0:
+                raise LifecycleError(409, 'Offer was decided concurrently; retry the request')
+            conn.execute("UPDATE candidates SET status = ? WHERE candidate_id = ?", [candidate_status, offer[1]])
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('reject_offer failed: %s', exc)
+        return jsonify({'error': 'Failed to reject offer'}), 500
+    audit_log(session['emp_id'], 'OFFER_REJECT', f'Rejected offer {oid}', entity='offer_letters', entity_id=oid)
+    return jsonify({'message': 'Offer rejected', 'candidate_status': candidate_status}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -2892,36 +3762,447 @@ def onboarding_page():
     return render_template('onboarding.html')
 
 
+def _lifecycle_actor(conn=None):
+    own = conn is None
+    if own:
+        conn = get_db()
+    try:
+        return conn.execute(
+            "SELECT emp_id, role, department, manager_emp_id FROM users WHERE emp_id = ?",
+            [session.get('emp_id')],
+        ).fetchone()
+    finally:
+        if own:
+            conn.close()
+
+
+def _task_owner_valid(conn, assigned_to):
+    if not assigned_to:
+        return False
+    if str(assigned_to).upper() in ('HR', 'IT', 'FINANCE', 'MANAGER', 'ADMIN'):
+        return True
+    return bool(conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [assigned_to]).fetchone())
+
+
+def _can_manage_lifecycle(actor, include_it=False, include_finance=False):
+    if not actor:
+        return False
+    role = str(actor[1] or '')
+    return (
+        role in ('Admin', 'Super Admin')
+        or actor[2] == 'HR'
+        or (include_it and role == 'IT')
+        or (include_finance and role == 'Finance')
+    )
+
+
+def _required_docs_approved(conn, workflow_id):
+    placeholders = ','.join('?' for _ in ONBOARDING_REQUIRED_DOCS)
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM onboarding_checklist WHERE workflow_id = ? "
+        f"AND doc_type IN ({placeholders}) AND status = 'Approved'",
+        [workflow_id, *ONBOARDING_REQUIRED_DOCS],
+    ).fetchone()
+    return int(row[0] or 0) == len(ONBOARDING_REQUIRED_DOCS)
+
+
+def _onboarding_docs_uploaded(conn, workflow_id):
+    placeholders = ','.join('?' for _ in ONBOARDING_REQUIRED_DOCS)
+    row = conn.execute(
+        f"SELECT COUNT(*) FROM onboarding_checklist WHERE workflow_id = ? "
+        f"AND doc_type IN ({placeholders}) AND status IN ('Uploaded', 'Approved')",
+        [workflow_id, *ONBOARDING_REQUIRED_DOCS],
+    ).fetchone()
+    return int(row[0] or 0) >= 1
+
+
+def _complete_onboarding_stage_tx(conn, workflow_id, step, actor):
+    row = _onboarding_workflow_row(conn, workflow_id)
+    if not row:
+        raise LifecycleError(404, 'Onboarding workflow not found')
+    if step < 1 or step > 5:
+        raise LifecycleError(400, 'Invalid onboarding step')
+    if row[9]:
+        return row
+    statuses = {1: row[4], 2: row[5], 3: row[6], 4: row[7], 5: row[8]}
+    if statuses[step] == 'Completed':
+        return row
+    if step == 1 and not _onboarding_docs_uploaded(conn, workflow_id):
+        raise LifecycleError(409, 'Upload at least one required document before submitting pre-boarding')
+    if step == 2 and not _required_docs_approved(conn, workflow_id):
+        raise LifecycleError(409, 'All required documents must be approved')
+    if step == 3 and row[5] != 'Completed':
+        raise LifecycleError(409, 'Document verification must complete before provisioning')
+    if step == 4 and row[6] != 'Completed':
+        raise LifecycleError(409, 'System and access provisioning must complete first')
+    if step == 5 and row[7] != 'Completed':
+        raise LifecycleError(409, 'Workstation and ID card clearance must complete first')
+
+    now = datetime.now()
+    next_status = 'Completed' if step == 5 else 'InProgress'
+    _set_onboarding_step(conn, workflow_id, step, 'Completed', current_step=min(step + 1, 5))
+    if step < 5:
+        _set_onboarding_step(conn, workflow_id, step + 1, next_status, current_step=step + 1)
+    else:
+        conn.execute(
+            "UPDATE onboarding_workflow SET completed = 1, completed_at = ? WHERE workflow_id = ?",
+            [now, workflow_id],
+        )
+    if step == 3:
+        joining = conn.execute("SELECT date_of_joining FROM users WHERE emp_id = ?", [row[1]]).fetchone()
+        target_status = 'Active'
+        if joining and joining[0] and joining[0] > datetime.now(IST).date():
+            target_status = os.getenv('PREHIRE_STATUS_BEFORE_DAY1', 'Onboarding')
+        conn.execute(
+            "UPDATE users SET allow_login = 1, status = ? WHERE emp_id = ?", [target_status, row[1]]
+        )
+    elif step == 5:
+        conn.execute(
+            "UPDATE users SET allow_login = 1, status = 'Active' WHERE emp_id = ?", [row[1]]
+        )
+    if step == 3:
+        reset_token = _issue_lifecycle_reset_token(conn, row[1])
+        outbox.enqueue(
+            conn, 'credentials.issued', 'users', row[1],
+            {'emp_id': row[1], 'reset_token': reset_token, 'workflow_id': workflow_id},
+        )
+    conn.execute(
+        "UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE emp_id = ? AND stage = ? AND status <> 'Completed'",
+        [now, row[1], step],
+    )
+    return _onboarding_workflow_row(conn, workflow_id)
+
+
+@app.route('/preboarding/<token>')
+def preboarding_page(token):
+    conn = get_db()
+    try:
+        row = _workflow_for_token(conn, token)
+        summary = _onboarding_workflow_summary(conn, row)
+    except LifecycleError as exc:
+        return jsonify(_lifecycle_error_payload(exc)), exc.status_code
+    finally:
+        conn.close()
+    return render_template('preboarding.html', workflow=summary, token=token)
+
+
+@app.route('/api/v1/preboarding/<token>', methods=['GET'])
+@app.route('/api/preboarding/<token>', methods=['GET'])
+def preboarding_status(token):
+    conn = get_db()
+    try:
+        row = _workflow_for_token(conn, token)
+        return jsonify(_onboarding_workflow_summary(conn, row)), 200
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/preboarding/<token>/documents/<doc_type>', methods=['POST'])
+@app.route('/api/preboarding/<token>/documents/<doc_type>', methods=['POST'])
+def upload_preboarding_document(token, doc_type):
+    if doc_type not in ONBOARDING_REQUIRED_DOCS:
+        return jsonify({'error': 'Unknown required document type'}), 400
+    conn = get_db()
+    stored_path = None
+    try:
+        row = _workflow_for_token(conn, token)
+        if row[9]:
+            raise LifecycleError(409, 'Pre-boarding document upload is closed')
+        item = conn.execute(
+            "SELECT item_id FROM onboarding_checklist WHERE workflow_id = ? AND doc_type = ?",
+            [row[0], doc_type],
+        ).fetchone()
+        if not item:
+            raise LifecycleError(404, 'Checklist item not found')
+        uploaded = request.files.get('file')
+        if uploaded is None or not uploaded.filename:
+            raise LifecycleError(400, 'A real document file is required')
+        filename = secure_filename(uploaded.filename)
+        extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+        if extension not in ('pdf', 'jpg', 'jpeg', 'png'):
+            raise LifecycleError(400, 'Only PDF, JPG, JPEG and PNG documents are accepted')
+        uploaded.stream.seek(0)
+        content = uploaded.stream.read(10 * 1024 * 1024 + 1)
+        size = len(content)
+        if size <= 0 or size > 10 * 1024 * 1024:
+            raise LifecycleError(400, 'Document must be between 1 byte and 10 MB')
+        signatures = {
+            'pdf': content.startswith(b'%PDF-'),
+            'jpg': content.startswith(b'\xff\xd8\xff'),
+            'jpeg': content.startswith(b'\xff\xd8\xff'),
+            'png': content.startswith(b'\x89PNG\r\n\x1a\n'),
+        }
+        if not signatures.get(extension):
+            raise LifecycleError(400, 'Document content does not match its extension')
+        declared_type = (uploaded.mimetype or '').lower()
+        allowed_types = {
+            'pdf': ('application/pdf', 'application/octet-stream'),
+            'jpg': ('image/jpeg',), 'jpeg': ('image/jpeg',), 'png': ('image/png',),
+        }
+        if declared_type and declared_type not in allowed_types[extension]:
+            raise LifecycleError(400, 'Document MIME type does not match its extension')
+        if b'EICAR-STANDARD-ANTIVIRUS-TEST-FILE' in content:
+            raise LifecycleError(400, 'Document failed the malware safety check')
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+        stored_name = f'preboarding_{row[0]}_{secrets.token_hex(8)}_{filename}'
+        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
+        with open(stored_path, 'wb') as handle:
+            handle.write(content)
+        name, file_size = filename, size
+        now = datetime.now()
+        conn.execute(
+            "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [_next_generated_id(conn, 'documents', 'doc_id'), row[1], name, doc_type,
+             stored_name if stored_path else None, file_size, now],
+        )
+        conn.execute(
+            "UPDATE onboarding_checklist SET status = 'Uploaded', uploaded_at = ?, reviewed_by = NULL, review_note = NULL, reviewed_at = NULL "
+            "WHERE item_id = ?", [now, item[0]]
+        )
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('preboarding upload failed: %s', exc)
+        return jsonify({'error': 'Failed to store document'}), 500
+    finally:
+        conn.close()
+    audit_log(row[1], 'ONBOARDING_DOCUMENT_UPLOAD', f'Uploaded {doc_type}', entity='onboarding_checklist', entity_id=item[0])
+    return jsonify({'message': 'Document uploaded', 'doc_type': doc_type}), 201
+
+
+@app.route('/api/v1/preboarding/<token>/submit', methods=['POST'])
+@app.route('/api/preboarding/<token>/submit', methods=['POST'])
+def submit_preboarding(token):
+    try:
+        with outbox.transaction() as conn:
+            row = _workflow_for_token(conn, token)
+            if row[9] or row[4] == 'Completed':
+                return jsonify({'message': 'Pre-boarding already submitted', 'workflow_id': row[0]}), 200
+            _complete_onboarding_stage_tx(conn, row[0], 1, None)
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('preboarding submit failed: %s', exc)
+        return jsonify({'error': 'Failed to submit pre-boarding'}), 500
+    audit_log(row[1], 'ONBOARDING_STEP_COMPLETE', 'Pre-boarding submitted', entity='onboarding_workflow', entity_id=row[0])
+    return jsonify({'message': 'Pre-boarding submitted', 'workflow_id': row[0]}), 200
+
+
+@app.route('/api/v1/onboarding-workflows', methods=['GET'])
+@app.route('/api/onboarding-workflows', methods=['GET'])
+@login_required
+def onboarding_workflows_api():
+    conn = get_db()
+    try:
+        actor = _lifecycle_actor(conn)
+        if not _can_manage_lifecycle(actor):
+            rows = conn.execute(
+                "SELECT w.workflow_id FROM onboarding_workflow w WHERE w.emp_id = ? ORDER BY w.created_at DESC",
+                [session['emp_id']],
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT workflow_id FROM onboarding_workflow ORDER BY created_at DESC").fetchall()
+        data = []
+        for (workflow_id,) in rows:
+            row = _onboarding_workflow_row(conn, workflow_id)
+            if row:
+                data.append(_onboarding_workflow_summary(conn, row))
+        return jsonify(data), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/onboarding-workflows/<int:workflow_id>', methods=['GET'])
+@app.route('/api/onboarding-workflows/<int:workflow_id>', methods=['GET'])
+@login_required
+def onboarding_workflow_detail(workflow_id):
+    conn = get_db()
+    try:
+        row = _onboarding_workflow_row(conn, workflow_id)
+        if not row:
+            return jsonify({'error': 'Onboarding workflow not found'}), 404
+        actor = _lifecycle_actor(conn)
+        if not _can_manage_lifecycle(actor) and row[1] != session.get('emp_id'):
+            return jsonify({'error': 'Forbidden'}), 403
+        return jsonify(_onboarding_workflow_summary(conn, row)), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete', methods=['POST'])
+@app.route('/api/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete', methods=['POST'])
+@login_required
+def complete_onboarding_step(workflow_id, step):
+    data = request.get_json(silent=True) or {}
+    try:
+        with outbox.transaction() as conn:
+            actor = _lifecycle_actor(conn)
+            row = _onboarding_workflow_row(conn, workflow_id)
+            if not row:
+                raise LifecycleError(404, 'Onboarding workflow not found')
+            if step in (1, 2) and not _can_manage_lifecycle(actor):
+                raise LifecycleError(403, 'HR/Admin access required')
+            if step == 3 and not _can_manage_lifecycle(actor, include_it=True):
+                raise LifecycleError(403, 'IT/Admin access required')
+            if step == 4 and not _can_manage_lifecycle(actor, include_it=True):
+                raise LifecycleError(403, 'IT/Admin access required')
+            if step == 5:
+                target_manager = conn.execute(
+                    "SELECT manager_emp_id FROM users WHERE emp_id = ?", [row[1]]
+                ).fetchone()
+                assigned_buddy = conn.execute(
+                    "SELECT assigned_to FROM onboarding_tasks WHERE emp_id = ? AND stage = 5 "
+                    "ORDER BY task_id LIMIT 1", [row[1]]
+                ).fetchone()
+                allowed_owners = {target_manager[0] if target_manager else None, assigned_buddy[0] if assigned_buddy else None}
+                if not (_can_manage_lifecycle(actor) or actor[0] in allowed_owners):
+                    raise LifecycleError(403, 'Buddy/manager access required')
+            if step in (3, 4, 5):
+                pending_tasks = conn.execute(
+                    "SELECT COUNT(*) FROM onboarding_tasks WHERE emp_id = ? AND stage = ? AND status <> 'Completed'",
+                    [row[1], step],
+                ).fetchone()[0]
+                if pending_tasks:
+                    raise LifecycleError(409, f'All onboarding tasks for step {step} must be completed first',
+                                         pending_tasks=int(pending_tasks))
+            _complete_onboarding_stage_tx(conn, workflow_id, step, actor)
+            if step == 5 and data.get('notify') is not False:
+                _insert_lifecycle_notification(conn, row[1], 'Onboarding completed', '/onboarding', 'Onboarding')
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('onboarding step completion failed: %s', exc)
+        return jsonify({'error': 'Failed to complete onboarding step'}), 500
+    audit_log(session['emp_id'], 'ONBOARDING_STEP_COMPLETE', f'Completed onboarding step {step}', entity='onboarding_workflow', entity_id=workflow_id)
+    return jsonify({'message': f'Onboarding step {step} completed', 'workflow_id': workflow_id}), 200
+
+
+@app.route('/api/v1/onboarding-checklist/<int:item_id>/review', methods=['POST'])
+@app.route('/api/onboarding-checklist/<int:item_id>/review', methods=['POST'])
+@hr_or_admin_required
+def review_onboarding_document(item_id):
+    data = request.get_json(silent=True) or {}
+    status = data.get('status')
+    if status not in ('Approved', 'Rejected'):
+        return jsonify({'error': 'status must be Approved or Rejected'}), 400
+    note = (data.get('note') or '').strip()
+    if status == 'Rejected' and not note:
+        return jsonify({'error': 'A rejection note is required'}), 400
+    try:
+        with outbox.transaction() as conn:
+            item = conn.execute(
+                "SELECT c.workflow_id, c.doc_type, w.emp_id FROM onboarding_checklist c "
+                "JOIN onboarding_workflow w ON w.workflow_id = c.workflow_id WHERE c.item_id = ?",
+                [item_id],
+            ).fetchone()
+            if not item:
+                raise LifecycleError(404, 'Checklist item not found')
+            current_item = conn.execute(
+                "SELECT status FROM onboarding_checklist WHERE item_id = ?", [item_id]
+            ).fetchone()
+            if status == 'Approved' and current_item[0] not in ('Uploaded', 'Rejected'):
+                raise LifecycleError(409, 'Only an uploaded document can be approved')
+            now = datetime.now()
+            conn.execute(
+                "UPDATE onboarding_checklist SET status = ?, reviewed_by = ?, review_note = ?, reviewed_at = ?, uploaded_at = COALESCE(uploaded_at, ?) "
+                "WHERE item_id = ?",
+                ['Approved' if status == 'Approved' else 'Pending', session['emp_id'], note, now, now, item_id],
+            )
+            if status == 'Approved' and _required_docs_approved(conn, item[0]):
+                _complete_onboarding_stage_tx(conn, item[0], 2, session['emp_id'])
+            _insert_lifecycle_notification(
+                conn, item[2], f'Document {item[1]} {status.lower()}', '/onboarding', 'Onboarding'
+            )
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('onboarding checklist review failed: %s', exc)
+        return jsonify({'error': 'Failed to review document'}), 500
+    audit_log(session['emp_id'], 'ONBOARDING_DOCUMENT_REVIEW', f'{status} checklist item {item_id}', entity='onboarding_checklist', entity_id=item_id)
+    return jsonify({'message': f'Document {status.lower()}', 'workflow_id': item[0]}), 200
+
+
 @app.route('/api/v1/onboarding-tasks', methods=['GET', 'POST'])
 @app.route('/api/onboarding-tasks', methods=['GET', 'POST'])
 @login_required
 def onboarding_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC").fetchall()
+        actor = _lifecycle_actor(conn)
+        if _can_manage_lifecycle(actor, include_it=True):
+            rows = conn.execute(
+                "SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at, t.stage "
+                "FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC"
+            ).fetchall()
         else:
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
+            rows = conn.execute(
+                "SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at, t.stage "
+                "FROM onboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC",
+                [session['emp_id']],
+            ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() if r[6] else None, 'completed_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{
+            'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4],
+            'status': r[5], 'due_date': r[6].isoformat() if r[6] else None,
+            'completed_at': r[7].isoformat() if r[7] else None, 'stage': r[8],
+        } for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
-    tid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO onboarding_tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [tid, data['emp_id'], data['task_name'], data.get('assigned_to', 'HR'), 'Pending', parse_date(data.get('due_date')), None])
-    conn.close()
+    try:
+        actor = _lifecycle_actor(conn)
+        if not _can_manage_lifecycle(actor, include_it=True):
+            return jsonify({'error': 'HR/Admin/IT access required'}), 403
+        if not conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [data['emp_id']]).fetchone():
+            return jsonify({'error': 'Employee not found'}), 404
+        if not _task_owner_valid(conn, data.get('assigned_to', 'HR')):
+            return jsonify({'error': 'assigned_to must be an owner employee or HR/IT/Finance/Manager'}), 400
+        tid = _next_generated_id(conn, 'onboarding_tasks', 'task_id')
+        conn.execute(
+            "INSERT INTO onboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) "
+            "VALUES (?, ?, ?, ?, 'Pending', ?, NULL, ?)",
+            [tid, data['emp_id'], data['task_name'], data.get('assigned_to', 'HR'),
+             parse_date(data.get('due_date')), int(data.get('stage', 1))],
+        )
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'ONBOARDING_TASK_CREATE', f'Created onboarding task {tid}', entity='onboarding_tasks', entity_id=tid)
     return jsonify({'message': 'Task added', 'id': tid}), 201
 
 
 @app.route('/api/v1/onboarding-tasks/<int:tid>/complete', methods=['POST'])
 @app.route('/api/onboarding-tasks/<int:tid>/complete', methods=['POST'])
-@admin_required
+@login_required
 def complete_onboarding_task(tid):
-    conn = get_db()
-    conn.execute("UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
-    conn.close()
+    try:
+        with outbox.transaction() as conn:
+            task = conn.execute("SELECT emp_id, stage, assigned_to FROM onboarding_tasks WHERE task_id = ?", [tid]).fetchone()
+            if not task:
+                raise LifecycleError(404, 'Onboarding task not found')
+            actor = _lifecycle_actor(conn)
+            if not (_can_manage_lifecycle(actor, include_it=True) or task[2] == session.get('emp_id')):
+                raise LifecycleError(403, 'Assigned owner or HR/Admin/IT access required')
+            conn.execute("UPDATE onboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
+            workflow = conn.execute(
+                "SELECT workflow_id FROM onboarding_workflow WHERE emp_id = ? AND completed = 0 ORDER BY workflow_id DESC LIMIT 1",
+                [task[0]],
+            ).fetchone()
+            if workflow and task[1] in (3, 4, 5):
+                pending = conn.execute(
+                    "SELECT COUNT(*) FROM onboarding_tasks WHERE emp_id = ? AND stage = ? AND status <> 'Completed'",
+                    [task[0], task[1]],
+                ).fetchone()[0]
+                if not pending:
+                    _complete_onboarding_stage_tx(conn, workflow[0], task[1], actor)
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('onboarding task completion failed: %s', exc)
+        return jsonify({'error': 'Failed to complete onboarding task'}), 500
+    audit_log(session['emp_id'], 'ONBOARDING_TASK_COMPLETE', f'Completed onboarding task {tid}', entity='onboarding_tasks', entity_id=tid)
     return jsonify({'message': 'Task completed'}), 200
 
 
@@ -2937,51 +4218,570 @@ def offboarding_page():
 def offboarding_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC").fetchall()
+        actor = _lifecycle_actor(conn)
+        if _can_manage_lifecycle(actor, include_it=True, include_finance=True):
+            rows = conn.execute(
+                "SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at, t.stage "
+                "FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.task_id DESC"
+            ).fetchall()
         else:
-            rows = conn.execute("SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC", [session['emp_id']]).fetchall()
+            rows = conn.execute(
+                "SELECT t.task_id, t.emp_id, u.name, t.task_name, t.assigned_to, t.status, t.due_date, t.completed_at, t.stage "
+                "FROM offboarding_tasks t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.task_id DESC",
+                [session['emp_id']],
+            ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4], 'status': r[5], 'due_date': r[6].isoformat() if r[6] else None, 'completed_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        return jsonify([{
+            'id': r[0], 'emp_id': r[1], 'employee': r[2], 'task': r[3], 'assigned_to': r[4],
+            'status': r[5], 'due_date': r[6].isoformat() if r[6] else None,
+            'completed_at': r[7].isoformat() if r[7] else None, 'stage': r[8],
+        } for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('emp_id') or not data.get('task_name'):
         return jsonify({'error': 'emp_id and task_name required'}), 400
-    tid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO offboarding_tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [tid, data['emp_id'], data['task_name'], data.get('assigned_to', 'HR'), 'Pending', parse_date(data.get('due_date')), None])
-    conn.close()
+    try:
+        actor = _lifecycle_actor(conn)
+        if not _can_manage_lifecycle(actor, include_it=True, include_finance=True):
+            return jsonify({'error': 'HR/Admin/IT/Finance access required'}), 403
+        if not conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [data['emp_id']]).fetchone():
+            return jsonify({'error': 'Employee not found'}), 404
+        if not _task_owner_valid(conn, data.get('assigned_to', 'HR')):
+            return jsonify({'error': 'assigned_to must be an owner employee or HR/IT/Finance/Manager'}), 400
+        tid = _next_generated_id(conn, 'offboarding_tasks', 'task_id')
+        conn.execute(
+            "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) "
+            "VALUES (?, ?, ?, ?, 'Pending', ?, NULL, ?)",
+            [tid, data['emp_id'], data['task_name'], data.get('assigned_to', 'HR'),
+             parse_date(data.get('due_date')), int(data.get('stage', 1))],
+        )
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'OFFBOARDING_TASK_CREATE', f'Created offboarding task {tid}', entity='offboarding_tasks', entity_id=tid)
     return jsonify({'message': 'Task added', 'id': tid}), 201
 
 
 @app.route('/api/v1/offboarding-tasks/<int:tid>/complete', methods=['POST'])
 @app.route('/api/offboarding-tasks/<int:tid>/complete', methods=['POST'])
-@admin_required
+@login_required
 def complete_offboarding_task(tid):
     conn = get_db()
-    conn.execute("UPDATE offboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
-    conn.close()
+    try:
+        task = conn.execute("SELECT emp_id, stage, assigned_to FROM offboarding_tasks WHERE task_id = ?", [tid]).fetchone()
+        if not task:
+            return jsonify({'error': 'Offboarding task not found'}), 404
+        actor = _lifecycle_actor(conn)
+        if not (_can_manage_lifecycle(actor, include_it=True, include_finance=True) or task[2] == session.get('emp_id')):
+            return jsonify({'error': 'Assigned owner or HR/Admin/IT/Finance access required'}), 403
+        conn.execute("UPDATE offboarding_tasks SET status = 'Completed', completed_at = ? WHERE task_id = ?", [datetime.now(), tid])
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'OFFBOARDING_TASK_COMPLETE', f'Completed offboarding task {tid}', entity='offboarding_tasks', entity_id=tid)
     return jsonify({'message': 'Task completed'}), 200
 
 
 @app.route('/api/v1/exit-interviews', methods=['GET', 'POST'])
 @app.route('/api/exit-interviews', methods=['GET', 'POST'])
-@admin_required
+@hr_or_admin_required
 def exit_interviews_api():
     if request.method == 'GET':
         conn = get_db()
-        rows = conn.execute("SELECT ei.interview_id, ei.emp_id, u.name, ei.reason, ei.feedback, ei.exit_date, ei.created_at FROM exit_interviews ei JOIN users u ON ei.emp_id = u.emp_id ORDER BY ei.created_at DESC").fetchall()
+        rows = conn.execute(
+            "SELECT ei.interview_id, ei.emp_id, u.name, ei.reason, ei.feedback, ei.exit_date, ei.created_at "
+            "FROM exit_interviews ei JOIN users u ON ei.emp_id = u.emp_id ORDER BY ei.created_at DESC"
+        ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4], 'exit_date': r[5].isoformat() if r[5] else None, 'created_at': r[6].isoformat() if r[6] else None} for r in rows]), 200
+        return jsonify([{
+            'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reason': r[3], 'feedback': r[4],
+            'exit_date': r[5].isoformat() if r[5] else None, 'created_at': r[6].isoformat() if r[6] else None,
+        } for r in rows]), 200
     data = request.get_json(silent=True) or {}
-    if not data.get('emp_id') or not data.get('reason') or not data.get('exit_date'):
+    exit_date = parse_date(data.get('exit_date'))
+    if not data.get('emp_id') or not data.get('reason') or not exit_date:
         return jsonify({'error': 'emp_id, reason, exit_date required'}), 400
-    eid = gen_id()
     conn = get_db()
-    conn.execute("INSERT INTO exit_interviews VALUES (?, ?, ?, ?, ?, ?)",
-                 [eid, data['emp_id'], data['reason'], data.get('feedback'), parse_date(data['exit_date']), datetime.now()])
-    conn.close()
-    return jsonify({'message': 'Exit interview recorded'}), 201
+    try:
+        eid = _next_generated_id(conn, 'exit_interviews', 'interview_id')
+        columns = 'interview_id, emp_id, reason, feedback, exit_date, created_at'
+        values = [eid, data['emp_id'], data['reason'], data.get('feedback'), exit_date, datetime.now()]
+        try:
+            conn.execute(f"INSERT INTO exit_interviews ({columns}, offboard_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                         [*values, data.get('offboard_id')])
+        except Exception:
+            conn.execute(f"INSERT INTO exit_interviews ({columns}) VALUES (?, ?, ?, ?, ?, ?)", values)
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'EXIT_INTERVIEW_CREATE', f'Recorded exit interview for {data["emp_id"]}', entity='exit_interviews', entity_id=eid)
+    return jsonify({'message': 'Exit interview recorded', 'id': eid}), 201
+
+
+def _offboarding_workflow_row(conn, offboard_id):
+    return conn.execute(
+        "SELECT w.offboard_id, w.resignation_id, w.emp_id, w.stage1_status, w.stage2_status, "
+        "w.stage3_status, w.stage4_status, w.stage5_status, w.completed, w.completed_at, w.created_at, "
+        "r.notice_date, r.last_working_day, r.reason, r.status, u.name, u.manager_emp_id "
+        "FROM offboarding_workflow w JOIN resignations r ON r.resignation_id = w.resignation_id "
+        "JOIN users u ON u.emp_id = w.emp_id WHERE w.offboard_id = ?",
+        [offboard_id],
+    ).fetchone()
+
+
+def _calculate_offboarding_settlement(conn, emp_id):
+    """Calculate the F&F components required by FR-OFF-03."""
+    salary = conn.execute(
+        "SELECT basic, hra, allowances FROM salary_structures WHERE emp_id = ? "
+        "ORDER BY effective_from DESC LIMIT 1", [emp_id]
+    ).fetchone()
+    daily_salary = sum(float(value or 0) for value in salary) / 30 if salary else 0
+    pending_payroll = float(conn.execute(
+        "SELECT COALESCE(SUM(p.net_salary), 0) FROM payroll_items p "
+        "JOIN payroll_runs r ON r.run_id = p.run_id "
+        "WHERE p.emp_id = ? AND r.status <> 'Finalized'", [emp_id]
+    ).fetchone()[0] or 0)
+    try:
+        lop_days = int(conn.execute(
+            "SELECT COUNT(*) FROM attendance_days WHERE emp_id = ? AND status IN ('Absent', 'Half-day')",
+            [emp_id],
+        ).fetchone()[0] or 0)
+    except Exception:
+        lop_days = 0
+    lop_adjustment = round(daily_salary * lop_days, 2)
+    reserved_expr = 'reserved' if _has_column(conn, 'leave_balance', 'reserved') else '0'
+    leave_encashment = round(daily_salary * float(conn.execute(
+        f"SELECT COALESCE(SUM(GREATEST(total_days - used_days - {reserved_expr}, 0)), 0) "
+        "FROM leave_balance WHERE emp_id = ?",
+        [emp_id],
+    ).fetchone()[0] or 0), 2)
+    deductions = float(conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) FROM expense_claims WHERE emp_id = ? AND status = 'Approved'",
+        [emp_id],
+    ).fetchone()[0] or 0)
+    asset_damage = 0.0
+    total_amount = round(pending_payroll + leave_encashment - lop_adjustment - deductions + asset_damage, 2)
+    return {
+        'pending_payroll': round(pending_payroll, 2),
+        'lop_adjustment': lop_adjustment,
+        'leave_encashment': leave_encashment,
+        'deductions': round(deductions, 2),
+        'asset_damage': asset_damage,
+        'total_amount': total_amount,
+    }
+
+
+def _offboarding_workflow_summary(conn, row):
+    tasks = conn.execute(
+        "SELECT task_id, task_name, assigned_to, status, due_date, completed_at, stage "
+        "FROM offboarding_tasks WHERE emp_id = ? ORDER BY COALESCE(stage, 1), task_id",
+        [row[2]],
+    ).fetchall()
+    approvals = conn.execute(
+        "SELECT actor_emp_id, action, from_status, to_status, created_at "
+        "FROM offboarding_approvals WHERE offboard_id = ? ORDER BY approval_id",
+        [row[0]],
+    ).fetchall()
+    settlement = conn.execute(
+        "SELECT pending_payroll, lop_adjustment, leave_encashment, deductions, asset_damage, "
+        "total_amount, status, prepared_by, prepared_at, approved_by, approved_at "
+        "FROM offboarding_settlements WHERE offboard_id = ?", [row[0]]
+    ).fetchone()
+    settlement_data = None
+    if settlement:
+        settlement_data = {
+            'pending_payroll': float(settlement[0]), 'lop_adjustment': float(settlement[1]),
+            'leave_encashment': float(settlement[2]), 'deductions': float(settlement[3]),
+            'asset_damage': float(settlement[4]), 'total_amount': float(settlement[5]),
+            'status': settlement[6], 'prepared_by': settlement[7], 'prepared_at': _iso(settlement[8]),
+            'approved_by': settlement[9], 'approved_at': _iso(settlement[10]),
+        }
+    return {
+        'offboard_id': row[0], 'resignation_id': row[1], 'emp_id': row[2], 'employee': row[15],
+        'notice_date': _iso(row[11]), 'last_working_day': _iso(row[12]), 'reason': row[13],
+        'resignation_status': row[14],
+        'stages': {
+            'stage1': row[3], 'stage2': row[4], 'stage3': row[5],
+            'stage4': row[6], 'stage5': row[7],
+        },
+        'completed': bool(row[8]), 'completed_at': _iso(row[9]), 'created_at': _iso(row[10]),
+        'tasks': [{
+            'id': task[0], 'task': task[1], 'assigned_to': task[2], 'status': task[3],
+            'due_date': _iso(task[4]), 'completed_at': _iso(task[5]), 'stage': task[6],
+        } for task in tasks],
+        'approvals': [{
+            'actor_emp_id': approval[0], 'action': approval[1],
+            'from_status': approval[2], 'to_status': approval[3], 'created_at': _iso(approval[4]),
+        } for approval in approvals],
+        'settlement': settlement_data,
+    }
+
+
+def _offboarding_actor_allowed(conn, actor, stage, workflow):
+    if not actor:
+        return False
+    role = str(actor[1] or '')
+    if role in ('Admin', 'Super Admin') or actor[2] == 'HR':
+        return True
+    target = conn.execute(
+        "SELECT manager_emp_id FROM users WHERE emp_id = ?", [workflow[2]]
+    ).fetchone()
+    manager_id = target[0] if target else None
+    if stage in (1, 2) and role == 'Team Leader' and actor[0] == manager_id:
+        return True
+    if stage == 3 and role == 'IT':
+        return True
+    if stage == 4 and role == 'Finance':
+        return True
+    return False
+
+
+def _set_offboarding_stage(conn, offboard_id, stage, status):
+    columns = {
+        1: 'stage1_status', 2: 'stage2_status', 3: 'stage3_status',
+        4: 'stage4_status', 5: 'stage5_status',
+    }
+    if stage not in columns:
+        raise LifecycleError(400, 'Invalid offboarding stage')
+    conn.execute(
+        f"UPDATE offboarding_workflow SET {columns[stage]} = ? WHERE offboard_id = ?",
+        [status, offboard_id],
+    )
+
+
+def _record_offboarding_approval(conn, offboard_id, actor, action, from_status, to_status):
+    conn.execute(
+        "INSERT INTO offboarding_approvals (approval_id, offboard_id, actor_emp_id, action, from_status, to_status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [_next_generated_id(conn, 'offboarding_approvals', 'approval_id'), offboard_id,
+         actor, action, from_status, to_status, datetime.now()],
+    )
+
+
+def _complete_offboarding_stage_tx(conn, offboard_id, stage, actor, action='complete'):
+    workflow = _offboarding_workflow_row(conn, offboard_id)
+    if not workflow:
+        raise LifecycleError(404, 'Offboarding workflow not found')
+    if stage < 1 or stage > 5:
+        raise LifecycleError(400, 'Invalid offboarding stage')
+    statuses = {1: workflow[3], 2: workflow[4], 3: workflow[5], 4: workflow[6], 5: workflow[7]}
+    if statuses[stage] == 'Completed':
+        raise LifecycleError(409, f'Offboarding stage {stage} is already complete')
+    if stage in (2, 3, 4, 5) and workflow[3] != 'Completed':
+        raise LifecycleError(409, 'Stage 1 must be acknowledged first')
+    if stage == 5 and workflow[6] != 'Completed':
+        raise LifecycleError(409, 'Full and final settlement must be approved before exit clearance')
+    if stage == 4:
+        prepared = conn.execute(
+            "SELECT actor_emp_id FROM offboarding_approvals WHERE offboard_id = ? AND action = 'Prepare' "
+            "ORDER BY approval_id DESC LIMIT 1", [offboard_id]
+        ).fetchone()
+        if not prepared:
+            raise LifecycleError(409, 'Finance must prepare the settlement before approval')
+        if workflow[4] != 'Completed' or workflow[5] != 'Completed':
+            raise LifecycleError(409, 'Stages 2 and 3 must both be complete before settlement approval')
+        if prepared[0] == actor[0]:
+            raise LifecycleError(409, 'Settlement preparer cannot approve their own calculation')
+    if stage == 3:
+        outstanding = conn.execute(
+            "SELECT COUNT(*) FROM assets WHERE emp_id = ? AND (status IS NULL OR status <> 'Returned')",
+            [workflow[2]],
+        ).fetchone()[0]
+        if outstanding:
+            raise LifecycleError(409, 'All issued assets must be returned before IT clearance', outstanding_assets=int(outstanding))
+    now = datetime.now()
+    _set_offboarding_stage(conn, offboard_id, stage, 'Completed')
+    if stage == 1:
+        _set_offboarding_stage(conn, offboard_id, 2, 'InProgress')
+        _set_offboarding_stage(conn, offboard_id, 3, 'InProgress')
+        conn.execute("UPDATE resignations SET status = 'Accepted' WHERE resignation_id = ?", [workflow[1]])
+    elif stage in (2, 3):
+        if workflow[4] == 'Completed' and workflow[5] == 'Completed':
+            _set_offboarding_stage(conn, offboard_id, 4, 'InProgress')
+    elif stage == 4:
+        _record_offboarding_approval(conn, offboard_id, actor[0], 'Approve', 'InProgress', 'Completed')
+        conn.execute(
+            "UPDATE offboarding_settlements SET status = 'Approved', approved_by = ?, approved_at = ? WHERE offboard_id = ?",
+            [actor[0], now, offboard_id],
+        )
+        _set_offboarding_stage(conn, offboard_id, 5, 'InProgress')
+    elif stage == 5:
+        conn.execute(
+            "UPDATE offboarding_workflow SET completed = 1, completed_at = ? WHERE offboard_id = ?",
+            [now, offboard_id],
+        )
+    if stage != 4:
+        _record_offboarding_approval(conn, offboard_id, actor[0], f'Stage{stage}', statuses[stage], 'Completed')
+    conn.execute(
+        "UPDATE offboarding_tasks SET status = 'Completed', completed_at = ? WHERE emp_id = ? AND stage = ? AND status <> 'Completed'",
+        [now, workflow[2], stage],
+    )
+    return _offboarding_workflow_row(conn, offboard_id)
+
+
+@app.route('/api/v1/resignations', methods=['GET', 'POST'])
+@app.route('/api/resignations', methods=['GET', 'POST'])
+@login_required
+@idempotent
+def resignations_api():
+    if request.method == 'GET':
+        conn = get_db()
+        actor = _lifecycle_actor(conn)
+        if _can_manage_lifecycle(actor, include_it=True, include_finance=True):
+            rows = conn.execute("SELECT offboard_id FROM offboarding_workflow ORDER BY created_at DESC").fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT offboard_id FROM offboarding_workflow WHERE emp_id = ? ORDER BY created_at DESC",
+                [session['emp_id']],
+            ).fetchall()
+        data = []
+        for (offboard_id,) in rows:
+            row = _offboarding_workflow_row(conn, offboard_id)
+            if row:
+                data.append(_offboarding_workflow_summary(conn, row))
+        conn.close()
+        return jsonify(data), 200
+
+    data = request.get_json(silent=True) or {}
+    notice_date = parse_date(data.get('notice_date'))
+    last_working_day = parse_date(data.get('last_working_day'))
+    if not notice_date or not last_working_day or last_working_day < notice_date:
+        return jsonify({'error': 'notice_date and a valid last_working_day are required'}), 400
+    actor = _lifecycle_actor()
+    if not actor:
+        return jsonify({'error': 'Authentication required'}), 401
+    target_emp_id = session['emp_id'] if actor[1] not in ('Admin', 'Super Admin') and actor[2] != 'HR' else data.get('emp_id', session['emp_id'])
+    if not target_emp_id:
+        return jsonify({'error': 'emp_id is required for HR/Admin'}), 400
+    result = None
+    try:
+        with outbox.transaction() as conn:
+            target = conn.execute("SELECT emp_id, name, status FROM users WHERE emp_id = ?", [target_emp_id]).fetchone()
+            if not target:
+                raise LifecycleError(404, 'Employee not found')
+            if target[2] in ('Inactive', 'Blocked'):
+                raise LifecycleError(409, 'Inactive employees cannot start offboarding')
+            if conn.execute(
+                "SELECT 1 FROM resignations WHERE emp_id = ? AND status NOT IN ('Cancelled', 'Revoked')",
+                [target_emp_id],
+            ).fetchone():
+                raise LifecycleError(409, 'An active resignation already exists for this employee')
+            rid = _next_generated_id(conn, 'resignations', 'resignation_id')
+            oid = _next_generated_id(conn, 'offboarding_workflow', 'offboard_id')
+            now = datetime.now()
+            conn.execute(
+                "INSERT INTO resignations (resignation_id, emp_id, notice_date, last_working_day, reason, initiated_by, status, created_at, version) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'Pending', ?, 1)",
+                [rid, target_emp_id, notice_date, last_working_day, data.get('reason'), session['emp_id'], now],
+            )
+            conn.execute(
+                "INSERT INTO offboarding_workflow (offboard_id, resignation_id, emp_id, stage1_status, stage2_status, stage3_status, stage4_status, stage5_status, completed, created_at) "
+                "VALUES (?, ?, ?, 'InProgress', 'Pending', 'Pending', 'Pending', 'Pending', 0, ?)",
+                [oid, rid, target_emp_id, now],
+            )
+            task_specs = (
+                ('Accept resignation', 'HR', 1),
+                ('Knowledge transfer and manager clearance', data.get('manager_emp_id') or 'Manager', 2),
+                ('Return assets and IT clearance', 'IT', 3),
+                ('Full and final settlement', 'Finance', 4),
+                ('Exit interview and access revocation', 'HR', 5),
+            )
+            for task_name, assigned_to, stage in task_specs:
+                conn.execute(
+                    "INSERT INTO offboarding_tasks (task_id, emp_id, task_name, assigned_to, status, due_date, completed_at, stage) "
+                    "VALUES (?, ?, ?, ?, 'Pending', ?, NULL, ?)",
+                    [_next_generated_id(conn, 'offboarding_tasks', 'task_id'), target_emp_id, task_name,
+                     assigned_to, last_working_day, stage],
+                )
+            result = {'resignation_id': rid, 'offboard_id': oid, 'emp_id': target_emp_id}
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('create resignation failed: %s', exc)
+        return jsonify({'error': 'Failed to create resignation'}), 500
+    audit_log(session['emp_id'], 'RESIGNATION_CREATE', f'Created resignation for {result["emp_id"]}', entity='resignations', entity_id=result['resignation_id'])
+    return jsonify({'message': 'Resignation recorded', **result}), 201
+
+
+@app.route('/api/v1/resignations/<int:resignation_id>/acknowledge', methods=['POST'])
+@app.route('/api/resignations/<int:resignation_id>/acknowledge', methods=['POST'])
+@login_required
+def acknowledge_resignation(resignation_id):
+    try:
+        with outbox.transaction() as conn:
+            row = conn.execute(
+                "SELECT w.offboard_id, w.emp_id, w.stage1_status FROM offboarding_workflow w "
+                "JOIN resignations r ON r.resignation_id = w.resignation_id WHERE r.resignation_id = ?",
+                [resignation_id],
+            ).fetchone()
+            if not row:
+                raise LifecycleError(404, 'Resignation not found')
+            if row[2] == 'Completed':
+                raise LifecycleError(409, 'Resignation is already acknowledged')
+            workflow = _offboarding_workflow_row(conn, row[0])
+            actor = _lifecycle_actor(conn)
+            if not _offboarding_actor_allowed(conn, actor, 1, workflow):
+                raise LifecycleError(403, 'Only the employee\'s manager or HR/Admin may acknowledge resignation')
+            _complete_offboarding_stage_tx(conn, row[0], 1, actor)
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('acknowledge resignation failed: %s', exc)
+        return jsonify({'error': 'Failed to acknowledge resignation'}), 500
+    audit_log(session['emp_id'], 'RESIGNATION_ACKNOWLEDGE', f'Acknowledged resignation {resignation_id}', entity='resignations', entity_id=resignation_id)
+    return jsonify({'message': 'Resignation acknowledged'}), 200
+
+
+@app.route('/api/v1/offboarding-workflows', methods=['GET'])
+@app.route('/api/offboarding-workflows', methods=['GET'])
+@login_required
+def offboarding_workflows_api():
+    return resignations_api()
+
+
+@app.route('/api/v1/offboarding-workflows/<int:offboard_id>', methods=['GET'])
+@app.route('/api/offboarding-workflows/<int:offboard_id>', methods=['GET'])
+@login_required
+def offboarding_workflow_detail(offboard_id):
+    conn = get_db()
+    try:
+        row = _offboarding_workflow_row(conn, offboard_id)
+        if not row:
+            return jsonify({'error': 'Offboarding workflow not found'}), 404
+        actor = _lifecycle_actor(conn)
+        if not _can_manage_lifecycle(actor, include_it=True, include_finance=True) and row[2] != session.get('emp_id'):
+            return jsonify({'error': 'Forbidden'}), 403
+        return jsonify(_offboarding_workflow_summary(conn, row)), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/offboarding-workflows/<int:offboard_id>/stages/<int:stage>/complete', methods=['POST'])
+@app.route('/api/offboarding-workflows/<int:offboard_id>/stages/<int:stage>/complete', methods=['POST'])
+@login_required
+def complete_offboarding_stage(offboard_id, stage):
+    data = request.get_json(silent=True) or {}
+    try:
+        with outbox.transaction() as conn:
+            actor = _lifecycle_actor(conn)
+            workflow = _offboarding_workflow_row(conn, offboard_id)
+            if not workflow:
+                raise LifecycleError(404, 'Offboarding workflow not found')
+            if not _offboarding_actor_allowed(conn, actor, stage, workflow):
+                raise LifecycleError(403, 'You are not an owner for this offboarding stage')
+            _complete_offboarding_stage_tx(conn, offboard_id, stage, actor, data.get('action', 'complete'))
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('offboarding stage completion failed: %s', exc)
+        return jsonify({'error': 'Failed to complete offboarding stage'}), 500
+    audit_log(session['emp_id'], 'OFFBOARDING_STAGE_COMPLETE', f'Completed offboarding stage {stage}', entity='offboarding_workflow', entity_id=offboard_id)
+    return jsonify({'message': f'Offboarding stage {stage} completed', 'offboard_id': offboard_id}), 200
+
+
+@app.route('/api/v1/offboarding-workflows/<int:offboard_id>/stage/<int:stage>/prepare', methods=['POST'])
+@app.route('/api/offboarding-workflows/<int:offboard_id>/stage/<int:stage>/prepare', methods=['POST'])
+@login_required
+def prepare_offboarding_settlement(offboard_id, stage):
+    if stage != 4:
+        return jsonify({'error': 'Only stage 4 has a prepare/approve split'}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        asset_damage_override = float(data['asset_damage']) if data.get('asset_damage') is not None else None
+    except (TypeError, ValueError):
+        return jsonify({'error': 'asset_damage must be numeric'}), 400
+    if asset_damage_override is not None and asset_damage_override < 0:
+        return jsonify({'error': 'asset_damage cannot be negative'}), 400
+    try:
+        with outbox.transaction() as conn:
+            actor = _lifecycle_actor(conn)
+            workflow = _offboarding_workflow_row(conn, offboard_id)
+            if not workflow:
+                raise LifecycleError(404, 'Offboarding workflow not found')
+            if not _offboarding_actor_allowed(conn, actor, stage, workflow):
+                raise LifecycleError(403, 'Finance/Admin access required')
+            if workflow[4] != 'Completed' or workflow[5] != 'Completed':
+                raise LifecycleError(409, 'Stages 2 and 3 must both be complete before settlement preparation')
+            if workflow[6] == 'Completed':
+                raise LifecycleError(409, 'Settlement is already approved')
+            previous = conn.execute(
+                "SELECT actor_emp_id FROM offboarding_approvals WHERE offboard_id = ? AND action = 'Prepare' "
+                "ORDER BY approval_id DESC LIMIT 1", [offboard_id]
+            ).fetchone()
+            if previous:
+                raise LifecycleError(409, 'Settlement was already prepared; a different approver must complete it')
+            settlement = _calculate_offboarding_settlement(conn, workflow[2])
+            if asset_damage_override is not None:
+                settlement['asset_damage'] = round(asset_damage_override, 2)
+                settlement['total_amount'] = round(
+                    settlement['pending_payroll'] + settlement['leave_encashment']
+                    - settlement['lop_adjustment'] - settlement['deductions']
+                    + settlement['asset_damage'], 2
+                )
+            conn.execute(
+                "INSERT INTO offboarding_settlements (settlement_id, offboard_id, pending_payroll, "
+                "lop_adjustment, leave_encashment, deductions, asset_damage, total_amount, status, "
+                "prepared_by, prepared_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Prepared', ?, ?)",
+                [_next_generated_id(conn, 'offboarding_settlements', 'settlement_id'), offboard_id,
+                 settlement['pending_payroll'], settlement['lop_adjustment'], settlement['leave_encashment'],
+                 settlement['deductions'], settlement['asset_damage'], settlement['total_amount'], actor[0], datetime.now()],
+            )
+            _set_offboarding_stage(conn, offboard_id, 4, 'InProgress')
+            _record_offboarding_approval(conn, offboard_id, actor[0], 'Prepare', workflow[6], 'InProgress')
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('settlement preparation failed: %s', exc)
+        return jsonify({'error': 'Failed to prepare settlement'}), 500
+    audit_log(session['emp_id'], 'OFFBOARDING_SETTLEMENT_PREPARE', f'Prepared settlement {offboard_id}', entity='offboarding_workflow', entity_id=offboard_id)
+    return jsonify({'message': 'Settlement prepared; a different Finance/Admin user must approve', 'settlement': settlement}), 200
+
+
+@app.route('/api/v1/offboarding-workflows/<int:offboard_id>/stage/<int:stage>/approve', methods=['POST'])
+@app.route('/api/offboarding-workflows/<int:offboard_id>/stage/<int:stage>/approve', methods=['POST'])
+@login_required
+def approve_offboarding_settlement(offboard_id, stage):
+    if stage != 4:
+        return jsonify({'error': 'Only stage 4 has a prepare/approve split'}), 400
+    try:
+        with outbox.transaction() as conn:
+            actor = _lifecycle_actor(conn)
+            workflow = _offboarding_workflow_row(conn, offboard_id)
+            if not workflow:
+                raise LifecycleError(404, 'Offboarding workflow not found')
+            if not _offboarding_actor_allowed(conn, actor, stage, workflow):
+                raise LifecycleError(403, 'Finance/Admin access required')
+            _complete_offboarding_stage_tx(conn, offboard_id, 4, actor, 'approve')
+    except LifecycleError as exc:
+        return _lifecycle_error_payload(exc), exc.status_code
+    except Exception as exc:
+        logger.warning('settlement approval failed: %s', exc)
+        return jsonify({'error': 'Failed to approve settlement'}), 500
+    audit_log(session['emp_id'], 'OFFBOARDING_SETTLEMENT_APPROVE', f'Approved settlement {offboard_id}', entity='offboarding_workflow', entity_id=offboard_id)
+    return jsonify({'message': 'Settlement approved', 'offboard_id': offboard_id}), 200
+
+
+@app.route('/api/v1/offboarding-workflows/<int:offboard_id>/revoke-access', methods=['POST'])
+@app.route('/api/offboarding-workflows/<int:offboard_id>/revoke-access', methods=['POST'])
+@admin_required
+def revoke_offboarding_workflow_access(offboard_id):
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT emp_id, resignation_id FROM offboarding_workflow WHERE offboard_id = ?", [offboard_id]).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'Offboarding workflow not found'}), 404
+    revoked = revoke_offboarding_access(datetime.now(IST).date(), offboard_id=offboard_id)
+    return jsonify({'message': 'Access revocation pass completed', 'revoked': revoked}), 200
+
+
+@app.route('/api/v1/admin/offboarding/revoke', methods=['POST'])
+@app.route('/api/admin/offboarding/revoke', methods=['POST'])
+@admin_required
+def admin_revoke_offboarding_access():
+    target = parse_date((request.get_json(silent=True) or {}).get('date'))
+    revoked = revoke_offboarding_access(target or datetime.now(IST).date())
+    for item in revoked:
+        audit_log(item['emp_id'], 'ACCESS_REVOKED', 'Administrative LWD revocation pass', entity='resignations', entity_id=item['resignation_id'])
+    return jsonify({'revoked': revoked, 'count': len(revoked)}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -5200,8 +7000,8 @@ def get_users():
                 'emp_id': r[0], 'name': r[1], 'email': r[2], 'role': r[3],
                 'status': r[4], 'department': r[5],
                 'first_login': r[6].strftime('%I:%M %p') if r[6] else 'N/A',
-                'allow_login': int(r[7]) if r[7] else 1,
-                'allow_breaks': int(r[8]) if r[8] else 1,
+                'allow_login': 1 if r[7] else 0,
+                'allow_breaks': 1 if r[8] else 0,
                 'shift_start': sstart or '',
                 'shift_end': send or '',
                 'weekly_off_pattern': get_weekly_off_pattern(r[0], conn)
@@ -5215,8 +7015,8 @@ def get_users():
             'emp_id': r[0], 'name': r[1], 'email': r[2], 'role': r[3],
             'status': r[4], 'department': r[5],
             'first_login': r[6].strftime('%I:%M %p') if r[6] else 'N/A',
-            'allow_login': int(r[7]) if r[7] else 1,
-            'allow_breaks': int(r[8]) if r[8] else 1,
+            'allow_login': 1 if r[7] else 0,
+            'allow_breaks': 1 if r[8] else 0,
             'shift_start': r[9] or '',
             'shift_end': r[10] or '',
             'weekly_off_pattern': r[11] or 'Sat,Sun'
@@ -5301,8 +7101,8 @@ def get_user_route(emp_id):
     return jsonify({
         'emp_id': u[0], 'name': u[1], 'email': u[2], 'role': u[3],
         'status': u[4], 'department': u[5],
-        'allow_login': int(u[6]) if u[6] else 1,
-        'allow_breaks': int(u[7]) if u[7] else 1,
+        'allow_login': 1 if u[6] else 0,
+        'allow_breaks': 1 if u[7] else 0,
         'shift_start': sstart or '',
         'shift_end': send or '',
         'weekly_off_pattern': get_weekly_off_pattern(emp_id)
@@ -5657,6 +7457,18 @@ if not STARTED:
             hour=attendance_hour,
             minute=5,
             id='attendance-finalization',
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=3600,
+        )
+        scheduler.add_job(
+            run_offboarding_access_revocation,
+            'cron',
+            hour=0,
+            minute=0,
+            timezone=IST,
+            id='offboarding-access-revocation',
             replace_existing=True,
             coalesce=True,
             max_instances=1,

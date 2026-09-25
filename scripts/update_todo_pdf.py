@@ -40,6 +40,11 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-25", "FR-ATS/FR-ONB/FR-OFF corrected lifecycle implemented: guarded ATS state machine, "
+     "100% offer splits, atomic accepted-offer conversion, signed pre-boarding tokens and real-file "
+     "validation, five-step guarded onboarding, parallel offboarding with F&F maker-checker, and "
+     "IST LWD access revocation. DuckDB 68 passed / 5 skipped; PostgreSQL 72 passed / 1 skipped; "
+     "Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
     ("2026-09-24", "FR-PAY-06 maker-checker payroll implemented: Draft → Submitted → Approved → "
      "Finalized, Finance/Admin authorization, self-approval rejection, payroll_approvals trail, "
      "adjustment-run reference, Finance UI access, and public probe coverage. DuckDB 64 passed / "
@@ -71,19 +76,19 @@ TASKS = [
     ("Phase 3a", "Global CSRF enforcement (fetch wrapper + csrf_token field + token API)", "98563ee", DONE),
     ("Phase 3a", "Server-side Redis sessions (REDIS_URL opt-in) + login rate limiting", "98563ee", DONE),
     # ── Phase 3b (CC-01 + public flip) ───────────────────────────────────
-    ("Phase 3b", "CC-01 identity rule enforced: scripts/check_cc_rules.py + PG-gated test", "45 identity + 4 natural keys, sequences ahead of data (acb5219)", DONE),
+    ("Phase 3b", "CC-01 identity rule enforced: scripts/check_cc_rules.py + PG-gated test", "46 identity + 4 natural keys, sequences ahead of data (acb5219)", DONE),
     ("Phase 3b", "Public-flip readiness probe (scripts/probe_public_flip.py)", "GET + write-flow matrix against a throwaway public DB (acb5219)", DONE),
     ("Phase 3b", "Boolean adapter compat: predicates, INSERT params, naive datetime round-trip", "Inert on legacy (zero boolean cols); PG-gated tests (21480fe)", DONE),
     ("Phase 3b", "Write-flow probe + salary_structures seed data fix (CC-05)", "11/11 core write flows green on public (21480fe)", DONE),
     ("Phase 3b", "CC-09 transactional outbox (outbox.py + scheduler + admin endpoints)", "Atomic business-write + event; backoff -> dead-letter (7e52f88)", DONE),
     ("Phase 3b", "CC-07 idempotency: @idempotent decorator + idempotency_keys wired for keyed POST retries", "Replay-without-duplicate, 409 on body reuse, claim released on failure; 6 unit tests green on every stack; probe replays on pure v2.0 JSONB", DONE),
     ("Phase 3b", "Service-layer rewrite inc 1: expanded audit_log (actor/entity/entity_id/before/after/request_id, CC-13) + notifications.category (FR-NOT-03)", "8ff66bc; +6 unit tests; DuckDB 46 green", DONE),
-    ("Phase 3b", "Service-layer rewrite inc 2: shift_assignments replaces users.shift_start/shift_end (FR-ATT-17); init_db no longer mutates v2.0 public.users", "get_shift/set_shift helpers reroute ~10 touch points; user CRUD + seed via set_shift; public probe 30/30 write flows", DONE),
-    ("Phase 3b", "Extend probe write section: forgot-password, payroll bank-file/TDS, ticket/ATS + verify against a clean public schema", "Clean hrms_probe re-run: 86/86 GET + 30/30 write flows, including attendance + payroll maker-checker paths; all seed-time writes green", DONE),
+    ("Phase 3b", "Service-layer rewrite inc 2: shift_assignments replaces users.shift_start/shift_end (FR-ATT-17); init_db no longer mutates v2.0 public.users", "get_shift/set_shift helpers reroute ~10 touch points; user CRUD + seed via set_shift; public probe 42/42 write flows", DONE),
+    ("Phase 3b", "Extend probe write section: forgot-password, payroll bank-file/TDS, ticket/ATS + verify against a clean public schema", "Clean hrms_probe re-run: 94/94 GET + 42/42 write flows, including attendance, payroll, and lifecycle paths; all seed-time writes green", DONE),
     # ── Phase 4 ──────────────────────────────────────────────────────────
-    ("Phase 4", "Attendance finalisation job (FR-JOB-01)", "7 acceptance tests + nightly scheduler + regularization recompute; clean public probe 86/86 GET + 30/30 write", DONE),
-    ("Phase 4", "Maker-checker payroll (FR-PAY-06)", "Strict state machine + approval trail + Finance/Admin UI; clean public probe 86/86 GET + 30/30 write", DONE),
-    ("Phase 4", "Corrected ATS / onboarding / offboarding flows", "SRS §14 Phase 4", PENDING),
+    ("Phase 4", "Attendance finalisation job (FR-JOB-01)", "7 acceptance tests + nightly scheduler + regularization recompute; clean public probe 94/94 GET + 42/42 write", DONE),
+    ("Phase 4", "Maker-checker payroll (FR-PAY-06)", "Strict state machine + approval trail + Finance/Admin UI; clean public probe 94/94 GET + 42/42 write", DONE),
+    ("Phase 4", "Corrected ATS / onboarding / offboarding flows", "FR-ATS/FR-ONB/FR-OFF acceptance suite + 94/42 public probe", DONE),
     # ── Phase 5-6 ────────────────────────────────────────────────────────
     ("Phase 5", "Final cutover: flip APP_DB_SCHEMA to public, retire legacy", "Out of the ETL blueprint; tracked in SRS", PENDING),
     ("Phase 6", "Decommission DuckDB runtime", "Out of the ETL blueprint; tracked in SRS", PENDING),
@@ -91,13 +96,13 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "64 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "68 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "68 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "15 passed"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "15 passed"),
-    ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 45 identity + 4 natural keys"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "86/86 GET + 30/30 write flows; attendance + payroll maker-checker paths included"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "68 passed, 5 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "72 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "72 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
+    ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 42/42 write flows; lifecycle paths included"),
 ]
 
 DONE_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p and t[3] == DONE) for p in sorted({t[0] for t in TASKS})}
@@ -148,7 +153,7 @@ def build_pdf(path: str) -> None:
     summary_rows = [
         ["Completed tasks", f"{done_total} / {len(TASKS)}"],
         ["Current branch", _current_branch()],
-        ["Next task", "Phase 4: corrected ATS/onboarding/offboarding flows with public-flip probe coverage"],
+        ["Next task", "Phase 5: final cutover to public, then Phase 6 DuckDB decommission"],
     ]
     for phase in sorted(TOTAL_BY_PHASE):
         summary_rows.append([f"{phase} progress", f"{DONE_BY_PHASE[phase]} / {TOTAL_BY_PHASE[phase]} done"])

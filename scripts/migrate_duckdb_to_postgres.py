@@ -428,16 +428,16 @@ REGISTRY: list[dict] = [
     ),
     dict(
         table="onboarding_tasks",
-        columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at"],
+        columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
         select="SELECT task_id, emp_id, task_name, assigned_to, status, due_date, completed_at FROM onboarding_tasks ORDER BY task_id",
-        row_fn=_row_fn_none,
+        row_fn=lambda r: (*r, 1),
         pk="task_id",
     ),
     dict(
         table="offboarding_tasks",
-        columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at"],
+        columns=["task_id", "emp_id", "task_name", "assigned_to", "status", "due_date", "completed_at", "stage"],
         select="SELECT task_id, emp_id, task_name, assigned_to, status, due_date, completed_at FROM offboarding_tasks ORDER BY task_id",
-        row_fn=_row_fn_none,
+        row_fn=lambda r: (*r, 1),
         pk="task_id",
     ),
     dict(

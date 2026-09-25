@@ -35,6 +35,7 @@ import os
 import sys
 import traceback
 from collections import Counter
+from io import BytesIO
 
 import psycopg
 
@@ -137,6 +138,64 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
         pc.execute("DELETE FROM ticket_comments WHERE comment = 'probe comment'")
         pc.execute("DELETE FROM tickets WHERE subject = 'public write probe'")
+        pc.execute("DELETE FROM onboarding_checklist WHERE workflow_id IN ("
+                   "SELECT w.workflow_id FROM onboarding_workflow w JOIN candidates c "
+                   "ON c.candidate_id = w.candidate_id WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM offboarding_settlements WHERE offboard_id IN ("
+                   "SELECT w.offboard_id FROM offboarding_workflow w JOIN users u ON u.emp_id = w.emp_id "
+                   "JOIN candidates c ON c.candidate_id = u.candidate_id WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM offboarding_approvals WHERE offboard_id IN ("
+                   "SELECT w.offboard_id FROM offboarding_workflow w JOIN users u ON u.emp_id = w.emp_id "
+                   "JOIN candidates c ON c.candidate_id = u.candidate_id WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM offboarding_workflow WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM resignations WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM onboarding_tasks WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM offboarding_tasks WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM exit_interviews WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM onboarding_workflow WHERE candidate_id IN "
+                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM salary_structures WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM documents WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM assets WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM notifications WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM audit_log WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM user_sessions WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM employee_documents WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM user_permissions WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM password_reset_tokens WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM shift_assignments WHERE emp_id IN ("
+                   "SELECT u.emp_id FROM users u JOIN candidates c ON c.candidate_id = u.candidate_id "
+                   "WHERE c.email LIKE 'probe-cand-%')")
+        pc.execute("DELETE FROM users WHERE candidate_id IN "
+                   "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
         pc.execute("DELETE FROM offer_letters WHERE candidate_id IN "
                    "(SELECT candidate_id FROM candidates WHERE email LIKE 'probe-cand-%')")
         pc.execute("DELETE FROM candidates WHERE email LIKE 'probe-cand-%'")
@@ -332,7 +391,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return _put(cl_a, tok_a, f"/api/tickets/{tid}/status", {"status": "Resolved"}).status_code
     run("tickets(resolve)", ticket_resolve)
 
-    # ── ATS journey: candidate → offered → offer sent → accepted (outbox) ─
+    # ── ATS journey: Applied → Screened → Interviewed → Offered → accepted ─
     cand_marker = f"probe-cand-{os.getpid()}@company.com"
 
     def candidate_create():
@@ -344,18 +403,36 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return r.status_code
     run("ats(candidate create)", candidate_create)
 
-    def candidate_offered():
+    def direct_hired_guard():
         cid = state.get("candidate_id")
         if not cid:
             return 409
-        return _put(cl_a, tok_a, f"/api/candidates/{cid}/status", {"status": "Offered"}).status_code
-    run("ats(candidate offered)", candidate_offered)
+        response = _put(cl_a, tok_a, f"/api/candidates/{cid}/status", {"status": "Hired"})
+        return 200 if response.status_code == 409 else response.status_code
+    run("ats(direct Hired guard)", direct_hired_guard)
+
+    def candidate_screened():
+        cid = state.get("candidate_id")
+        if not cid:
+            return 409
+        return _put(cl_a, tok_a, f"/api/candidates/{cid}/status", {"status": "Screened"}).status_code
+    run("ats(candidate screened)", candidate_screened)
+
+    def candidate_interviewed():
+        cid = state.get("candidate_id")
+        if not cid:
+            return 409
+        return _put(cl_a, tok_a, f"/api/candidates/{cid}/status", {"status": "Interviewed"}).status_code
+    run("ats(candidate interviewed)", candidate_interviewed)
 
     def offer_send():
         cid = state.get("candidate_id")
         if not cid:
             return 409
-        r = _post(cl_a, tok_a, "/api/offers", {"candidate_id": cid, "offered_salary": 600000})
+        r = _post(cl_a, tok_a, "/api/offers", {
+            "candidate_id": cid, "offered_salary": 600000,
+            "basic_pct": 50, "hra_pct": 30, "allowances_pct": 20,
+        })
         if r.status_code == 201 and r.is_json:
             state["offer_id"] = (r.get_json() or {}).get("id")
         return r.status_code
@@ -365,8 +442,151 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         oid = state.get("offer_id")
         if not oid:
             return 409
-        return _post(cl_a, tok_a, f"/api/offers/{oid}/accept").status_code
+        response = _post(cl_a, tok_a, f"/api/offers/{oid}/accept")
+        if response.status_code != 200:
+            return response.status_code
+        state["prehire_id"] = (response.get_json() or {}).get("emp_id")
+        state["workflow_id"] = (response.get_json() or {}).get("workflow_id")
+        state["preboarding_token"] = (response.get_json() or {}).get("preboarding_token")
+        cid = state.get("candidate_id")
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT c.status, u.allow_login, u.status, w.completed, "
+                "(SELECT COUNT(*) FROM onboarding_checklist x WHERE x.workflow_id = w.workflow_id), "
+                "(SELECT COUNT(*) FROM salary_structures s WHERE s.emp_id = u.emp_id) "
+                "FROM candidates c JOIN users u ON u.candidate_id = c.candidate_id "
+                "JOIN onboarding_workflow w ON w.candidate_id = c.candidate_id WHERE c.candidate_id = %s",
+                [cid],
+            ).fetchone()
+        return 200 if row == ('Hired', False, 'Pre-hire', False, 5, 1) else 409
     run("ats(offer accept)", offer_accept)
+
+    def preboarding_view():
+        token = state.get("preboarding_token")
+        if not token:
+            return 409
+        return cl_a.get(f"/api/preboarding/{token}").status_code
+    run("onboarding(preboarding token)", preboarding_view)
+
+    def preboarding_documents():
+        token = state.get("preboarding_token")
+        if not token:
+            return 409
+        for doc_type in ("ID%20Proof", "Address%20Proof", "Education", "Certification", "Bank%20Details"):
+            response = cl_a.post(
+                f"/api/preboarding/{token}/documents/{doc_type}",
+                data={"file": (BytesIO(b"%PDF-1.4\npublic probe"), "document.pdf", "application/pdf")},
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if response.status_code != 201:
+                return response.status_code
+        return cl_a.post(f"/api/preboarding/{token}/submit").status_code
+    run("onboarding(documents + submit)", preboarding_documents)
+
+    def preboarding_review():
+        wid = state.get("workflow_id")
+        if not wid:
+            return 409
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            items = pc.execute(
+                "SELECT item_id FROM onboarding_checklist WHERE workflow_id = %s", [wid]
+            ).fetchall()
+        for (item_id,) in items:
+            response = _post(cl_a, tok_a, f"/api/onboarding-checklist/{item_id}/review",
+                             {"status": "Approved", "note": "probe approved"})
+            if response.status_code != 200:
+                return response.status_code
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT step2_status, step3_status FROM onboarding_workflow WHERE workflow_id = %s", [wid]
+            ).fetchone()
+        return 200 if row == ('Completed', 'InProgress') else 409
+    run("onboarding(HR document review)", preboarding_review)
+
+    def onboarding_task_completion():
+        emp_id = state.get("prehire_id")
+        if not emp_id:
+            return 409
+        tasks = cl_a.get("/api/onboarding-tasks").get_json() or []
+        tasks = sorted((task for task in tasks if task.get("emp_id") == emp_id), key=lambda task: task.get("stage") or 0)
+        for task in tasks:
+            response = _post(cl_a, tok_a, f"/api/onboarding-tasks/{task['id']}/complete")
+            if response.status_code != 200:
+                return response.status_code
+        return 200
+    run("onboarding(task guards + steps)", onboarding_task_completion)
+
+    # ── corrected offboarding: resignation → parallel clearance → settlement
+    #    maker-checker → LWD access revocation ────────────────────────────────
+    def resignation_create():
+        emp_id = state.get("prehire_id")
+        if not emp_id:
+            return 409
+        r = _post(cl_a, tok_a, "/api/resignations", {
+            "emp_id": emp_id,
+            "notice_date": today.isoformat(),
+            "last_working_day": today.isoformat(),
+            "reason": "public lifecycle probe",
+        })
+        if r.status_code == 201 and r.is_json:
+            state["offboard_id"] = (r.get_json() or {}).get("offboard_id")
+            state["resignation_id"] = (r.get_json() or {}).get("resignation_id")
+        return r.status_code
+    run("offboarding(resignation)", resignation_create)
+
+    def resignation_ack():
+        rid = state.get("resignation_id")
+        if not rid:
+            return 409
+        return _post(cl_a, tok_a, f"/api/resignations/{rid}/acknowledge").status_code
+    run("offboarding(acknowledge)", resignation_ack)
+
+    def offboarding_parallel_clearance():
+        oid = state.get("offboard_id")
+        emp_id = state.get("prehire_id")
+        if not oid or not emp_id:
+            return 409
+        first = _post(cl_a, tok_a, f"/api/offboarding-workflows/{oid}/stages/2/complete")
+        if first.status_code != 200:
+            return first.status_code
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            asset_id = pc.execute(
+                "INSERT INTO assets (emp_id, asset_type, issued_date, status) VALUES (%s, 'Laptop', %s, 'Issued') RETURNING asset_id",
+                [emp_id, today],
+            ).fetchone()[0]
+        blocked = _post(cl_a, tok_a, f"/api/offboarding-workflows/{oid}/stages/3/complete")
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            pc.execute(
+                "UPDATE assets SET status = 'Returned', return_date = %s WHERE asset_id = %s",
+                [today, asset_id],
+            )
+        second = _post(cl_a, tok_a, f"/api/offboarding-workflows/{oid}/stages/3/complete")
+        return 200 if blocked.status_code == 409 and second.status_code == 200 else 409
+    run("offboarding(parallel stages 2/3)", offboarding_parallel_clearance)
+
+    def settlement_prepare():
+        oid = state.get("offboard_id")
+        if not oid:
+            return 409
+        return _post(cl_f, tok_f, f"/api/offboarding-workflows/{oid}/stage/4/prepare").status_code
+    run("offboarding(settlement prepare)", settlement_prepare)
+
+    def settlement_approve():
+        oid = state.get("offboard_id")
+        if not oid:
+            return 409
+        return _post(cl_a, tok_a, f"/api/offboarding-workflows/{oid}/stage/4/approve").status_code
+    run("offboarding(settlement approve)", settlement_approve)
+
+    def lwd_revoke():
+        r = _post(cl_a, tok_a, "/api/admin/offboarding/revoke", {"date": today.isoformat()})
+        if r.status_code != 200:
+            return r.status_code
+        emp_id = state.get("prehire_id")
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            row = pc.execute("SELECT status, allow_login FROM users WHERE emp_id = %s", [emp_id]).fetchone()
+        return 200 if row == ('Inactive', False) else 409
+    run("offboarding(LWD revoke)", lwd_revoke)
 
     # ── payroll maker-checker: create → submit (Finance) → approve (Admin)
     #    → finalize, then bank-file + TDS exports ───────────────────────────

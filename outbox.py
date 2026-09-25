@@ -1,8 +1,9 @@
 """CC-09 transactional outbox.
 
 Business writes that have downstream side effects (payroll finalisation,
-offer-letter issuance/acceptance) enqueue a ``pending`` ``outbox_events``
-row on the *same* connection, inside an explicit transaction, so the
+offer issuance/acceptance, onboarding credentials) enqueue a ``pending``
+``outbox_events`` row on the *same* connection, inside an explicit transaction,
+so the
 business change and its event commit atomically (see ``outbox.transaction``).
 A dispatcher later reads due ``pending`` events, applies the registered
 handler, and marks them ``delivered`` — or, on failure, advances ``attempts``
@@ -86,8 +87,11 @@ def enqueue(conn, event_type: str, aggregate=None, aggregate_id=None, payload=No
     """
     if not _table_exists(conn):
         return None
-    from app import gen_id  # lazy: never runs at import time
-    event_id = gen_id()
+    from app import _is_public_target_schema, _next_generated_id, gen_id  # lazy
+    event_id = (
+        _next_generated_id(conn, 'outbox_events', 'event_id')
+        if _is_public_target_schema() else gen_id()
+    )
     now = datetime.now()
     payload_json = json.dumps(payload) if payload is not None else None
     conn.execute(
@@ -162,19 +166,77 @@ def _handle_offer_created(conn, row) -> bool:
 
 
 def _handle_offer_accepted(conn, row) -> bool:
-    """Onboarding: notify the admin team to start the hire workflow."""
+    """Onboarding: notify HR/Admin that the guarded hire workflow started."""
     from app import gen_id  # lazy
     payload = _payload(row) or {}
     cid = payload.get('candidate_id')
     try:
-        conn.execute(
-            "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
-            "VALUES (?, 'EMP001', 'Onboarding', 'Onboarding', ?, '/onboarding', ?)",
-            [gen_id(), f'Candidate {cid} accepted — start onboarding', datetime.now()],
-        )
+        recipients = conn.execute(
+            "SELECT emp_id FROM users WHERE role IN ('Admin', 'Super Admin', 'HR') OR department = 'HR' ORDER BY emp_id"
+        ).fetchall()
+        if not recipients:
+            recipients = [('EMP001',)]
+        for (recipient,) in recipients:
+            conn.execute(
+                "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
+                "VALUES (?, ?, 'Onboarding', 'Onboarding', ?, '/onboarding', ?)",
+                [gen_id(), recipient, f'Candidate {cid} accepted — onboarding workflow started', datetime.now()],
+            )
         return True
     except Exception as exc:
         logger.warning('outbox offer.accepted handler failed: %s', exc)
+        return False
+
+
+def _handle_credentials_issued(conn, row) -> bool:
+    """Email the one-time credential link after provisioning completes."""
+    from app import send_email  # lazy
+    payload = _payload(row) or {}
+    emp_id = payload.get('emp_id')
+    if not emp_id or not payload.get('reset_token'):
+        return False
+    try:
+        user = conn.execute("SELECT email, name FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+        if not user:
+            return False
+        send_email(
+            user[0], 'Your HRMS login is ready',
+            f"Hi {user[1]}, your HRMS account is active. Use this one-time password reset token: "
+            f"{payload['reset_token']} (valid for 24 hours).",
+        )
+        return True
+    except Exception as exc:
+        logger.warning('outbox credentials.issued handler failed: %s', exc)
+        return False
+
+
+def _handle_candidate_hired(conn, row) -> bool:
+    """Reconcile the hire event idempotently after an at-least-once replay."""
+    from app import ONBOARDING_REQUIRED_DOCS, _next_generated_id  # lazy
+    payload = _payload(row) or {}
+    workflow_id = payload.get('workflow_id')
+    if not workflow_id:
+        return True
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM onboarding_workflow WHERE workflow_id = ?", [workflow_id]
+        ).fetchone()
+        if not exists:
+            return False
+        for doc_type in ONBOARDING_REQUIRED_DOCS:
+            present = conn.execute(
+                "SELECT 1 FROM onboarding_checklist WHERE workflow_id = ? AND doc_type = ?",
+                [workflow_id, doc_type],
+            ).fetchone()
+            if not present:
+                conn.execute(
+                    "INSERT INTO onboarding_checklist (item_id, workflow_id, doc_type, status) "
+                    "VALUES (?, ?, ?, 'Pending')",
+                    [_next_generated_id(conn, 'onboarding_checklist', 'item_id'), workflow_id, doc_type],
+                )
+        return True
+    except Exception as exc:
+        logger.warning('outbox candidate.hired reconciliation failed: %s', exc)
         return False
 
 
@@ -182,6 +244,8 @@ HANDLERS = {
     'payroll.finalized': _handle_payroll_finalized,
     'offer.created': _handle_offer_created,
     'offer.accepted': _handle_offer_accepted,
+    'candidate.hired': _handle_candidate_hired,
+    'credentials.issued': _handle_credentials_issued,
 }
 
 

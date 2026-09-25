@@ -146,6 +146,11 @@ def init_csrf(app) -> None:
     def _csrf_guard():  # noqa: ANN001 - Flask hook
         if request.path.startswith("/static/"):
             return None
+        # Scoped pre-boarding links authenticate with their signed token and
+        # intentionally have no normal login/CSRF session. The lifecycle route
+        # validates the token before accepting any mutation.
+        if request.path.startswith("/api/preboarding/"):
+            return None
         established = session.get(CSRF_KEY)
 
         if request.method in _SAFE_METHODS:

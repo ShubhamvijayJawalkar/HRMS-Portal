@@ -117,10 +117,12 @@ async function loadCandidates() {
                 <option value="Applied" ${c.status==='Applied'?'selected':''}>Applied</option>
                 <option value="Screened" ${c.status==='Screened'?'selected':''}>Screened</option>
                 <option value="Interviewed" ${c.status==='Interviewed'?'selected':''}>Interviewed</option>
-                <option value="Offered" ${c.status==='Offered'?'selected':''}>Offered</option>
-                <option value="Hired" ${c.status==='Hired'?'selected':''}>Hired</option>
+                <option value="Offered" ${c.status==='Offered'?'selected':''} disabled>Offered</option>
+                <option value="Hired" ${c.status==='Hired'?'selected':''} disabled>Hired</option>
                 <option value="Rejected" ${c.status==='Rejected'?'selected':''}>Rejected</option>
+                <option value="Withdrawn" ${c.status==='Withdrawn'?'selected':''}>Withdrawn</option>
             </select>
+            ${c.status === 'Interviewed' ? `<button class="btn btn-sm btn-outline-primary ms-1" onclick="createOffer(${c.id})">Create offer</button>` : ''}
         </td>
     </tr>`).join('');
 }
@@ -134,6 +136,20 @@ async function addCandidate() {
 async function updateStatus(id, status) {
     const r = await fetch(`/api/candidates/${id}/status`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status}) });
     if (r.ok) loadCandidates(); else alert('Failed');
+}
+async function createOffer(candidateId) {
+    const salary = prompt('Annual offered salary');
+    if (!salary) return;
+    const basic = prompt('Basic percentage', '50');
+    const hra = prompt('HRA percentage', '30');
+    const allowances = prompt('Allowances percentage', '20');
+    if ([basic, hra, allowances].some(value => value === null)) return;
+    const r = await fetch('/api/offers', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+        candidate_id: candidateId, offered_salary: Number(salary), basic_pct: Number(basic),
+        hra_pct: Number(hra), allowances_pct: Number(allowances)
+    })});
+    const result = await r.json();
+    if (r.ok) loadCandidates(); else alert(result.error || 'Offer could not be created');
 }
 </script>
 </body>

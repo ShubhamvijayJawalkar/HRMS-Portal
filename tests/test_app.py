@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 from datetime import datetime, timedelta
+from io import BytesIO
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -1441,6 +1442,168 @@ def test_shift_assignments_path_on_public():
     conn.close()
     assert len(rows) == 1
     assert rows[0][0] == '24x7' and rows[0][3] is None
+
+
+# ── Corrected ATS / onboarding / offboarding (Phase 4) ─────────────
+
+def _lifecycle_candidate(client, marker):
+    created = client.post('/api/candidates', json={
+        'name': 'Lifecycle Candidate', 'email': marker, 'resume_text': 'phase 4 test',
+    })
+    assert created.status_code == 201, created.get_json()
+    return created.get_json()['id']
+
+
+def _lifecycle_offer(client, candidate_id, marker):
+    assert client.put(f'/api/candidates/{candidate_id}/status', json={'status': 'Screened'}).status_code == 200
+    assert client.put(f'/api/candidates/{candidate_id}/status', json={'status': 'Interviewed'}).status_code == 200
+    invalid = client.post('/api/offers', json={
+        'candidate_id': candidate_id, 'offered_salary': 500000,
+        'basic_pct': 50, 'hra_pct': 30, 'allowances_pct': 10,
+    })
+    assert invalid.status_code == 400
+    created = client.post('/api/offers', json={
+        'candidate_id': candidate_id, 'offered_salary': 500000,
+        'basic_pct': 50, 'hra_pct': 30, 'allowances_pct': 20,
+    })
+    assert created.status_code == 201, created.get_json()
+    return created.get_json()['id']
+
+
+def test_ats_rejects_direct_hired_and_acceptance_creates_onboarding(client):
+    _idem_session(client, 99100)
+    marker = f'ats-{gen_id()}@example.com'
+    candidate_id = _lifecycle_candidate(client, marker)
+    assert client.put(f'/api/candidates/{candidate_id}/status', json={'status': 'Hired'}).status_code == 409
+    offer_id = _lifecycle_offer(client, candidate_id, marker)
+    assert client.post('/api/offers/999999999/accept').status_code == 404
+    accepted = client.post(f'/api/offers/{offer_id}/accept')
+    assert accepted.status_code == 200, accepted.get_json()
+    payload = accepted.get_json()
+    assert payload['preboarding_token']
+    assert client.post(f'/api/offers/{offer_id}/accept').status_code == 409
+    conn = get_db()
+    candidate = conn.execute("SELECT status FROM candidates WHERE candidate_id = ?", [candidate_id]).fetchone()
+    user = conn.execute("SELECT status, allow_login, candidate_id FROM users WHERE emp_id = ?", [payload['emp_id']]).fetchone()
+    workflow = conn.execute("SELECT completed, current_step FROM onboarding_workflow WHERE workflow_id = ?", [payload['workflow_id']]).fetchone()
+    checklist = conn.execute("SELECT COUNT(*) FROM onboarding_checklist WHERE workflow_id = ?", [payload['workflow_id']]).fetchone()[0]
+    salary = conn.execute("SELECT COUNT(*) FROM salary_structures WHERE emp_id = ?", [payload['emp_id']]).fetchone()[0]
+    conn.close()
+    assert candidate == ('Hired',)
+    assert user == ('Pre-hire', 0, candidate_id)
+    assert workflow == (0, 1)
+    assert checklist == 5
+    assert salary == 1
+
+
+def test_preboarding_token_upload_review_and_guarded_steps(client):
+    _idem_session(client, 99101)
+    candidate_id = _lifecycle_candidate(client, f'onb-{gen_id()}@example.com')
+    offer_id = _lifecycle_offer(client, candidate_id, 'onboarding')
+    accepted = client.post(f'/api/offers/{offer_id}/accept').get_json()
+    token = accepted['preboarding_token']
+    status = client.get(f'/api/preboarding/{token}')
+    assert status.status_code == 200
+    assert len(status.get_json()['checklist']) == 5
+    assert client.post(
+        f'/api/preboarding/{token}/documents/ID%20Proof',
+        data={'file': (BytesIO(b'%PDF-1.4\nprobe'), 'id.pdf', 'application/pdf')},
+    ).status_code == 201
+    assert client.post(f'/api/preboarding/{token}/submit').status_code == 200
+    conn = get_db()
+    items = conn.execute('SELECT item_id, doc_type FROM onboarding_checklist WHERE workflow_id = ?', [accepted['workflow_id']]).fetchall()
+    conn.close()
+    for item_id, doc_type in items:
+        assert client.post(
+            f'/api/preboarding/{token}/documents/{doc_type.replace(" ", "%20")}',
+            data={'file': (BytesIO(b'%PDF-1.4\nprobe'), 'document.pdf', 'application/pdf')},
+        ).status_code == 201
+        assert client.post(f'/api/onboarding-checklist/{item_id}/review', json={'status': 'Approved'}).status_code == 200
+    workflow = client.get(f"/api/onboarding-workflows/{accepted['workflow_id']}").get_json()
+    assert workflow['steps']['step2'] == 'Completed'
+    assert workflow['steps']['step3'] == 'InProgress'
+    tasks = sorted(client.get('/api/onboarding-tasks').get_json(), key=lambda task: task.get('stage') or 0)
+    for task in tasks:
+        if task['emp_id'] == accepted['emp_id'] and task['stage'] in (3, 4, 5):
+            assert client.post(f"/api/onboarding-tasks/{task['id']}/complete").status_code == 200
+    assert client.post(f"/api/onboarding-workflows/{accepted['workflow_id']}/steps/4/complete").status_code == 200
+    assert client.post(f"/api/onboarding-workflows/{accepted['workflow_id']}/steps/5/complete").status_code == 200
+    finished = client.get(f"/api/onboarding-workflows/{accepted['workflow_id']}").get_json()
+    assert finished['completed'] is True
+    conn = get_db()
+    user = conn.execute('SELECT status, allow_login FROM users WHERE emp_id = ?', [accepted['emp_id']]).fetchone()
+    conn.close()
+    assert user == ('Active', 1)
+
+
+def test_offboarding_parallel_clearance_settlement_and_lwd_revocation(client):
+    import app as app_module
+
+    _idem_session(client, 99102)
+    emp_id = f'OFF{gen_id() % 1000000:06d}'
+    today = datetime.now().date()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO users (emp_id, name, email, password, role, department, status, allow_login, allow_breaks) "
+        "VALUES (?, ?, ?, ?, 'Employee', 'Operations', 'Active', 1, 1)",
+        [emp_id, 'Lifecycle Exit', f'{emp_id.lower()}@example.com', hash_password('pass123')],
+    )
+    conn.close()
+    created = client.post('/api/resignations', json={
+        'emp_id': emp_id, 'notice_date': (today - timedelta(days=1)).isoformat(),
+        'last_working_day': today.isoformat(), 'reason': 'test exit',
+    })
+    assert created.status_code == 201, created.get_json()
+    offboard_id = created.get_json()['offboard_id']
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stages/2/complete').status_code == 409
+    assert client.post(f'/api/resignations/{created.get_json()["resignation_id"]}/acknowledge').status_code == 200
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stages/2/complete').status_code == 200
+    conn = get_db()
+    asset_id = gen_id()
+    conn.execute(
+        "INSERT INTO assets (asset_id, emp_id, asset_type, issued_date, status) VALUES (?, ?, 'Laptop', ?, 'Issued')",
+        [asset_id, emp_id, today],
+    )
+    conn.close()
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stages/3/complete').status_code == 409
+    conn = get_db()
+    conn.execute("UPDATE assets SET status = 'Returned', return_date = ? WHERE asset_id = ?", [today, asset_id])
+    conn.close()
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stages/3/complete').status_code == 200
+
+    for actor in (('OFFFIN1', 'Finance One'), ('OFFFIN2', 'Finance Two')):
+        conn = get_db()
+        if not conn.execute('SELECT 1 FROM users WHERE emp_id = ?', [actor[0]]).fetchone():
+            conn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department, status) VALUES (?, ?, ?, ?, 'Finance', 'Finance', 'Active')",
+                [actor[0], actor[1], f'{actor[0].lower()}@example.com', hash_password('pass123')],
+            )
+        conn.close()
+    with client.session_transaction() as sess:
+        sess.update({'emp_id': 'OFFFIN1', 'name': 'Finance One', 'role': 'Finance', 'department': 'Finance', 'session_id': 99103})
+    prepared = client.post(f'/api/offboarding-workflows/{offboard_id}/stage/4/prepare')
+    assert prepared.status_code == 200
+    assert 'total_amount' in prepared.get_json()['settlement']
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stage/4/approve').status_code == 409
+    with client.session_transaction() as sess:
+        sess.update({'emp_id': 'OFFFIN2', 'name': 'Finance Two', 'role': 'Finance', 'department': 'Finance', 'session_id': 99104})
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stage/4/approve').status_code == 200
+    with client.session_transaction() as sess:
+        sess.update({'emp_id': 'EMP001', 'name': 'Admin', 'role': 'Admin', 'department': 'MIS', 'session_id': 99105})
+    assert client.post(f'/api/offboarding-workflows/{offboard_id}/stages/5/complete').status_code == 200
+    revoked = app_module.revoke_offboarding_access(today)
+    assert any(item['emp_id'] == emp_id for item in revoked)
+    conn = get_db()
+    user = conn.execute('SELECT status, allow_login FROM users WHERE emp_id = ?', [emp_id]).fetchone()
+    sessions = conn.execute('SELECT COUNT(*) FROM user_sessions WHERE emp_id = ? AND logout_time IS NULL', [emp_id]).fetchone()[0]
+    conn.close()
+    assert user == ('Inactive', 0)
+    assert sessions == 0
+
+
+def test_lifecycle_scheduler_job_registered():
+    import app as app_module
+    assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
 
 
 if __name__ == '__main__':
