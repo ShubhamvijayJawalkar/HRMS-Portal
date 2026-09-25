@@ -2352,7 +2352,7 @@ def login():
 
     if not row[5]:
         return jsonify({'error': 'Login is not allowed for this user'}), 403
-    if row[4] in ('Blocked', 'Inactive', 'Pre-hire'):
+    if row[4] in ('Blocked', 'Inactive', 'Pre-hire', 'Archived'):
         return jsonify({'error': 'Account is blocked'}), 403
 
     conn = get_db()
@@ -3333,6 +3333,25 @@ def _revoke_redis_sessions(emp_id):
                 client.delete(key)
     except Exception as exc:
         logger.warning('Redis session revocation failed for %s: %s', emp_id, exc)
+
+
+def _close_active_user_sessions(conn, emp_id):
+    """Close database sessions for a user and return the number revoked."""
+    now = datetime.now()
+    rows = conn.execute(
+        "SELECT session_id, login_time FROM user_sessions "
+        "WHERE emp_id = ? AND logout_time IS NULL",
+        [emp_id],
+    ).fetchall()
+    for session_id, login_time in rows:
+        if login_time and getattr(login_time, 'tzinfo', None) is not None:
+            login_time = login_time.replace(tzinfo=None)
+        hours = max((now - login_time).total_seconds() / 3600, 0) if login_time else 0
+        conn.execute(
+            "UPDATE user_sessions SET logout_time = ?, total_hours = ? WHERE session_id = ?",
+            [now, round(hours, 2), session_id],
+        )
+    return len(rows)
 
 
 def revoke_offboarding_access(target_date=None, conn=None, offboard_id=None):
@@ -7353,63 +7372,96 @@ def update_user(emp_id):
     return jsonify({'message': 'User updated'}), 200
 
 
+def _user_status_or_404(conn, emp_id):
+    row = conn.execute("SELECT name, status FROM users WHERE emp_id = ?", [emp_id]).fetchone()
+    if not row:
+        return None
+    return row
+
+
+def _set_user_access_status(emp_id, status, allow_login, action, actor_emp_id):
+    conn = get_db()
+    try:
+        user = _user_status_or_404(conn, emp_id)
+        if not user:
+            conn.close()
+            return jsonify({'error': 'User not found'}), 404
+        if action == 'restore' and user[1] != 'Archived':
+            conn.close()
+            return jsonify({'error': 'Only archived users can be restored'}), 409
+        if action == 'archive' and user[1] == 'Archived':
+            conn.close()
+            return jsonify({'error': 'User is already archived'}), 409
+        if user[1] == 'Archived' and action != 'restore':
+            conn.close()
+            return jsonify({'error': 'Archived users must be restored before changing access'}), 409
+        if user[1] == status and action not in ('archive', 'restore'):
+            conn.close()
+            return jsonify({'error': f'User is already {status.lower()}'}), 409
+        conn.execute(
+            "UPDATE users SET status = ?, allow_login = ? WHERE emp_id = ?",
+            [status, int(allow_login), emp_id],
+        )
+        revoked = _close_active_user_sessions(conn, emp_id) if not allow_login else 0
+        conn.close()
+        if not allow_login:
+            _revoke_redis_sessions(emp_id)
+        past = {'block': 'blocked', 'unblock': 'unblocked', 'archive': 'archived', 'restore': 'restored'}
+        past_action = past[action]
+        audit_log(
+            actor_emp_id,
+            action,
+            f'{past_action.title()} user {emp_id}',
+            entity='users',
+            entity_id=emp_id,
+            before={'status': user[1]},
+            after={'status': status, 'allow_login': bool(allow_login), 'sessions_closed': revoked},
+        )
+        return jsonify({'message': f'User {emp_id} {past_action}', 'sessions_closed': revoked}), 200
+    except Exception:
+        conn.close()
+        raise
+
+
 @app.route('/api/users/<emp_id>/block', methods=['POST'])
 @admin_required
 def block_user(emp_id):
-    conn = get_db()
-    conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = ?", [emp_id])
-    conn.close()
-    audit_log(session['emp_id'], 'USER_BLOCK', f'Blocked user {emp_id}', entity='users', entity_id=emp_id)
-    return jsonify({'message': 'User blocked'}), 200
+    if emp_id == session.get('emp_id'):
+        return jsonify({'error': 'Cannot block your own account'}), 409
+    return _set_user_access_status(emp_id, 'Blocked', 0, 'block', session['emp_id'])
 
 
 @app.route('/api/users/<emp_id>/unblock', methods=['POST'])
 @admin_required
 def unblock_user(emp_id):
-    conn = get_db()
-    conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = ?", [emp_id])
-    conn.close()
-    audit_log(session['emp_id'], 'USER_UNBLOCK', f'Unblocked user {emp_id}', entity='users', entity_id=emp_id)
-    return jsonify({'message': 'User unblocked'}), 200
+    if emp_id == session.get('emp_id'):
+        return jsonify({'error': 'Cannot unblock your own account'}), 409
+    return _set_user_access_status(emp_id, 'Active', 1, 'unblock', session['emp_id'])
+
+
+@app.route('/api/users/<emp_id>/archive', methods=['POST'])
+@admin_required
+def archive_user(emp_id):
+    if emp_id == session.get('emp_id'):
+        return jsonify({'error': 'Cannot archive your own account'}), 409
+    return _set_user_access_status(emp_id, 'Archived', 0, 'archive', session['emp_id'])
+
+
+@app.route('/api/users/<emp_id>/restore', methods=['POST'])
+@admin_required
+def restore_user(emp_id):
+    if emp_id == session.get('emp_id'):
+        return jsonify({'error': 'Cannot restore your own account'}), 409
+    return _set_user_access_status(emp_id, 'Active', 1, 'restore', session['emp_id'])
 
 
 @app.route('/api/users/<emp_id>', methods=['DELETE'])
 @admin_required
 def delete_user(emp_id):
+    """Backward-compatible DELETE: archive, never hard-delete statutory data."""
     if emp_id == session.get('emp_id'):
-        return jsonify({'error': 'Cannot delete your own account'}), 400
-    conn = get_db()
-    user = conn.execute("SELECT name FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if not user:
-        conn.close()
-        return jsonify({'error': 'User not found'}), 404
-    tables = [
-        ('user_sessions', 'emp_id'), ('breaks', 'emp_id'), ('leave_requests', 'emp_id'),
-        ('leave_balance', 'emp_id'), ('break_approvals', 'emp_id'), ('audit_log', 'emp_id'),
-        ('notifications', 'emp_id'), ('password_reset_tokens', 'emp_id'),
-        ('regularization_requests', 'emp_id'), ('attendance_days', 'emp_id'),
-        ('holiday_optins', 'emp_id'), ('shift_assignments', 'emp_id'),
-        ('onboarding_tasks', 'emp_id'),
-        ('offboarding_tasks', 'emp_id'), ('exit_interviews', 'emp_id'),
-        ('salary_structures', 'emp_id'), ('payroll_items', 'emp_id'),
-        ('payroll_approvals', 'actor_emp_id'), ('payroll_runs', 'submitted_by'),
-        ('payroll_runs', 'approved_by'),
-        ('goals', 'emp_id'), ('performance_reviews', 'emp_id'),
-        ('feedback_360', 'emp_id'), ('expense_claims', 'emp_id'),
-        ('tickets', 'emp_id'), ('ticket_comments', 'emp_id'),
-        ('assets', 'emp_id'), ('documents', 'emp_id'), ('dependents', 'emp_id'),
-        ('interviews', 'interviewer'), ('interviews', 'emp_id'),
-        ('offer_letters', 'emp_id'), ('offer_letters', 'candidate_id'),
-    ]
-    for table, col in tables:
-        try:
-            conn.execute(f"DELETE FROM {table} WHERE {col} = ?", [emp_id])
-        except Exception:
-            pass
-    conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
-    conn.close()
-    audit_log(session['emp_id'], 'USER_DELETE', f'Deleted user {emp_id} ({user[0]})', entity='users', entity_id=emp_id)
-    return jsonify({'message': f'User {emp_id} deleted permanently'}), 200
+        return jsonify({'error': 'Cannot archive your own account'}), 409
+    return _set_user_access_status(emp_id, 'Archived', 0, 'archive', session['emp_id'])
 
 
 # ══════════════════════════════════════════════════════════════════════

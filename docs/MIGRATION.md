@@ -496,8 +496,8 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **76 DuckDB unit tests passed / 5 skipped**.
-- **80 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **77 DuckDB unit tests passed / 5 skipped**.
+- **81 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **16 Playwright tests passed on both DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
@@ -532,9 +532,9 @@ Draft → Submitted → Approved → Finalized
 
 Validation:
 
-- **76 DuckDB unit tests passed / 5 skipped**.
-- **80 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
-  also **80 passed / 1 skipped**.
+- **77 DuckDB unit tests passed / 5 skipped**.
+- **81 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **81 passed / 1 skipped**.
 - **16 Playwright tests passed on DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
   Finance-submit/Admin-approve/finalize payroll path and the complete
@@ -634,6 +634,8 @@ confirmed every identity sequence remained ahead of `MAX(id)`.
 1. Complete the Phase 5 maintenance-window final delta sync and traffic
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
-3. Follow-up hardening — complete the separate FR-USR employee-management
-   contract (archive/anonymization, policy-derived balances, and bulk jobs)
-   without coupling those changes to the lifecycle milestone.
+3. Continue the FR-USR hardening follow-up. The archive/restore and session
+   revocation slice is implemented; next add permission-policy evaluation,
+   bounded pagination/validation, policy-derived leave balances, bulk/import
+   jobs, and two-person anonymisation without coupling them to the lifecycle
+   milestone.

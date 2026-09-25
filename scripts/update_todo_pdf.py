@@ -48,8 +48,8 @@ UPDATE_LOG = [
      "100% offer splits, atomic accepted-offer conversion, signed pre-boarding tokens and real-file "
      "validation, five-step guarded onboarding, parallel offboarding with F&F maker-checker, and "
      "IST LWD access revocation, plus lifecycle hardening (strict split precision, ETL preservation, "
-     "session revocation, encrypted credential delivery, and document authorization). DuckDB 76 passed / "
-     "5 skipped; PostgreSQL 80 passed / 1 skipped; Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
+     "session revocation, encrypted credential delivery, and document authorization). DuckDB 77 passed / "
+     "5 skipped; PostgreSQL 81 passed / 1 skipped; Playwright 16 passed; public probe 94/94 GET + 42/42 write."),
     ("2026-09-24", "FR-PAY-06 maker-checker payroll implemented: Draft → Submitted → Approved → "
      "Finalized, Finance/Admin authorization, self-approval rejection, payroll_approvals trail, "
      "adjustment-run reference, Finance UI access, and public probe coverage. DuckDB 64 passed / "
@@ -97,13 +97,16 @@ TASKS = [
     # ── Phase 5-6 ────────────────────────────────────────────────────────
     ("Phase 5", "Final cutover: flip APP_DB_SCHEMA to public, retire legacy", "Disposable rehearsal passed ETL/preflight/94-42 probe/authenticated smoke/CC-01 sequence check; maintenance-window traffic switch pending", IN_PROGRESS),
     ("Phase 6", "Decommission DuckDB runtime", "Out of the ETL blueprint; tracked in SRS", PENDING),
+    # ── Follow-up backend hardening ────────────────────────────────────────
+    ("Follow-up", "FR-USR archive/restore and session revocation", "Hard delete replaced with retained archive/restore; admin UI and cross-backend tests updated", DONE),
+    ("Follow-up", "FR-USR permissions, validation, policy balances, bulk/import, anonymisation", "Next backend slice after the archive safety boundary", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "76 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "80 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "80 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "77 passed, 5 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "81 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "81 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),

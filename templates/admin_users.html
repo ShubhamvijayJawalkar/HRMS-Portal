@@ -50,6 +50,7 @@
         .status-badge { padding: 4px 8px; border-radius: 16px; font-size: 11px; font-weight: 600; }
         .status-active { background: #d4edda; color: #155724; }
         .status-blocked { background: #f8d7da; color: #721c24; }
+        .status-archived { background: #e2e3e5; color: #383d41; }
         .permission-badge { padding: 3px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; margin: 1px; display: inline-block; }
         .permission-allowed { background: #d1e7dd; color: #0f5132; }
         .permission-denied { background: #f8d7da; color: #842029; }
@@ -143,6 +144,7 @@
                     <option value="">All Status</option>
                     <option value="Active">Active</option>
                     <option value="Blocked">Blocked</option>
+                    <option value="Archived">Archived</option>
                 </select>
                 <button class="filter-reset" onclick="clearFilters()"><i class="bi bi-x-lg"></i> Clear</button>
             </div>
@@ -349,6 +351,11 @@ function loadUsers(page) {
         }
         tbody.innerHTML = d.data.map(u => {
             const shiftTxt = u.shift_start === '24x7' ? '24 x 7' : (u.shift_start ? esc(u.shift_start)+' - '+esc(u.shift_end) : '<span class="text-muted">N/A</span>');
+            const accessAction = u.status === 'Archived'
+                ? `<button class="btn btn-success btn-sm" onclick="restoreUser('${u.emp_id}')"><i class="bi bi-arrow-counterclockwise"></i> Restore</button>`
+                : `<button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button>`;
+            const archiveAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-danger btn-sm" onclick="archiveUser('${u.emp_id}','${esc(u.name)}')" title="Archive"><i class="bi bi-archive"></i></button>`;
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -358,7 +365,7 @@ function loadUsers(page) {
                 <td>${shiftTxt}</td>
                 <td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td>
                 <td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td>
-                <td><div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button> <button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button> <button class="btn btn-outline-danger btn-sm" onclick="deleteUser('${u.emp_id}','${esc(u.name)}')" title="Delete"><i class="bi bi-trash"></i></button></div></td>
+                <td>${actions}</td>
             </tr>`;
         }).join('');
     }).catch(() => showMsg('Failed to load users', 'error'));
@@ -367,6 +374,10 @@ function loadUsers(page) {
 async function openEditModal(id) {
     const r = await fetch(`/api/users/${id}`);
     const u = await r.json();
+    if (u.status === 'Archived') {
+        showMsg('Archived users must be restored before editing', 'error');
+        return;
+    }
     document.getElementById('editEmpId').value = u.emp_id;
     document.getElementById('editName').value = u.name;
     document.getElementById('editEmail').value = u.email;
@@ -424,11 +435,20 @@ async function toggleStatus(id, status) {
     loadUsers(currentPage);
 }
 
-async function deleteUser(id, name) {
-    if (!confirm(`Delete user "${name}" (${id})? This action cannot be undone.`)) return;
-    const r = await fetch(`/api/users/${id}`, { method: 'DELETE' });
+async function archiveUser(id, name) {
+    if (!confirm(`Archive user "${name}" (${id})? Their records will be retained.`)) return;
+    const r = await fetch(`/api/users/${id}/archive`, { method: 'POST' });
     const res = await r.json();
-    if (!r.ok) { showMsg(res.error || 'Failed to delete', 'error'); return; }
+    if (!r.ok) { showMsg(res.error || 'Failed to archive', 'error'); return; }
+    showMsg(res.message, 'success');
+    loadUsers(currentPage);
+}
+
+async function restoreUser(id) {
+    if (!confirm(`Restore user ${id} to Active status?`)) return;
+    const r = await fetch(`/api/users/${id}/restore`, { method: 'POST' });
+    const res = await r.json();
+    if (!r.ok) { showMsg(res.error || 'Failed to restore', 'error'); return; }
     showMsg(res.message, 'success');
     loadUsers(currentPage);
 }

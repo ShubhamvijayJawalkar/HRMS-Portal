@@ -656,6 +656,78 @@ def test_active_users_endpoint_filters_inactive_employees(client):
 
 
 
+def test_user_archive_restore_preserves_records_and_revokes_sessions(client):
+    emp_id = f"ARC{datetime.now().strftime('%H%M%S%f')}"
+    now = datetime.now()
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks) "
+        "VALUES (?, ?, ?, ?, 'Employee', 'QA', 'Archive Test', 'Active', ?, ?, 1, 1)",
+        [emp_id, 'Archive Test', f'{emp_id.lower()}@example.invalid', hash_password('archive-pass-123'), now, now],
+    )
+    conn.execute(
+        "INSERT INTO user_sessions (session_id, emp_id, login_time, logout_time, total_hours, session_date) "
+        "VALUES (-987654, ?, ?, NULL, NULL, ?)",
+        [emp_id, now - timedelta(hours=1), now.date()],
+    )
+    conn.close()
+
+    try:
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP001'
+            sess['name'] = 'Admin'
+            sess['role'] = 'Admin'
+            sess['session_id'] = 99891
+        response = client.post(f'/api/users/{emp_id}/archive')
+        assert response.status_code == 200, response.get_json()
+
+        conn = get_db()
+        row = conn.execute(
+            "SELECT status, allow_login FROM users WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        archived_session = conn.execute(
+            "SELECT logout_time FROM user_sessions WHERE session_id = -987654 AND emp_id = ?", [emp_id]
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'Archived'
+        assert not row[1]
+        assert archived_session[0] is not None
+
+        with client.session_transaction() as sess:
+            sess.clear()
+            sess['emp_id'] = emp_id
+            sess['name'] = 'Archive Test'
+            sess['role'] = 'Employee'
+            sess['session_id'] = 99892
+        assert client.get('/api/profile').status_code in (302, 401)
+
+        with client.session_transaction() as sess:
+            sess.clear()
+            sess['emp_id'] = 'EMP001'
+            sess['name'] = 'Admin'
+            sess['role'] = 'Admin'
+            sess['session_id'] = 99893
+        response = client.post(f'/api/users/{emp_id}/restore')
+        assert response.status_code == 200, response.get_json()
+        conn = get_db()
+        row = conn.execute(
+            "SELECT status, allow_login FROM users WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        conn.close()
+        assert row[0] == 'Active'
+        assert row[1]
+    finally:
+        conn = get_db()
+        for table in ('user_sessions', 'shift_assignments', 'user_permissions', 'password_reset_tokens'):
+            try:
+                conn.execute(f"DELETE FROM {table} WHERE emp_id = ?", [emp_id])
+            except Exception:
+                pass
+        conn.execute("DELETE FROM audit_log WHERE entity = 'users' AND entity_id = ?", [emp_id])
+        conn.execute("DELETE FROM users WHERE emp_id = ?", [emp_id])
+        conn.close()
+
+
 def test_break_types_api(client):
     with client.session_transaction() as sess:
         sess['emp_id'] = 'EMP001'

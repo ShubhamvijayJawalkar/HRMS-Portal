@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 76 on DuckDB, 80 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 77 on DuckDB, 81 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (76 on DuckDB, 80 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (77 on DuckDB, 81 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (16 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -164,7 +164,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 10 new unit tests; DuckDB suite is 76 passed / 5 skipped (PG-gated). The
+- 11 new unit tests; DuckDB suite is 77 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
 
@@ -250,6 +250,18 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   balancer switch, and DuckDB read-only audit lock remain operator actions.
   Do not mark Phase 5 complete until the traffic switch and rollback window
   are verified.
+
+## FR-USR employee-management hardening (in progress)
+- The first safe slice replaces destructive user deletion with status-based
+  archive/restore. Archiving and blocking close active database sessions,
+  revoke Redis sessions, reject self-actions with 409, and retain audit/payroll
+  records for retention.
+- The admin UI now exposes Archive/Restore actions and an Archived status
+  filter; the legacy `DELETE /api/users/<id>` route is archive-compatible and
+  never hard-deletes statutory data.
+- Remaining follow-up work: permission-policy evaluation, bounded pagination
+  and validation, policy-derived leave balances, bulk/import jobs, and
+  two-person anonymisation.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
