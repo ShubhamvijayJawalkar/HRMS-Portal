@@ -11,6 +11,9 @@ os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_test_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('APP_DB', 'duckdb')
+# Tests must never reset the production cutover target, even when a shell
+# inherits FLASK_ENV=production or APP_DB_SCHEMA=public.
+os.environ['APP_DB_SCHEMA'] = 'legacy'
 if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     import db_backend
     db_backend.reset_schema()
@@ -152,6 +155,15 @@ def test_leave_types(client):
     types = conn.execute("SELECT break_type FROM break_types").fetchall()
     conn.close()
     assert len(types) >= 3
+
+
+def test_production_postgres_defaults_to_public_schema(monkeypatch):
+    import db_backend
+    monkeypatch.delenv('APP_DB_SCHEMA', raising=False)
+    monkeypatch.setenv('FLASK_ENV', 'production')
+    assert db_backend.app_schema() == 'public'
+    monkeypatch.setenv('APP_DB_SCHEMA', 'legacy')
+    assert db_backend.app_schema() == 'legacy'
 
 
 def test_seed_data_has_multiple_entries_per_model(client):

@@ -10,6 +10,12 @@ APP_DIR="/opt/hrms"
 DB_DIR="/opt/hrms/data"
 APP_USER="hrms"
 
+# Phase 5 production cutover requires managed PostgreSQL/Redis endpoints.
+# Export these before running this script; the legacy DuckDB profile remains
+# available in docker-compose.legacy.yml for the audit-fallback window.
+: "${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL DSN}"
+: "${REDIS_URL:?Set REDIS_URL to the production Redis DSN}"
+
 echo "=== HRMS Deployment - Oracle Cloud Free Tier ==="
 
 # 1. System updates
@@ -42,10 +48,23 @@ sudo chown -R $APP_USER:$APP_USER $APP_DIR
 sudo -u $APP_USER $APP_DIR/venv/bin/pip install --upgrade pip
 sudo -u $APP_USER $APP_DIR/venv/bin/pip install -r requirements.txt
 
-# 6. Create data directory for DuckDB
-echo "[6/8] Creating persistent data directory..."
+# 6. Create persistent data directory and production environment
+echo "[6/8] Creating persistent data directory and cutover environment..."
 sudo mkdir -p $DB_DIR
 sudo chown -R $APP_USER:$APP_USER $DB_DIR
+SECRET_VALUE="${SECRET_KEY:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}"
+sudo -u $APP_USER tee "$APP_DIR/.env.production" > /dev/null <<EOF
+SECRET_KEY=$SECRET_VALUE
+FLASK_ENV=production
+FLASK_DEBUG=0
+APP_DB=postgres
+APP_DB_SCHEMA=public
+DATABASE_URL=$DATABASE_URL
+REDIS_URL=$REDIS_URL
+DB_FILE=$DB_DIR/hrms.duckdb
+EOF
+sudo chown $APP_USER:$APP_USER "$APP_DIR/.env.production"
+sudo chmod 600 "$APP_DIR/.env.production"
 
 # 7. Create systemd service
 echo "[7/8] Creating systemd service..."
@@ -58,12 +77,11 @@ After=network.target
 User=$APP_USER
 Group=$APP_USER
 WorkingDirectory=$APP_DIR
+EnvironmentFile=$APP_DIR/.env.production
+ExecStartPre=$APP_DIR/venv/bin/alembic -c migrations/alembic.ini upgrade head
 ExecStart=$APP_DIR/venv/bin/gunicorn --workers 1 --bind 127.0.0.1:5000 app:app
 Restart=always
 RestartSec=5
-Environment="DB_FILE=$DB_DIR/hrms.duckdb"
-Environment="FLASK_ENV=production"
-Environment="SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 
 [Install]
 WantedBy=multi-user.target

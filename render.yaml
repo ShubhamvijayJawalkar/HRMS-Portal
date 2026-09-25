@@ -3,8 +3,16 @@ services:
     name: hrms-portal
     runtime: python
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    startCommand: sh -c 'alembic -c migrations/alembic.ini upgrade head && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120'
     envVars:
+      - key: APP_DB
+        value: postgres
+      - key: APP_DB_SCHEMA
+        value: public
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
       - key: FLASK_DEBUG
         value: "0"
       - key: FLASK_ENV

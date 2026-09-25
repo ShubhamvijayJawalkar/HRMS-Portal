@@ -1,4 +1,48 @@
 services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hrms}
+      POSTGRES_USER: ${POSTGRES_USER:-hrms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - hrms-postgres:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hrms} -d ${POSTGRES_DB:-hrms}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - hrms-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Expand/contract migrations run once before the web process starts.
+  migrate:
+    build:
+      context: .
+      target: production
+    command: ["alembic", "-c", "migrations/alembic.ini", "upgrade", "head"]
+    environment:
+      APP_DB: postgres
+      APP_DB_SCHEMA: public
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-hrms}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      FLASK_ENV: production
+      FLASK_DEBUG: "0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   hrms:
     build:
       context: .
@@ -9,20 +53,31 @@ services:
       - hrms-data:/data
       - hrms-uploads:/app/uploads
     environment:
-      - SECRET_KEY=${SECRET_KEY}
-      - FLASK_DEBUG=0
-      - FLASK_ENV=production
-      - LOG_LEVEL=WARNING
-      - DB_FILE=/data/hrms.duckdb
-      - PORT=10000
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      FLASK_DEBUG: "0"
+      FLASK_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+      APP_DB: postgres
+      APP_DB_SCHEMA: public
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-hrms}
+      REDIS_URL: redis://redis:6379/0
+      DB_FILE: /data/hrms.duckdb
+      PORT: 10000
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:10000/login"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
 volumes:
+  hrms-postgres:
+  hrms-redis:
   hrms-data:
   hrms-uploads:

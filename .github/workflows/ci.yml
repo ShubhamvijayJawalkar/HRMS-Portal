@@ -27,6 +27,14 @@ jobs:
         run: |
           ruff check . --ignore E501
 
+      - name: Validate cutover tooling
+        run: |
+          python -m py_compile scripts/cutover_preflight.py
+          SECRET_KEY=ci-compose-secret POSTGRES_PASSWORD=ci-compose-password \
+            docker compose -f docker-compose.yml config >/dev/null
+          SECRET_KEY=ci-compose-secret \
+            docker compose -f docker-compose.legacy.yml config >/dev/null
+
       - name: Run unit tests
         run: |
           python -m pytest tests/test_app.py -v

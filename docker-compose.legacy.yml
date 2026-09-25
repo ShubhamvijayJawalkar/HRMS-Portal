@@ -1,0 +1,33 @@
+# Temporary Phase 5 rollback profile. Use only during the defined audit-fallback
+# window; the default docker-compose.yml serves PostgreSQL public.
+services:
+  hrms:
+    profiles: ["legacy-rollback"]
+    build:
+      context: .
+      target: production
+    ports:
+      - "5000:10000"
+    environment:
+      APP_DB: duckdb
+      APP_DB_SCHEMA: legacy
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+      FLASK_DEBUG: "0"
+      FLASK_ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-WARNING}
+      DB_FILE: /data/hrms.duckdb
+      PORT: 10000
+    volumes:
+      - hrms-data:/data
+      - hrms-uploads:/app/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:10000/login"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  hrms-data:
+  hrms-uploads:

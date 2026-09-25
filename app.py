@@ -591,10 +591,13 @@ def init_db():
             leave_type VARCHAR NOT NULL,
             total_days INTEGER DEFAULT 0,
             used_days INTEGER DEFAULT 0,
+            reserved INTEGER DEFAULT 0,
             year INTEGER NOT NULL,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    if not _is_public_target_schema() and not _has_column(conn, 'leave_balance', 'reserved'):
+        conn.execute("ALTER TABLE leave_balance ADD COLUMN reserved INTEGER DEFAULT 0")
 
     # ── Password Reset Tokens (new) ────────────────────────────────
     conn.execute('''
@@ -1222,6 +1225,15 @@ def init_db():
     # ── Seed Data ──────────────────────────────────────────────────
     pwd_hash = hash_password('pass123')
     result = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if (
+        result == 0
+        and os.getenv('FLASK_ENV', '').lower() == 'production'
+        and os.getenv('HRMS_ALLOW_DEMO_SEED') != '1'
+    ):
+        conn.close()
+        raise RuntimeError(
+            'Production database is empty; run the approved ETL/cutover before starting HRMS'
+        )
     if result == 0:
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, phone, date_of_joining, status, allow_login, allow_breaks, first_login, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1307,11 +1319,23 @@ def init_db():
         bid = int(datetime.now().timestamp() * 1000) % 1000000
         for emp in conn.execute("SELECT emp_id FROM users").fetchall():
             bid += 1
-            conn.execute("INSERT INTO leave_balance VALUES (?, ?, ?, ?, ?, ?)", [bid, emp[0], 'Casual', 12, 0, year])
+            conn.execute(
+                "INSERT INTO leave_balance (balance_id, emp_id, leave_type, total_days, used_days, reserved, year) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [bid, emp[0], 'Casual', 12, 0, 0, year],
+            )
             bid += 1
-            conn.execute("INSERT INTO leave_balance VALUES (?, ?, ?, ?, ?, ?)", [bid, emp[0], 'Sick', 10, 0, year])
+            conn.execute(
+                "INSERT INTO leave_balance (balance_id, emp_id, leave_type, total_days, used_days, reserved, year) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [bid, emp[0], 'Sick', 10, 0, 0, year],
+            )
             bid += 1
-            conn.execute("INSERT INTO leave_balance VALUES (?, ?, ?, ?, ?, ?)", [bid, emp[0], 'Annual', 20, 0, year])
+            conn.execute(
+                "INSERT INTO leave_balance (balance_id, emp_id, leave_type, total_days, used_days, reserved, year) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [bid, emp[0], 'Annual', 20, 0, 0, year],
+            )
 
     # ── Seed sample rows for all major modules ────────────────────
     now = datetime.now()

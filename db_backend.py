@@ -18,9 +18,10 @@ Schema layout
 The Phase 0-1 work built the v2.0 target schema in ``public`` (from
 ``db/postgres_schema.sql`` via Alembic baseline + ETL; data lives there).
 Phase 2 deliberately serves the *v1.0 data model* from a separate schema
-(``legacy``) so the unchanged app code runs on PostgreSQL today, while the
-v2.0 target stays intact in ``public`` for side-by-side diffing until the
-Phase-3 service-layer rewrite switches ``APP_DB_SCHEMA`` to ``public``.
+(``legacy``) so the unchanged app code runs on PostgreSQL today. Phase 5
+flips the production default to ``public`` when ``FLASK_ENV=production`` and
+``APP_DB_SCHEMA`` is omitted; development and compatibility tests retain the
+legacy fallback until the announced decommission.
 
 Run the existing unit suite against PostgreSQL::
 
@@ -43,7 +44,10 @@ from psycopg.rows import tuple_row
 DEFAULT_DATABASE_URL = os.getenv(
     "DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:55432/hrms"
 )
-DEFAULT_SCHEMA = os.getenv("APP_DB_SCHEMA", "legacy")
+# Development and the compatibility test harness remain on ``legacy``. A
+# production PostgreSQL process defaults to the cutover target when the
+# explicit variable is omitted; deployment manifests still set it explicitly.
+DEFAULT_SCHEMA = "legacy"
 
 _SCHEMA_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -77,7 +81,12 @@ def database_url() -> str:
 
 
 def app_schema() -> str:
-    return os.getenv("APP_DB_SCHEMA", DEFAULT_SCHEMA)
+    configured = os.getenv("APP_DB_SCHEMA", "").strip()
+    if configured:
+        return configured
+    if os.getenv("FLASK_ENV", "").lower() == "production":
+        return "public"
+    return DEFAULT_SCHEMA
 
 
 def _strftime_to_pg_format(fmt: str) -> str:
@@ -434,6 +443,11 @@ def reset_schema(schema: str | None = None) -> None:
     schema = schema or app_schema()
     if not _SCHEMA_RE.fullmatch(schema):
         raise ValueError(f"invalid schema name {schema!r}")
+    if schema == "public" and os.getenv("HRMS_ALLOW_PUBLIC_RESET") != "1":
+        raise RuntimeError(
+            "refusing to reset the production public schema; "
+            "set HRMS_ALLOW_PUBLIC_RESET=1 only for an explicit disposable probe"
+        )
     conn = psycopg.connect(database_url(), autocommit=True)
     try:
         conn.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")

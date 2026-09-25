@@ -9,6 +9,7 @@ os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{datetime.
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
 os.environ.setdefault('APP_DB', 'duckdb')
+os.environ['APP_DB_SCHEMA'] = 'legacy'
 if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
     import db_backend
     db_backend.reset_schema()

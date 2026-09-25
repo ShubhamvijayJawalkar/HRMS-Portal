@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 72 on DuckDB, 76 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 73 on DuckDB, 77 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
 ```
 
@@ -21,14 +21,14 @@ the Phase-2 cutover). On the Postgres backend the tests drop/recreate the
 target schema in `public` is never touched). Requires the `hrms-pg` container
 (see `docs/MIGRATION.md`).
 ```bash
-APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
+APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   python -m pytest tests/test_app.py -v
-APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
+APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   python -m pytest tests/test_playwright.py -v
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (72 on DuckDB, 76 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (73 on DuckDB, 77 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (16 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -164,7 +164,7 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
   (tickets gained `queue`, offer_letters gained `basic_pct/hra_pct/
   allowances_pct`, payroll_runs gained maker-checker columns) — bare `VALUES`
   inserts would mis-target columns on `public`.
-- 7 new unit tests; DuckDB suite is 72 passed / 5 skipped (PG-gated). The
+- 7 new unit tests; DuckDB suite is 73 passed / 5 skipped (PG-gated). The
   v2.0 shift branch is additionally exercised on DuckDB via a stand-in
   `shift_assignments` table (flips the model flag at runtime).
 
@@ -226,6 +226,25 @@ APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55
 - The public-flip probe now exercises the complete guarded hire → pre-boarding
   → offboarding journey in addition to the existing GET/write matrix.
 
+## Phase 5 (final PostgreSQL cutover readiness, in progress)
+- Production PostgreSQL defaults to `APP_DB_SCHEMA=public` when
+  `FLASK_ENV=production` and the explicit variable is absent; development and
+  compatibility tests retain the `legacy` fallback.
+- `docker-compose.yml` now runs PostgreSQL/Redis plus a one-shot Alembic
+  migration service before the web process. `docker-compose.legacy.yml` is
+  the explicit temporary rollback profile.
+- `scripts/cutover_preflight.py` is read-only: it verifies the target head,
+  required tables, identity keys, offer constraints, and emits count deltas;
+  it never drops data or switches traffic. A fresh Alembic-created public
+  database was booted without the probe's tolerant wrapper using the explicit
+  `HRMS_ALLOW_DEMO_SEED=1` validation override; production boot refuses an
+  empty target so demo users/passwords cannot be created accidentally.
+- The actual final delta sync, maintenance-window health check, DNS/load-
+  balancer switch, and DuckDB read-only audit lock remain operator actions.
+  Do not mark Phase 5 complete until the traffic switch and rollback window
+  are verified.
+
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
 - Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks
+- Production boot refuses an empty database; `HRMS_ALLOW_DEMO_SEED=1` is reserved for disposable validation databases only.

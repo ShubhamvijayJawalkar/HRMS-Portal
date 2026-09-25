@@ -496,8 +496,8 @@ Holiday → On Leave → Weekly-off → Present → Half-day → Absent
 
 Validation:
 
-- **72 DuckDB unit tests passed / 5 skipped**.
-- **76 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
+- **73 DuckDB unit tests passed / 5 skipped**.
+- **77 PostgreSQL legacy unit tests passed / 1 skipped**; the same result is
   green with Redis sessions.
 - **16 Playwright tests passed on both DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
@@ -532,9 +532,9 @@ Draft → Submitted → Approved → Finalized
 
 Validation:
 
-- **72 DuckDB unit tests passed / 5 skipped**.
-- **76 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
-  also **76 passed / 1 skipped**.
+- **73 DuckDB unit tests passed / 5 skipped**.
+- **77 PostgreSQL legacy unit tests passed / 1 skipped**; PostgreSQL+Redis is
+  also **77 passed / 1 skipped**.
 - **16 Playwright tests passed on DuckDB and PostgreSQL**.
 - Clean `hrms_probe`: **94/94 GET + 42/42 write flows**, including the
   Finance-submit/Admin-approve/finalize payroll path and the complete
@@ -573,11 +573,56 @@ schemas and the v2.0 `public` schema:
   exit-workflow linkage, strict offer-split constraints, `offboarding_approvals`,
   and `offboarding_settlements`.
 
-## 13. Next steps
+## 13. Phase 5 — final PostgreSQL cutover (readiness implemented; switch pending)
 
-1. Phase 5 — final cutover: flip `APP_DB_SCHEMA` to `public`, reconcile final
-   data, and retire the legacy schema.
-2. Phase 6 — decommission the DuckDB runtime after the defined audit fallback.
+The application and deployment profiles now default production PostgreSQL to
+`APP_DB_SCHEMA=public`, while development/tests retain `legacy` and
+`docker-compose.legacy.yml` provides the temporary DuckDB rollback profile.
+The default Compose stack runs an expand/contract Alembic migration service
+before the web process and uses PostgreSQL plus Redis.
+
+The read-only preflight is:
+
+```bash
+DATABASE_URL=postgresql://... \\
+  python scripts/cutover_preflight.py \\
+    --schema public --legacy-schema legacy \\
+    --duckdb-file /data/hrms.duckdb \\
+    --require-legacy-read-only \\
+    --report reports/cutover-preflight.json
+```
+
+It verifies the `0003_lifecycle_hardening` head, required public tables,
+CC-01 identity keys, offer percentage/active-offer constraints, and emits
+public-vs-legacy count deltas. Add `--fail-on-count-delta` when the operator
+requires a zero-delta reconciliation gate. A fresh Alembic-created public
+database was booted without the probe's tolerant wrapper using the explicit
+`HRMS_ALLOW_DEMO_SEED=1` validation override; normal production startup
+refuses an empty target so demo users/passwords cannot be created accidentally.
+The preflight never mutates either schema or changes traffic.
+
+### Maintenance-window sequence
+
+1. Stop web and scheduler writes; take the final DuckDB snapshot and retain the
+   legacy PostgreSQL schema unchanged.
+2. Run the final ETL/delta sync and `alembic -c migrations/alembic.ini upgrade
+   head` against the production-shaped target.
+3. Run `scripts/cutover_preflight.py` and archive its JSON report.
+4. Start the public image with `APP_DB=postgres`, `APP_DB_SCHEMA=public`,
+   `DATABASE_URL`, and `REDIS_URL`; verify `/login` and the authenticated
+   health/API smoke checks.
+5. Switch DNS/load-balancer traffic during the maintenance window.
+6. Keep the DuckDB file and `legacy` schema mounted read-only for the defined
+   audit-fallback period. On the VM, use
+   `deploy/lock_fallback.sh /data/hrms.duckdb`; the file is an archive, not a
+   writable live database. Roll back by restoring the previous image and
+   `APP_DB_SCHEMA=legacy`; do not delete the fallback during this phase.
+
+## 14. Next steps
+
+1. Complete the Phase 5 maintenance-window final delta sync and traffic
+   switch, then record the production cutover evidence.
+2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. Follow-up hardening — complete the separate FR-USR employee-management
    contract (archive/anonymization, policy-derived balances, and bulk jobs)
    without coupling those changes to the lifecycle milestone.
