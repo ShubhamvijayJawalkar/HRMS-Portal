@@ -3219,16 +3219,12 @@ def confirm_anonymisation(request_id):
         subject = conn.execute(
             'SELECT emp_id FROM anonymisation_requests WHERE request_id = ?', [request_id]
         ).fetchone()
-        row = anonymise.confirm_and_apply(conn, request_id, session['emp_id'])
-    except anonymise.AnonymisationError as exc:
-        conn.close()
-        return jsonify({'error': str(exc)}), exc.status
+        try:
+            row = anonymise.confirm_and_apply(conn, request_id, session['emp_id'])
+        except anonymise.AnonymisationError as exc:
+            return jsonify({'error': str(exc)}), exc.status
     finally:
-        if conn:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        conn.close()
     # The audit row records the *fact* of the erasure and the counts. It must
     # never carry an erased value, or the control would defeat itself.
     audit_log(

@@ -776,6 +776,36 @@ def _clear_anonymisation_rows():
         conn.close()
 
 
+def test_import_job_can_be_run_on_demand(client):
+    """The "run now" button: admin-gated, idempotent, 404 for an unknown job."""
+    _set_admin_session(client, 99865)
+    csv_body = 'emp_id,name,email,role,department\nEMP970,On Demand,emp970@company.com,Employee,MIS\n'
+    try:
+        job_id = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
+            content_type='multipart/form-data',
+        ).get_json()['job_id']
+        ran = client.post(f'/api/users/import/{job_id}/run')
+        assert ran.status_code == 200, ran.get_json()
+        assert ran.get_json()['status'] == 'completed'
+        assert ran.get_json()['imported'] == 1
+        # Pressing it again is harmless: the job is terminal, so it just replays.
+        again = client.post(f'/api/users/import/{job_id}/run')
+        assert again.status_code == 200
+        assert again.get_json()['imported'] == 1
+        assert client.get('/api/users/EMP970').status_code == 200
+        assert client.post('/api/users/import/999999/run').status_code == 404
+
+        # ...and a non-admin cannot drive it.
+        _create_policy_user(client, 'EMP971', role='Employee')
+        _login_as(client, 'EMP971', 'Employee', 99864)
+        assert client.post(f'/api/users/import/{job_id}/run').status_code in (302, 403)
+    finally:
+        _cleanup_import_job_rows()
+        _cleanup_user_contract_rows('EMP970', 'EMP971')
+
+
 # ── FR-USR two-person anonymisation ────────────────────────────────────────
 
 def test_anonymisation_refuses_without_a_strong_salt(client):

@@ -365,8 +365,6 @@ def confirm_and_apply(conn, request_id, confirmed_by) -> dict:
     The two-person rule lives here: the confirmer must be a different person
     from the requester, and the request must still be ``proposed``.
     """
-    from app import _is_public_target_schema, _next_generated_id, gen_id  # lazy
-
     row = conn.execute(
         'SELECT request_id, emp_id, status, requested_by FROM anonymisation_requests '
         'WHERE request_id = ?',
@@ -395,7 +393,6 @@ def confirm_and_apply(conn, request_id, confirmed_by) -> dict:
         "WHERE request_id = ?",
         [APPLIED, datetime.now(), json.dumps(_jsonable(result), default=str), request_id],
     )
-    del _is_public_target_schema, _next_generated_id, gen_id
     return get_request(conn, request_id)
 
 

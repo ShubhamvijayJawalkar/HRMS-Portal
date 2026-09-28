@@ -782,7 +782,7 @@ scheduler), and the browser fixture now runs the DuckDB server single-threaded
 request is in flight was the original "Unique file handle conflict".
 PostgreSQL keeps a threaded server and a live scheduler.
 
-Validation: **116 DuckDB unit tests passed / 6 skipped**, **121 PostgreSQL unit
+Validation: **117 DuckDB unit tests passed / 6 skipped**, **122 PostgreSQL unit
 tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
 DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 44/44 write**,
 and the CC-01 checker plus the read-only preflight both pass on that database.

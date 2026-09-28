@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 116 on DuckDB, 121 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 117 on DuckDB, 122 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (116 on DuckDB, 121 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (117 on DuckDB, 122 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -602,8 +602,8 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   background job opening its own connection while a request is in flight is the
   original "Unique file handle conflict". PostgreSQL keeps a threaded server and
   a live scheduler.
-- 5 new unit tests + 1 new Playwright test. DuckDB is 116 passed / 6 skipped;
-  PostgreSQL 121 passed / 1 skipped (also with Redis); Playwright 21/21 on both
+- 6 new unit tests + 1 new Playwright test. DuckDB is 117 passed / 6 skipped;
+  PostgreSQL 122 passed / 1 skipped (also with Redis); Playwright 21/21 on both
   backends (DuckDB run twice for stability); the clean v2.0 probe is 97/97 GET
   + 44/44 write, and the CC-01 checker and preflight pass on it.
 
