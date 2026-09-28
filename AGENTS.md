@@ -525,6 +525,30 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   backends; the clean v2.0 probe is 96/96 GET + 44/44 write, and the CC-01
   checker and the read-only preflight both pass on it.
 
+## CI now covers PostgreSQL (v2.0 target)
+- The workflow has two parallel jobs. The original `duckdb` job is unchanged
+  (lint, compose-config validation, unit suite, browser suite, image build) and
+  still gives the fast signal.
+- The new `postgres` job runs a `postgres:17` service plus Redis and executes
+  the matrix that was previously only ever run by hand:
+  `alembic upgrade head` (so the v2.0 `public` schema exists), the unit suite on
+  the compatibility `legacy` schema, the unit suite again with `REDIS_URL` set
+  for the server-side session path, the browser suite, and — on a *clean*
+  database created by Alembic — the three cutover gates: the read-only
+  preflight, `scripts/check_cc_rules.py` and `scripts/probe_public_flip.py`.
+  All three already exit non-zero on failure, so a step turns red on its own.
+- Two things had to be fixed to make it pass, both found by running it for real:
+  - the PG-gated unit tests inspect the v2.0 target, and a fresh service
+    database has no `public` schema, so `alembic upgrade head` now runs first;
+  - the gates step creates its database with **psycopg** rather than the `psql`
+    client, because the service container authenticates with scram and a
+    non-interactive client has nowhere to put the password.
+- The whole job was replayed locally against a pristine database, step by step,
+  before each fix was committed: 116 passed / 1 skipped (no Redis), 116 with
+  Redis, 20 browser tests, and preflight + CC-01 + probe green on the clean v2.0
+  target.
+- Run `36426274705` is green on both jobs.
+
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
 - Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks
