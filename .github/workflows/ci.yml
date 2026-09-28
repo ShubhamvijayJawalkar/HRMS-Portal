@@ -122,6 +122,13 @@ jobs:
           echo "PostgreSQL did not become ready" >&2
           exit 1
 
+      # The PG-gated unit tests assert against the v2.0 target (identity keys,
+      # BOOLEAN columns, the canonical data types), so the `public` schema has
+      # to exist in this database before the suite runs. This mirrors the real
+      # deployment: `public` = v2.0 target, `legacy` = migrated v1.0.
+      - name: Create the v2.0 public schema
+        run: python -m alembic -c migrations/alembic.ini upgrade head
+
       - name: Run unit tests on the compatibility schema
         run: python -m pytest tests/test_app.py -v
 
