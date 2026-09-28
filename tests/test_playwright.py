@@ -12,6 +12,7 @@ os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{int(datetime.now().timestamp() * 1000)}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
+os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('APP_DB', 'duckdb')
 os.environ['APP_DB_SCHEMA'] = 'legacy'
 if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
@@ -225,6 +226,50 @@ def test_admin_assigns_a_leave_policy(page):
     annual = next(b for b in balances if b['leave_type'] == 'Annual')
     assert annual['total_days'] == 12 and annual['source'] == 'policy', annual
     assert 'reserved_days' in annual
+
+def test_admin_import_users_runs_as_a_background_job(page):
+    """FR-USR-04: the upload is queued, polled, and reported as a job."""
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+    page.goto(BASE_URL + '/admin/import-users')
+    page.wait_for_timeout(1500)
+
+    csv_body = (
+        'emp_id,name,email,role,department\n'
+        'EMP905,Browser Import,browser905@company.com,Employee,MIS\n'
+        'BAD2,Bad Row,bad2@company.com,Employee,MIS\n'
+    )
+    page.set_input_files('#fileInput', files=[
+        {'name': 'users.csv', 'mimeType': 'text/csv', 'buffer': csv_body.encode()},
+    ])
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/users/import') and r.request.method == 'POST'
+    ) as resp:
+        page.wait_for_timeout(2500)
+    assert resp.value.status == 202, resp.value.status
+    job_id = resp.value.json()['job_id']
+
+    # The scheduler picks the job up and the UI reports the outcome.
+    page.wait_for_function(
+        "() => document.getElementById('importResult').textContent.includes('finished')",
+        timeout=60000,
+    )
+    result = page.text_content('#importResult')
+    assert '1 imported' in result, result
+    assert '1 skipped' in result, result
+    assert 'row 3' in result, result
+
+    page.wait_for_function(
+        "() => document.getElementById('jobHistory').textContent.includes('completed')",
+        timeout=30000,
+    )
+    history = page.text_content('#jobHistory')
+    assert str(job_id) in history, history
+    assert 'users.csv' in history
+    assert '1 imported, 1 skipped' in history, history
 
 def test_breaks_tab_shows_on_user_dashboard(page):
     page.goto(BASE_URL + '/login')

@@ -592,7 +592,7 @@ DATABASE_URL=postgresql://... \\
     --report reports/cutover-preflight.json
 ```
 
-It verifies the `0003_lifecycle_hardening` head, required public tables,
+It verifies the `0004_import_jobs` head, required public tables,
 CC-01 identity keys and backing sequences, offer percentage/active-offer
 constraints, and emits public-vs-legacy count deltas. Runtime-generated legacy
 IDs are routed through a sequence-safe allocator, and boot-time compatibility
@@ -730,10 +730,40 @@ schema gains the table through `CREATE TABLE IF NOT EXISTS`; v2.0 `public` owns
 it already, so no Alembic revision was needed. `monthly_leave_grants` (the v2.0
 accrual ledger) is still unused — a monthly scheduler job is a separate change.
 
-Validation: **107 DuckDB unit tests passed / 6 skipped**, **112 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **19 Playwright tests passed on
-DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 44/44
-write flows**.
+### 14.7 Background bulk-import jobs (implemented)
+
+`imports.py` turns the CSV user import into a job. `POST /api/users/import`
+validates the upload (extension, header, 5 MB / 5000-row caps, streaming) stores
+it, records a `pending` `import_jobs` row and returns `202`; a dispatcher on a
+15-second tick claims **one** job with a conditional status transition, so the
+several gunicorn workers cannot take the same job, and publishes progress every
+25 rows. The per-row contract is unchanged, the completion is audited, and the
+stored upload — which holds every employee id and address — is deleted when the
+job settles. Rows are naturally idempotent, so a job whose worker died is
+retried (a `running` job older than 15 minutes goes back to `pending`).
+
+New routes under the `import_users` module: job status, job history, and
+cancel-while-pending; the import page polls the job and shows progress, the
+skip reasons and the recent jobs. The table is added to the canonical target by
+Alembic revision `0004_import_jobs` (identity PK, `JSONB` error summary) and to
+the compatibility schema by `init_db`; `scripts/cutover_preflight.py` expects
+that head.
+
+Two defects found and fixed while validating:
+
+- `audit_log` read `request.headers` and `request.remote_addr`
+  unconditionally, so every call from a scheduler thread raised and was
+  swallowed by its own `except` — the nightly `ACCESS_REVOKED` rows have never
+  actually been written. It now degrades outside a request context.
+- The app's global `200 per minute` limit is now overridable
+  (`DEFAULT_RATE_LIMIT`) and lifted in the test suites; it was being exhausted
+  mid-suite, and the resulting `429` on the CSRF-token fetch surfaced as a
+  bogus "CSRF token missing or invalid" on an unrelated onboarding assertion.
+
+Validation: **111 DuckDB unit tests passed / 6 skipped**, **116 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **20 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **96/96 GET + 44/44 write**,
+and the CC-01 checker plus the read-only preflight both pass on that database.
 
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
@@ -772,6 +802,7 @@ and `pii_reveal` followed in §14.5.
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. Continue the FR-USR hardening follow-up. The archive/restore, directory
-   contract, permission-policy, enforcement-wiring, PII-reveal and
-   policy-derived-leave slices are implemented; next background bulk/import jobs
-   (the CSV import is still synchronous) and two-person anonymisation.
+   contract, permission-policy, enforcement-wiring, PII-reveal,
+   policy-derived-leave and background-import slices are implemented; the last
+   item is two-person anonymisation (a dual-approval erasure that keeps the
+   statutory records but strips the personal ones).

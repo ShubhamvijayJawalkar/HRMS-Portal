@@ -16,7 +16,18 @@ import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from flasgger import Swagger
-from flask import Flask, g, jsonify, redirect, render_template, request, send_file, session, url_for
+from flask import (
+    Flask,
+    g,
+    has_request_context,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -32,6 +43,7 @@ from security import (
 
 load_dotenv()
 
+import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
@@ -79,7 +91,10 @@ IST = ZoneInfo('Asia/Kolkata')
 limiter = Limiter(
     key_func=get_remote_address,
     app=app,
-    default_limits=["200 per minute"],
+    # Overridable for test runs: a full suite issues thousands of requests in a
+    # couple of minutes, and a 429 on the CSRF-token fetch shows up later as a
+    # confusing "CSRF token missing or invalid" on an unrelated assertion.
+    default_limits=[os.getenv('DEFAULT_RATE_LIMIT', '200 per minute')],
     storage_uri="memory://",
 )
 
@@ -660,6 +675,29 @@ def init_db():
         )
     ''')
 
+
+    # ── Background import jobs (FR-USR-04) ────────────────────────
+    # Compatibility shape: the identity key of the v2.0 target becomes an
+    # INTEGER primary key here and is allocated through `_next_generated_id`.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS import_jobs (
+            job_id INTEGER PRIMARY KEY,
+            job_type VARCHAR NOT NULL DEFAULT 'users',
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            filename VARCHAR NOT NULL,
+            stored_path VARCHAR,
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            processed_rows INTEGER NOT NULL DEFAULT 0,
+            imported INTEGER NOT NULL DEFAULT 0,
+            skipped INTEGER NOT NULL DEFAULT 0,
+            error_summary VARCHAR,
+            created_by VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            failure_reason VARCHAR
+        )
+    ''')
     # ── Password Reset Tokens (new) ────────────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -1727,11 +1765,18 @@ def audit_log(emp_id, action, details=None, *, actor=None, entity=None, entity_i
             if _is_public_target_schema()
             else int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
         )
+        # Background jobs (scheduler threads) have no request context, so the
+        # actor and the request metadata must degrade instead of raising: an
+        # audit row that is silently dropped is worse than one without a
+        # request id, and `except` below used to swallow exactly that.
+        in_request = has_request_context()
         if actor is None:
-            actor = session.get('name') or session.get('emp_id') or emp_id
-        request_id = getattr(g, '_hrms_request_id', None)
+            actor = (session.get('name') or session.get('emp_id') or emp_id) if in_request else 'SYSTEM'
+        request_id = getattr(g, '_hrms_request_id', None) if in_request else None
         if request_id is None:
-            request_id = request.headers.get('X-Request-ID') or f"req-{secrets.token_hex(8)}"
+            request_id = (
+                request.headers.get('X-Request-ID') or f"req-{secrets.token_hex(8)}"
+            ) if in_request else f"job-{secrets.token_hex(8)}"
             g._hrms_request_id = request_id
 
         def _json(v):
@@ -1746,7 +1791,8 @@ def audit_log(emp_id, action, details=None, *, actor=None, entity=None, entity_i
             '"before", "after", ip_address, request_id, created_at) '
             'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [log_id, emp_id, actor, action, entity, entity_id, details,
-             _json(before), _json(after), request.remote_addr, request_id, datetime.now()]
+             _json(before), _json(after),
+             request.remote_addr if in_request else None, request_id, datetime.now()]
         )
     except Exception as e:
         logger.warning("audit_log failed: %s", e)
@@ -2234,6 +2280,8 @@ _ROUTE_MODULES = {
     'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
     'get_leave_policy': 'leaves', 'update_leave_policy': 'leaves',
     'import_users_csv': 'import_users', 'import_users_page': 'import_users',
+    'import_job_status': 'import_users', 'import_job_list': 'import_users',
+    'cancel_import_job': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
@@ -3093,64 +3141,80 @@ def _csv_value(row, key, default=''):
 @app.route('/api/v1/users/import', methods=['POST'])
 @app.route('/api/users/import', methods=['POST'])
 @admin_required
+@idempotent
 def import_users_csv():
+    """Queue a CSV user import (FR-USR-04).
+
+    The upload is validated (header, size, row count) and stored, a job row is
+    recorded and the caller gets ``202`` with the job id. A dispatcher processes
+    one job at a time, so a large file no longer holds a web worker open, and
+    the outcome stays inspectable at ``GET /api/users/import/<job_id>``.
+    """
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
-    f = request.files['file']
-    if not f.filename.endswith('.csv'):
-        return jsonify({'error': 'CSV file required'}), 400
-    conn = None
     try:
-        df = pd.read_csv(f)
-        required = ['emp_id', 'name', 'email']
-        missing = [c for c in required if c not in df.columns]
-        if missing:
-            return jsonify({'error': f'Missing columns: {missing}'}), 400
-        conn = get_db()
-        pwd = hash_password('pass123')
-        count = 0
-        errors = []
-        for index, row in df.iterrows():
-            # Row 1 is the header, so the spreadsheet row is index + 2.
-            label = f'row {int(index) + 2}'
-            payload = {
-                'emp_id': _csv_value(row, 'emp_id'),
-                'name': _csv_value(row, 'name'),
-                'email': _csv_value(row, 'email'),
-                'role': _csv_value(row, 'role', 'Employee') or 'Employee',
-                'department': _csv_value(row, 'department'),
-            }
-            # Imported rows obey the same directory contract as the UI/API, so a
-            # bulk load cannot bypass the employee-ID/email/role rules.
-            try:
-                normalized = _validate_user_payload(payload, creating=True)
-            except UserValidationError as exc:
-                errors.append(f'{label}: {exc}')
-                continue
-            if conn.execute("SELECT 1 FROM users WHERE UPPER(emp_id) = ?", [normalized['emp_id']]).fetchone():
-                errors.append(f"{label}: {normalized['emp_id']} already exists")
-                continue
-            if conn.execute("SELECT 1 FROM users WHERE LOWER(email) = ?", [normalized['email']]).fetchone():
-                errors.append(f"{label}: {normalized['email']} already exists")
-                continue
-            conn.execute(
-                "INSERT INTO users (emp_id, name, email, password, role, department, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, 'Active', ?, ?, 1, 1)",
-                [normalized['emp_id'], normalized['name'], normalized['email'], pwd,
-                 normalized['role'], normalized['department'],
-                 datetime.now(), datetime.now()]
-            )
-            count += 1
+        job = imports.create_job(request.files['file'], session['emp_id'])
+    except imports.ImportError_ as exc:
+        return jsonify({'error': str(exc)}), exc.status
+    audit_log(
+        session['emp_id'], 'USER_IMPORT_QUEUED',
+        f"Queued CSV import {job['job_id']} ({job['filename']}, {job['total_rows']} rows)",
+        entity='import_jobs', entity_id=job['job_id'],
+        after={'total_rows': job['total_rows'], 'filename': job['filename']},
+    )
+    return jsonify({
+        'message': f"Import queued: {job['total_rows']} rows",
+        'job_id': job['job_id'],
+        'status': job['status'],
+        'total_rows': job['total_rows'],
+        'poll': f"/api/users/import/{job['job_id']}",
+    }), 202
+
+
+@app.route('/api/v1/users/import/<int:job_id>', methods=['GET'])
+@app.route('/api/users/import/<int:job_id>', methods=['GET'])
+@admin_required
+def import_job_status(job_id):
+    """Progress and outcome of one import job."""
+    job = imports.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Import job not found'}), 404
+    return jsonify(job), 200
+
+
+@app.route('/api/v1/users/import', methods=['GET'])
+@app.route('/api/users/import', methods=['GET'])
+@admin_required
+def import_job_list():
+    """Most recent import jobs, newest first."""
+    limit = request.args.get('limit', 20, type=int)
+    return jsonify({'jobs': imports.list_jobs(limit)}), 200
+
+
+@app.route('/api/v1/users/import/<int:job_id>/cancel', methods=['POST'])
+@app.route('/api/users/import/<int:job_id>/cancel', methods=['POST'])
+@admin_required
+def cancel_import_job(job_id):
+    """Cancel a job that has not been picked up by the dispatcher yet."""
+    job = imports.cancel_job(job_id, session['emp_id'])
+    if job is None:
+        existing = imports.get_job(job_id)
+        if not existing:
+            return jsonify({'error': 'Import job not found'}), 404
         return jsonify({
-            'message': f'{count} users imported',
-            'imported': count,
-            'skipped': len(errors),
-            'errors': errors[:20],
-        }), 201
-    except Exception as e:
-        return jsonify({'error': str(e)}), 400
-    finally:
-        if conn:
-            conn.close()
+            'error': f"Job is {existing['status']} and can no longer be cancelled",
+        }), 409
+    return jsonify(job), 200
+
+
+def run_import_dispatch():
+    """Scheduler job: process one queued import job (FR-USR-04)."""
+    try:
+        return imports.dispatch_once()
+    except Exception as exc:
+        logger.warning('import dispatch failed: %s', exc)
+        return None
+
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -8465,13 +8529,23 @@ def cleanup_expired_tokens():
 if not STARTED:
     _is_gunicorn_master = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or os.getenv('GUNICORN_MASTER') == 'true'
     _is_dev = os.getenv('FLASK_DEBUG') == '1' or os.getenv('FLASK_ENV') != 'production'
-    if _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
+    if os.getenv('HRMS_DISABLE_SCHEDULER') == '1':
+        # Deterministic test runs: background jobs would otherwise race the
+        # assertions. The browser suite leaves the scheduler on.
+        logger.info('Scheduler disabled (HRMS_DISABLE_SCHEDULER=1)')
+    elif _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
         try:
             attendance_hour = min(max(int(os.getenv('ATTENDANCE_JOB_HOUR', '2')), 0), 23)
         except (TypeError, ValueError):
             attendance_hour = 2
         scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
         scheduler.add_job(outbox.run_dispatch, 'interval', seconds=60)
+        # FR-USR-04: pick up one queued CSV import per tick. The claim is an
+        # atomic status transition, so running several web workers is safe.
+        scheduler.add_job(
+            run_import_dispatch, 'interval', seconds=15,
+            id='import-dispatch', replace_existing=True, coalesce=True, max_instances=1,
+        )
         scheduler.add_job(
             run_attendance_finalization,
             'cron',

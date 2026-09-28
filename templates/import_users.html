@@ -65,14 +65,23 @@
     <div class="card">
         <div class="card-header"><h5 class="mb-0">Upload CSV File</h5></div>
         <div class="card-body">
-            <p class="text-muted">CSV must include columns: <code>emp_id</code>, <code>name</code>, <code>email</code>. Optional: <code>role</code>, <code>department</code>.</p>
+            <p class="text-muted">CSV must include columns: <code>emp_id</code>, <code>name</code>, <code>email</code>. Optional: <code>role</code>, <code>department</code>. The upload is queued and processed in the background (max 5&nbsp;MB / 5000 rows), and the uploaded file is deleted once the job finishes.</p>
             <div class="upload-area" id="dropZone" onclick="document.getElementById('fileInput').click()">
                 <div style="font-size:48px;color:#1e293b;">&#128196;</div>
                 <p class="mt-3 mb-1"><strong>Click to upload or drag & drop</strong></p>
                 <p class="text-muted small">CSV files only</p>
                 <input type="file" id="fileInput" accept=".csv" style="display:none" onchange="uploadFile(this.files[0])">
             </div>
+            <div id="importProgress" style="display:none;" role="progressbar" aria-label="Import progress"></div>
             <div id="importResult" style="margin-top:20px;display:none;" class="alert"></div>
+            <hr>
+            <h6>Recent imports</h6>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle" style="font-size:12px;">
+                    <thead><tr><th>Job</th><th>File</th><th>Status</th><th>Progress</th><th>Result</th><th></th></tr></thead>
+                    <tbody id="jobHistory"><tr><td colspan="6" class="text-muted">Loading…</td></tr></tbody>
+                </table>
+            </div>
             <hr>
             <h6>Sample CSV format:</h6>
             <pre class="bg-light p-3 rounded" style="font-size:12px;">emp_id,name,email,role,department
@@ -83,11 +92,20 @@ EMP011,Jane Smith,jane@company.com,Employee,Operations</pre>
     </div>
 </div>
 <script>
+let importPoll = null;
+
+function esc(text) {
+    return String(text == null ? '' : text).replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+    }[ch]));
+}
+
 async function uploadFile(file) {
     if (!file) return;
     const formData = new FormData();
     formData.append('file', file);
     const result = document.getElementById('importResult');
+    const progress = document.getElementById('importProgress');
     result.style.display = 'block';
     result.style.whiteSpace = 'pre-wrap';
     result.className = 'alert alert-info';
@@ -95,26 +113,86 @@ async function uploadFile(file) {
     try {
         const r = await fetch('/api/users/import', { method: 'POST', body: formData });
         const d = await r.json();
-        result.className = !r.ok ? 'alert alert-danger' : (d.skipped ? 'alert alert-warning' : 'alert alert-success');
-        result.textContent = d.message || d.error;
-        if (d.errors && d.errors.length) {
-            result.textContent += '\nSkipped rows:\n' + d.errors.join('\n');
+        if (!r.ok) {
+            result.className = 'alert alert-danger';
+            result.textContent = d.error || d.message || 'Upload failed';
+            return;
         }
+        // FR-USR-04: the import is queued, so poll the job until it settles.
+        progress.style.display = 'block';
+        progress.className = 'progress mb-2';
+        progress.innerHTML = '<div class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%">0 / ' + d.total_rows + '</div>';
+        clearInterval(importPoll);
+        importPoll = setInterval(() => pollImportJob(d.job_id, result, progress), 1500);
+        pollImportJob(d.job_id, result, progress);
+        loadImportJobs();
     } catch(e) {
         result.className = 'alert alert-danger';
         result.textContent = 'Upload failed';
     }
 }
-function downloadSample() {
-    const csv = 'emp_id,name,email,role,department\nEMP010,John Doe,john@company.com,Employee,MIS\nEMP011,Jane Smith,jane@company.com,Employee,Operations';
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'sample_import.csv'; a.click();
-    URL.revokeObjectURL(url);
+
+async function pollImportJob(jobId, result, progress) {
+    let job;
+    try {
+        const r = await fetch(`/api/users/import/${jobId}`);
+        if (!r.ok) return;
+        job = await r.json();
+    } catch (e) { return; }
+    const pct = job.total_rows ? Math.round((job.processed_rows / job.total_rows) * 100) : 0;
+    progress.querySelector('.progress-bar').style.width = pct + '%';
+    progress.querySelector('.progress-bar').textContent = `${job.processed_rows} / ${job.total_rows}`;
+    if (['pending', 'running'].includes(job.status)) return;
+    clearInterval(importPoll);
+    progress.style.display = 'none';
+    if (job.status === 'cancelled') {
+        result.className = 'alert alert-secondary';
+        result.textContent = 'Import cancelled.';
+        loadImportJobs();
+        return;
+    }
+    if (job.status === 'failed') {
+        result.className = 'alert alert-danger';
+        result.textContent = 'Import failed: ' + (job.failure_reason || 'unknown error');
+        loadImportJobs();
+        return;
+    }
+    result.className = job.skipped ? 'alert alert-warning' : 'alert alert-success';
+    let text = `Import ${job.job_id} finished: ${job.imported} imported, ${job.skipped} skipped of ${job.total_rows} rows.`;
+    if (job.errors && job.errors.length) {
+        text += '\nSkipped rows:\n' + job.errors.join('\n');
+    }
+    result.textContent = text;
+    loadImportJobs();
 }
-document.getElementById('dropZone').addEventListener('dragover', e => { e.preventDefault(); e.currentTarget.classList.add('dragover'); });
-document.getElementById('dropZone').addEventListener('dragleave', e => { e.currentTarget.classList.remove('dragover'); });
-document.getElementById('dropZone').addEventListener('drop', e => { e.preventDefault(); e.currentTarget.classList.remove('dragover'); const f = e.dataTransfer.files[0]; if (f) uploadFile(f); });
+
+async function cancelImportJob(jobId) {
+    if (!confirm(`Cancel import job ${jobId}?`)) return;
+    await fetch(`/api/users/import/${jobId}/cancel`, { method: 'POST' });
+    loadImportJobs();
+}
+
+async function loadImportJobs() {
+    const body = document.getElementById('jobHistory');
+    if (!body) return;
+    const r = await fetch('/api/users/import?limit=10');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.jobs.length) {
+        body.innerHTML = '<tr><td colspan="6" class="text-muted">No imports yet.</td></tr>';
+        return;
+    }
+    body.innerHTML = d.jobs.map(job => `<tr>
+        <td>${job.job_id}</td>
+        <td>${esc(job.filename)}</td>
+        <td><span class="badge bg-${job.status === 'completed' ? 'success' : (job.status === 'failed' ? 'danger' : (job.status === 'cancelled' ? 'secondary' : 'info'))}">${esc(job.status)}</span></td>
+        <td>${job.processed_rows} / ${job.total_rows}</td>
+        <td>${job.imported} imported, ${job.skipped} skipped</td>
+        <td>${job.status === 'pending' ? `<button class="btn btn-outline-secondary btn-sm" onclick="cancelImportJob(${job.job_id})">Cancel</button>` : ''}</td>
+    </tr>`).join('');
+}
+
+document.addEventListener('DOMContentLoaded', loadImportJobs);
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

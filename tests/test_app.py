@@ -11,6 +11,14 @@ os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_test_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('APP_DB', 'duckdb')
+# The app's global "200 per minute" limit is meant for production traffic. A
+# full suite issues thousands of requests in well under a minute, and a 429 on
+# the CSRF-token fetch surfaces much later as a bogus "CSRF token missing or
+# invalid" on an unrelated assertion, so lift it for tests.
+os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
+# `HRMS_DISABLE_SCHEDULER=1` is available for a fully deterministic run; the
+# suite keeps the scheduler on so the job-registration tests stay meaningful, and
+# the import tests below tolerate the dispatcher picking a job up first.
 # Tests must never reset the production cutover target, even when a shell
 # inherits FLASK_ENV=production or APP_DB_SCHEMA=public.
 os.environ['APP_DB_SCHEMA'] = 'legacy'
@@ -751,7 +759,12 @@ def test_user_partial_update_preserves_fields_and_audits_role(client):
         _cleanup_user_contract_rows('EMP907')
 
 
-def test_user_import_rejects_rows_that_break_the_directory_contract(client):
+# ── FR-USR-04 background import jobs ──────────────────────────────────────
+
+def test_user_import_queues_a_job_and_reports_the_outcome(client):
+    """The upload is queued, then the dispatcher applies the same contract."""
+    import imports
+
     _set_admin_session(client, 99884)
     csv_body = (
         'emp_id,name,email,role,department\n'
@@ -761,24 +774,176 @@ def test_user_import_rejects_rows_that_break_the_directory_contract(client):
         'EMP910,Bad Role,emp910@company.com,Owner,MIS\n'
     )
     try:
-        response = client.post(
+        queued = client.post(
             '/api/users/import',
             data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
             content_type='multipart/form-data',
         )
-        assert response.status_code == 201, response.get_json()
-        payload = response.get_json()
-        assert payload['imported'] == 1
-        assert payload['skipped'] == 3
-        messages = ' | '.join(payload['errors'])
-        assert 'row 3' in messages and 'emp_id' in messages          # BAD1
+        assert queued.status_code == 202, queued.get_json()
+        job_id = queued.get_json()['job_id']
+        assert queued.get_json()['status'] == 'pending'
+        assert queued.get_json()['total_rows'] == 4
+
+        status = client.get(f'/api/users/import/{job_id}')
+        assert status.status_code == 200
+        assert status.get_json()['status'] == 'pending'
+
+        # Nothing is imported until the dispatcher runs.
+        assert client.get('/api/users/EMP908').status_code == 404
+        # The scheduler may claim it first; either way exactly one worker does
+        # the work, and `imported == 1` proves it was not applied twice.
+        imports.dispatch_once()
+        imports.dispatch_once()
+
+        job = client.get(f'/api/users/import/{job_id}').get_json()
+        assert job['status'] == 'completed', job
+        assert job['imported'] == 1 and job['skipped'] == 3, job
+        messages = ' | '.join(job['errors'])
+        assert 'row 3' in messages and 'emp_id' in messages           # BAD1
         assert 'row 4' in messages and 'emp908@company.com' in messages  # duplicate email
         assert 'row 5' in messages and 'role must be one of' in messages   # Owner
+        assert job['started_at'] and job['finished_at']
+
+        # The rows that passed the contract are real users.
         assert client.get('/api/users/EMP908').status_code == 200
         assert client.get('/api/users/BAD1').status_code == 404
         assert client.get('/api/users/EMP910').status_code == 404
+
+        # ...and the completion is audited, with the upload deleted afterwards.
+        conn = get_db()
+        audit = conn.execute(
+            'SELECT entity, entity_id, "after" FROM audit_log '
+            "WHERE action = 'USER_IMPORT_COMPLETED' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        path = conn.execute(
+            'SELECT stored_path FROM import_jobs WHERE job_id = ?', [job_id]
+        ).fetchone()
+        conn.close()
+        assert audit is not None and audit[0] == 'import_jobs'
+        assert json.loads(audit[2])['imported'] == 1
+        import os
+        assert path[0] and not os.path.exists(path[0]), 'the upload must not stay on disk'
+
+        listed = client.get('/api/users/import').get_json()['jobs']
+        assert any(row['job_id'] == job_id for row in listed)
     finally:
+        _cleanup_import_job_rows()
         _cleanup_user_contract_rows('EMP908', 'EMP909', 'EMP910', 'BAD1')
+
+
+def test_import_upload_validation_happens_before_anything_is_queued(client):
+    _set_admin_session(client, 99883)
+    try:
+        missing = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(b'name,email\nA,b@c.com\n'), 'users.csv')},
+            content_type='multipart/form-data',
+        )
+        assert missing.status_code == 400
+        assert 'Missing columns' in missing.get_json()['error']
+
+        header_only = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(b'emp_id,name,email\n'), 'users.csv')},
+            content_type='multipart/form-data',
+        )
+        assert header_only.status_code == 400
+
+        too_many = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(_big_csv(imports_max_rows() + 1)), 'users.csv')},
+            content_type='multipart/form-data',
+        )
+        assert too_many.status_code == 413
+        assert 'limit is' in too_many.get_json()['error']
+
+        not_csv = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(b'x'), 'users.xlsx')},
+            content_type='multipart/form-data',
+        )
+        assert not_csv.status_code == 400
+
+        assert client.get('/api/users/import/999999').status_code == 404
+    finally:
+        _cleanup_import_job_rows()
+
+
+def test_import_job_can_be_cancelled_only_while_pending(client):
+    import imports
+
+    _set_admin_session(client, 99882)
+    csv_body = 'emp_id,name,email,role,department\nEMP911,Queued,emp911@company.com,Employee,MIS\n'
+    try:
+        queued = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
+            content_type='multipart/form-data',
+        ).get_json()
+        cancelled = client.post(f"/api/users/import/{queued['job_id']}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.get_json()['status'] == 'cancelled'
+        # A cancelled job is never picked up.
+        assert imports.dispatch_once() is None
+        assert client.get('/api/users/EMP911').status_code == 404
+        # ...and cannot be cancelled twice.
+        assert client.post(f"/api/users/import/{queued['job_id']}/cancel").status_code == 409
+        assert client.post('/api/users/import/999999/cancel').status_code == 404
+    finally:
+        _cleanup_import_job_rows()
+        _cleanup_user_contract_rows('EMP911')
+
+
+def test_import_routes_require_an_admin_with_the_module(client):
+    import policy
+
+    _set_admin_session(client, 99881)
+    try:
+        _create_policy_user(client, 'EMP912', role='Admin')
+        # Denying the module removes the whole import surface.
+        assert client.put(
+            '/api/users/EMP912/permissions', json={'modules': {'import_users': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP912', 'Admin', 99880)
+        assert client.get('/api/users/import').status_code in (302, 403)
+        assert client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(b'emp_id,name,email\nEMP913,X,x@company.com\n'), 'users.csv')},
+            content_type='multipart/form-data',
+        ).status_code in (302, 403)
+        # The import page itself is gone from the navbar as well.
+        page = client.get('/admin/users').get_data(as_text=True)
+        assert 'EMP912' in page
+        assert policy.can({'emp_id': 'EMP912', 'role': 'Admin'}, 'import_users') is False
+    finally:
+        _clear_permission_rows('EMP912')
+        _cleanup_import_job_rows()
+        _cleanup_user_contract_rows('EMP912', 'EMP913')
+
+
+def test_import_job_rows_are_not_claimed_twice(client):
+    """Two dispatchers must never process the same job (multi-worker safety)."""
+    import imports
+
+    _set_admin_session(client, 99879)
+    csv_body = 'emp_id,name,email,role,department\nEMP914,Once,emp914@company.com,Employee,MIS\n'
+    try:
+        job_id = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
+            content_type='multipart/form-data',
+        ).get_json()['job_id']
+        imports.dispatch_once()
+        assert imports.dispatch_once() is None     # nothing left to claim
+        job = client.get(f'/api/users/import/{job_id}').get_json()
+        assert job['status'] == 'completed' and job['imported'] == 1
+        # A second pass must not import the same employee twice.
+        imports.dispatch_once()
+        job = client.get(f'/api/users/import/{job_id}').get_json()
+        assert job['imported'] == 1
+    finally:
+        _cleanup_import_job_rows()
+        _cleanup_user_contract_rows('EMP914')
 
 
 # ── FR-USR-09 / FR-USR-15 permission policy ──────────────────────────────
@@ -1456,6 +1621,29 @@ def test_pii_admin_page_hides_the_reveal_without_the_module(client):
     finally:
         _clear_permission_rows('EMP943')
         _cleanup_user_contract_rows('EMP943')
+
+
+def imports_max_rows():
+    import imports
+    return imports.MAX_ROWS
+
+
+def _big_csv(rows):
+    lines = ['emp_id,name,email,role,department']
+    for index in range(rows):
+        lines.append(f'EMP8{index:02d},Bulk {index},bulk{index}@company.com,Employee,MIS')
+    return '\n'.join(lines).encode() + b'\n'
+
+
+def _cleanup_import_job_rows():
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM import_jobs")
+        conn.execute("DELETE FROM audit_log WHERE entity = 'import_jobs'")
+        conn.execute("DELETE FROM audit_log WHERE action LIKE 'USER_IMPORT%'")
+    finally:
+        conn.close()
+
 
 
 # ── FR-LEA-06/08 policy-derived leave balances ────────────────────────────

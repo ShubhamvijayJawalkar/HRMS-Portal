@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 107 on DuckDB, 112 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2.5 min, 19 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 111 on DuckDB, 116 on PostgreSQL)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~2.5 min, 20 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,9 +28,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (107 on DuckDB, 112 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (111 on DuckDB, 116 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
-- `tests/test_playwright.py` — Playwright browser tests (19 tests)
+- `tests/test_playwright.py` — Playwright browser tests (20 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
@@ -310,8 +310,8 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: background bulk/import jobs and two-person
-  anonymisation.
+- Remaining follow-up work: two-person anonymisation (the only FR-USR item
+  left).
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -477,6 +477,53 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   it corrupts results under a threaded server (`ValueError: not enough values
   to unpack`), because one connection means one cursor state. Both facts are
   recorded in `get_db()` so this is not re-attempted.
+
+## FR-USR-04 background bulk-import jobs (`imports.py`)
+- The CSV user import is no longer a request. `POST /api/users/import` validates
+  the upload (extension, header columns, `header + size + row count` with a
+  streaming read, caps of 5 MB / 5000 rows), stores it under
+  `uploads/imports/`, records a `pending` `import_jobs` row and returns **`202`**
+  with the job id. `@idempotent` still applies, so a retry with the same
+  `Idempotency-Key` replays the same 202 instead of queueing the file twice.
+- `imports.dispatch_once()` runs on a 15-second scheduler tick and claims **one**
+  job with a conditional `UPDATE ... WHERE status = 'pending'`, so the several
+  gunicorn workers cannot pick up the same job. Progress is published every 25
+  rows; the per-row contract is unchanged (every row still goes through
+  `_validate_user_payload` and the case-insensitive duplicate checks), and the
+  completion is audited as `USER_IMPORT_COMPLETED` with the counts.
+- The rows are naturally idempotent (an existing employee ID or email is
+  skipped), so a job whose worker died is retried: a job `running` for more than
+  15 minutes is moved back to `pending` by the next tick.
+- The stored upload is **deleted** when the job completes, fails or is
+  cancelled — it holds every employee id and address.
+- New routes (module `import_users`): `GET /api/users/import/<job_id>` for
+  progress/outcome, `GET /api/users/import?limit=` for the history, and
+  `POST /api/users/import/<job_id>/cancel` for a job that has not started
+  (`409` once it is running). `templates/import_users.html` polls the job,
+  shows a progress bar, the per-row skip reasons and the recent-job table.
+- New table `import_jobs`, added to the canonical target by Alembic revision
+  `0004_import_jobs` (identity PK, `JSONB` error summary, status index) and to
+  the compatibility schema by `init_db`; `scripts/cutover_preflight.py` now
+  expects that head. `docs/data_dictionary.md` is generated from a live target
+  and will pick the table up on its next run.
+- **`audit_log` no longer loses background writes.** It read `request.headers`
+  and `request.remote_addr` unconditionally, so every call from a scheduler
+  thread raised and was swallowed by its own `except` — the nightly
+  `ACCESS_REVOKED` rows have silently never been written. It now degrades to
+  `actor='SYSTEM'`, a `job-…` request id and no IP outside a request context.
+- **Test-harness fixes.** The app's global `200 per minute` limit is now
+  `DEFAULT_RATE_LIMIT`-overridable and lifted in both suites: a full run issues
+  thousands of requests in well under a minute, and a `429` on the CSRF-token
+  fetch surfaced much later as a bogus "CSRF token missing or invalid" on an
+  unrelated onboarding assertion. `HRMS_DISABLE_SCHEDULER=1` is available for a
+  fully deterministic run; the suites leave the scheduler **on** (so the
+  job-registration tests stay meaningful) and the import tests tolerate the
+  dispatcher claiming a job before the test's own `dispatch_once()`.
+- 5 new unit tests + 1 new Playwright test (queues, polls, reports, and asserts
+  the audit row and the deleted upload). DuckDB is 111 passed / 6 skipped;
+  PostgreSQL 116 passed / 1 skipped (also with Redis); Playwright 20/20 on both
+  backends; the clean v2.0 probe is 96/96 GET + 44/44 write, and the CC-01
+  checker and the read-only preflight both pass on it.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
