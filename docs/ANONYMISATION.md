@@ -1,7 +1,8 @@
 # Two-person anonymisation — design for review (FR-USR)
 
-**Status:** proposal. Nothing is implemented yet. This note exists so the
-irreversible parts are decided by a human before any code is written.
+**Status:** implemented as `anonymise.py` (see §8). This note is the review
+record; §8 records the decisions that were taken on the operator's behalf and
+the trade-offs that were deliberately left for a later change.
 
 ## 1. The problem
 
@@ -132,3 +133,46 @@ be meaningful; it must also not defeat the erasure.
    seven years of payroll and attendance?
 5. **Who are the two approvers in practice** — is `policy_admin` the right
    capability, or does this need a dedicated one?
+
+## 8. What was actually built, and the decisions behind it
+
+The questions in §7 were delegated, so the answers taken are recorded here with
+their reasoning. Change any of them and the module is a small edit.
+
+1. **Audit history — scrubbed by value substitution.** The subject's own audit
+   rows are rewritten wherever an erased value appears in `before`, `after` or
+   `details`. The scrub set is the *union* of the current values and every value
+   the subject ever had under an erased field, read back out of their own audit
+   rows; without that a renamed employee keeps their old name and the row is
+   still identifiable. Rows about other employees are never touched. The
+   `USER_ANONYMISED` row itself carries no erased value.
+2. **`date_of_birth` — erased.** It is a quasi-identifier and
+   `date_of_joining` is the employment-relevant one, which is kept.
+3. **Dependents — in scope** (rows deleted, counted in the audit row). Free text
+   is **deferred**: `tickets.subject`, `expense_claims.description`,
+   `notifications.message`, `leave_requests.reason` and `documents.name` are left
+   in place and the audit row lists them explicitly, so the gap is recorded
+   rather than implied.
+4. **`emp_id` — kept, deliberately.** It is the join key for seven years of
+   statutory payroll/leave/attendance records, and replacing it means rewriting
+   roughly thirty foreign keys inside one irreversible operation. That is not a
+   safe first version. The residual risk is real and stated here: someone who
+   saw the data before the erasure can still recognise the row by its employee
+   ID. Closing it means a migration that rewrites every child table, and it
+   should be its own reviewed change.
+5. **The approvers** are the two distinct holders of the `policy_admin`
+   capability. A dedicated capability can be added later by editing
+   `_ROUTE_MODULES`; the rule itself lives in `anonymise.confirm_and_apply`, not
+   in the UI.
+
+Two further guards that were not in the original note and are worth knowing:
+
+- `ANONYMISATION_SALT` (≥16 characters, from the secret manager) is
+  **required**. Without it the request fails with `503` instead of falling back
+  to a weak mapping, because a guessable mapping defeats the purpose.
+- Anonymisation only ever runs against an **archived** account, so there is a
+  deliberate gap between disabling someone and erasing them, and the existing
+  session-revocation path has already run.
+
+**Reversibility:** there is none. A mistaken erasure is recovered from a backup
+taken beforehand, under a separate audited decision.

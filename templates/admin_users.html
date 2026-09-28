@@ -307,6 +307,30 @@
     </div>
 </div>
 
+
+<!-- Anonymisation Modal -->
+<div class="modal fade" id="anonModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-shield-exclamation me-2"></i>Anonymise <span id="anonUserLabel" class="text-muted fs-6"></span></h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <div class="alert alert-danger py-2 fs-6">
+                    <i class="bi bi-exclamation-triangle me-1"></i><strong>Irreversible.</strong>
+                    Name, email, phone, address, date of birth, emergency contact and dependents are erased, and the subject's own audit history is scrubbed. Department, designation, joining date and all payroll / leave / attendance records are kept, because they are statutory.
+                </div>
+                <h6 class="fs-6">Plan (nothing has been changed yet)</h6>
+                <div id="anonPlan" class="small text-muted">Loading…</div>
+                <div id="anonRequest" class="mt-3 small"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" style="border-radius:var(--button-radius);font-size:12px;padding:7px 14px;font-weight:600;" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-outline-danger" id="anonProposeBtn" onclick="proposeAnonymisation()"><i class="bi bi-file-earmark-plus me-1"></i> Request erasure</button>
+                <button type="button" class="btn btn-danger" id="anonConfirmBtn" style="display:none" onclick="confirmAnonymisation()"><i class="bi bi-shield-lock me-1"></i> Confirm as second approver</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Permissions Modal -->
 <div class="modal fade" id="permissionsModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -327,6 +351,7 @@
 <script>
 const myEmpId = {{ my_emp_id|tojson }};
 const canRevealPii = {{ can_reveal_pii|tojson }};
+const canAnonymise = {{ can_anonymise|tojson }};
 let currentPage = 1;
 let totalUsers = 0;
 const PER_PAGE = 20;
@@ -429,7 +454,8 @@ function loadUsers(page) {
             const permAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-secondary btn-sm" onclick="openPermissions('${u.emp_id}')" title="Permissions"><i class="bi bi-shield-lock"></i></button>`;
             const piiAction = u.emp_id === myEmpId || !canRevealPii ? '' : `<button class="btn btn-outline-warning btn-sm" onclick="revealPii('${u.emp_id}','${esc(u.name)}')" title="Personal data (audited)"><i class="bi bi-eye"></i></button>`;
             const policyAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-info btn-sm" onclick="openLeavePolicy('${u.emp_id}')" title="Leave policy"><i class="bi bi-calendar2-week"></i></button>`;
-            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${accessAction}${archiveAction}</div>`;
+            const anonAction = (u.status !== 'Archived' || !canAnonymise) ? '' : `<button class="btn btn-outline-danger btn-sm" onclick="openAnonymise('${u.emp_id}','${esc(u.name)}')" title="Anonymise (irreversible, two-person)"><i class="bi bi-shield-exclamation"></i></button>`;
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${anonAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -606,6 +632,56 @@ async function saveLeavePolicy() {
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     bootstrap.Modal.getInstance(document.getElementById('leavePolicyModal')).hide();
     showMsg(`Leave policy saved for ${res.emp_id}`, 'success');
+}
+let anonEmpId = null;
+let anonRequestId = null;
+
+async function openAnonymise(id, name) {
+    const r = await fetch(`/api/users/${id}/anonymise?dry_run=1`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Failed', 'error'); return; }
+    anonEmpId = id;
+    anonRequestId = null;
+    document.getElementById('anonUserLabel').textContent = `— ${id} (${esc(name)})`;
+    const plan = d.plan || {};
+    const rows = plan.rows || {};
+    document.getElementById('anonPlan').innerHTML = [
+        `Erasing: <code>${(plan.erased_fields ? Object.keys(plan.erased_fields) : []).join(', ')}</code>`,
+        `Keeping: <code>${(plan.kept_fields ? Object.keys(plan.kept_fields) : []).join(', ')}</code>`,
+        `Dependents deleted: ${rows.dependents_deleted} · open sessions closed: ${rows.sessions_closed} · audit rows to scrub: ${rows.audit_rows_scrubbed}`,
+        `Left as-is (free text): <code>${(plan.unsrubbed_free_text || []).join(', ')}</code>`,
+    ].join('<br>');
+    document.getElementById('anonRequest').innerHTML = '';
+    document.getElementById('anonProposeBtn').style.display = '';
+    document.getElementById('anonConfirmBtn').style.display = 'none';
+    new bootstrap.Modal(document.getElementById('anonModal')).show();
+}
+
+async function proposeAnonymisation() {
+    const reason = prompt('Reason for this erasure request (recorded in the audit trail):', 'offboarded, erasure requested');
+    if (reason === null) return;
+    const r = await fetch(`/api/users/${anonEmpId}/anonymise`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason })
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Failed', 'error'); return; }
+    anonRequestId = d.request_id;
+    document.getElementById('anonRequest').innerHTML =
+        `Request <code>${d.request_id}</code> is <strong>${esc(d.status)}</strong>, requested by <code>${esc(d.requested_by)}</code>.
+         A <em>different</em> administrator must confirm it before anything is erased.`;
+    document.getElementById('anonProposeBtn').style.display = 'none';
+    document.getElementById('anonConfirmBtn').style.display = '';
+}
+
+async function confirmAnonymisation() {
+    if (!confirm('Confirm the erasure? This is irreversible and a second person must be the one to click.')) return;
+    const r = await fetch(`/api/anonymisation/${anonRequestId}/confirm`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Failed', 'error'); return; }
+    bootstrap.Modal.getInstance(document.getElementById('anonModal')).hide();
+    const rows = (d.result && d.result.rows) || {};
+    showMsg(`${d.emp_id} anonymised: ${rows.dependents_deleted} dependents deleted, ${rows.sessions_closed} sessions closed, ${rows.audit_rows_scrubbed} audit rows scrubbed.`, 'success');
+    loadUsers(currentPage);
 }
 let permEmpId = null;
 let permDefaults = {};

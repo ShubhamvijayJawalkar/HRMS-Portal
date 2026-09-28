@@ -760,9 +760,31 @@ Two defects found and fixed while validating:
   mid-suite, and the resulting `429` on the CSRF-token fetch surfaced as a
   bogus "CSRF token missing or invalid" on an unrelated onboarding assertion.
 
-Validation: **111 DuckDB unit tests passed / 6 skipped**, **116 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **20 Playwright tests passed on
-DuckDB and PostgreSQL**, the clean v2.0 probe is **96/96 GET + 44/44 write**,
+### 14.8 Two-person anonymisation (implemented)
+
+`anonymise.py` implements the design in `docs/ANONYMISATION.md`: propose →
+confirm by a *different* holder of `policy_admin` → the system applies it. Only
+an archived account qualifies, `?dry_run=1` returns the plan without writing
+anything, the direct identifiers and the dependents rows are erased while
+`emp_id`, department, designation, joining date and every statutory row are kept,
+and the subject's own audit history is scrubbed by value substitution (using the
+union of the current and historical values, so a rename cannot leave the old
+name behind). `ANONYMISATION_SALT` is required rather than defaulted. The
+`USER_ANONYMISED` audit row records the fact, the counts and the category lists,
+and a test asserts it contains no erased value. The trade-offs taken on the
+operator's behalf — keeping `emp_id`, leaving free text — are recorded in the
+design note rather than left implicit.
+
+Also in this slice: `POST /api/users/import/<job_id>/run` processes one queued
+import on demand (same atomic claim, so it is safe twice and against the
+scheduler), and the browser fixture now runs the DuckDB server single-threaded
+*with the scheduler off* — a background job opening its own connection while a
+request is in flight was the original "Unique file handle conflict".
+PostgreSQL keeps a threaded server and a live scheduler.
+
+Validation: **116 DuckDB unit tests passed / 6 skipped**, **121 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 44/44 write**,
 and the CC-01 checker plus the read-only preflight both pass on that database.
 
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
@@ -801,8 +823,10 @@ and `pii_reveal` followed in §14.5.
 1. Complete the Phase 5 maintenance-window final delta sync and traffic
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
-3. Continue the FR-USR hardening follow-up. The archive/restore, directory
-   contract, permission-policy, enforcement-wiring, PII-reveal,
-   policy-derived-leave and background-import slices are implemented; the last
-   item is two-person anonymisation (a dual-approval erasure that keeps the
-   statutory records but strips the personal ones).
+3. The FR-USR follow-up is complete: archive/restore, the directory contract,
+   the permission policy and its enforcement, the audited PII reveal,
+   policy-derived leave balances, background import jobs, and two-person
+   anonymisation. The recorded open items are the trade-offs chosen in
+   `docs/ANONYMISATION.md` (keeping `emp_id` as the seven-year join key, leaving
+   free text in place), the unused `monthly_leave_grants` accrual ledger, and
+   extending `pii_reveal` to `dependents`/`candidates`.

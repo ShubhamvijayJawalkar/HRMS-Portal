@@ -40,6 +40,15 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR two-person anonymisation: propose then confirm-by-a-different-approver, "
+     "applied by the system, archived accounts only, with a dry-run plan, a required "
+     "ANONYMISATION_SALT, dependents erased and the statutory rows kept, and the subject's own "
+     "audit history scrubbed by value substitution (including historical values, so a rename "
+     "cannot leave the old name behind). Trade-offs taken on the operator's behalf - keeping "
+     "emp_id as the seven-year join key and leaving free text - are recorded in "
+     "docs/ANONYMISATION.md. Also added an on-demand import run route and made the DuckDB "
+     "browser fixture scheduler-free. DuckDB 116 passed / 6 skipped; PostgreSQL 121 passed / "
+     "1 skipped; Playwright 21 passed; probe 97/97 GET + 44/44 write."),
     ("2026-09-28", "FR-USR-04 background import jobs: POST /api/users/import now returns 202 with a "
      "queued job (5 MB / 5000-row caps, streaming validation, idempotent retry), a dispatcher claims "
      "one job per tick with a conditional status transition so several workers cannot collide, "
@@ -148,20 +157,20 @@ TASKS = [
     ("Follow-up", "FR-USR-15 inline scope checks + audited pii_reveal", "No handler branches on the session role copy; can_view_all is the CC-11 scope half; PII reveal route audited per cross-employee read", DONE),
     ("Follow-up", "FR-LEA-06/08 policy-derived leave balances", "Entitlement derived from the effective leave_policy_assignments; reserved ledger enforced; audited policy API + admin modal", DONE),
     ("Follow-up", "FR-USR-04 background bulk import jobs", "202 + queued import_jobs, single-claim dispatcher, progress/history/cancel, upload deleted, audited completion", DONE),
-    ("Follow-up", "FR-USR two-person anonymisation", "Last FR-USR item: dual-approval erasure that keeps statutory records and strips personal ones", PENDING),
+    ("Follow-up", "FR-USR two-person anonymisation", "proposed -> confirmed by a different approver -> applied; archived-only; dry run; value-scrubbed audit history; required salt; trade-offs recorded in docs/ANONYMISATION.md", DONE),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "111 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "116 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "116 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "20 passed (single-threaded server)"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "20 passed"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "116 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "121 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "121 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
     ("CI PostgreSQL job", "postgres:17 + redis services", "Unit suite on legacy (with and without Redis), browser suite, and the preflight/CC-01/probe gates on a clean v2.0 target"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "96/96 GET + 44/44 write flows; lifecycle + permission + import paths included"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0004, identity/sequence rules, required tables, and delta report generated"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "97/97 GET + 44/44 write flows; lifecycle + permission + import paths included"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0005, identity/sequence rules, required tables, and delta report generated"),
     ("Disposable Phase 5 rehearsal", "hrms_cutover_rehearsal", "ETL Phase-1/2 + CC-05 cleanup + preflight + 94/42 probe + authenticated smoke + CC-01 sequence check passed"),
 ]
 

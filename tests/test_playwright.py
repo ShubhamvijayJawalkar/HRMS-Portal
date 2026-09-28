@@ -13,6 +13,7 @@ os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{int(datet
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
+os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
 os.environ.setdefault('APP_DB', 'duckdb')
 os.environ['APP_DB_SCHEMA'] = 'legacy'
 if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
@@ -31,11 +32,22 @@ BASE_URL = 'http://localhost:8787'
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
-    # Single-threaded on purpose: DuckDB attaches a database file once per
-    # process, so two overlapping requests would raise "Unique file handle
-    # conflict". The PostgreSQL backend has no such constraint.
+    # DuckDB attaches a database file once per process, so two overlapping
+    # requests raise "Unique file handle conflict" and the server is run
+    # single-threaded there. PostgreSQL has no such constraint, so it keeps a
+    # threaded server -- which also stops a background job tick (the import
+    # dispatcher runs every 15s) from stalling the whole suite behind the only
+    # request thread.
+    _is_duckdb = os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg')
+    # On DuckDB the scheduler is off as well: a background job opens its own
+    # connection while a request is being served, and DuckDB attaches a file
+    # once per process, which is the original "Unique file handle conflict". The
+    # import test presses "run now" instead of waiting for a tick.
+    if _is_duckdb:
+        os.environ['HRMS_DISABLE_SCHEDULER'] = '1'
+    threaded = not _is_duckdb
     t = threading.Thread(target=lambda: app.run(host='127.0.0.1', port=8787, debug=False,
-                                              use_reloader=False, threaded=False), daemon=True)
+                                              use_reloader=False, threaded=threaded), daemon=True)
     t.start()
     time.sleep(2)
     yield
@@ -192,9 +204,19 @@ def test_admin_assigns_a_leave_policy(page):
     page.fill('#password', 'pass123')
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
+    # A dedicated employee: the policy must not change the balances the leave
+    # tests depend on.
+    page.evaluate("""
+        () => fetch('/api/users', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({emp_id: 'EMP904', name: 'Policy Subject',
+                email: 'emp904@company.com', department: 'MIS', role: 'Employee',
+                password: 'pass123'})
+        })
+    """)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(1500)
-    page.fill('#searchInput', 'EMP002')
+    page.fill('#searchInput', 'EMP904')
     page.wait_for_timeout(1500)
     page.click("button[title='Leave policy']")
     page.wait_for_timeout(1500)
@@ -205,7 +227,7 @@ def test_admin_assigns_a_leave_policy(page):
     page.fill('#lpAccrual', '1')
     page.fill('#lpFrom', '2020-01-01')
     with page.expect_response(
-        lambda r: r.url.endswith('/api/users/EMP002/leave-policy') and r.request.method == 'PUT'
+        lambda r: r.url.endswith('/api/users/EMP904/leave-policy') and r.request.method == 'PUT'
     ) as resp:
         page.click('#leavePolicyModal .btn-primary')
     assert resp.value.ok, f'leave policy save failed: {resp.value.status}'
@@ -218,7 +240,7 @@ def test_admin_assigns_a_leave_policy(page):
     page.goto(BASE_URL + '/logout')
     page.wait_for_timeout(1000)
     page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
+    page.fill('#empId', 'EMP904')
     page.fill('#password', 'pass123')
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
@@ -252,7 +274,8 @@ def test_admin_import_users_runs_as_a_background_job(page):
     assert resp.value.status == 202, resp.value.status
     job_id = resp.value.json()['job_id']
 
-    # The scheduler picks the job up and the UI reports the outcome.
+    # "Run now" is idempotent, so this works whether or not the scheduler is on.
+    page.evaluate(f"fetch('/api/users/import/{job_id}/run', {{method: 'POST'}}).then(r => r.status)")
     page.wait_for_function(
         "() => document.getElementById('importResult').textContent.includes('finished')",
         timeout=60000,
@@ -270,6 +293,91 @@ def test_admin_import_users_runs_as_a_background_job(page):
     assert str(job_id) in history, history
     assert 'users.csv' in history
     assert '1 imported, 1 skipped' in history, history
+
+def _login(page, emp_id):
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', emp_id)
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+
+
+def test_admin_anonymises_an_archived_user_with_two_people(page):
+    """FR-USR: the erasure is planned, proposed and confirmed by a second person.
+
+    It runs on its own employee (EMP903) and its own second administrator
+    (EMP902): erasing one of the seeded users would break the later tests that
+    log in as EMP002.
+    """
+    _login(page, 'EMP001')
+    page.evaluate("""
+        () => fetch('/api/users', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({emp_id: 'EMP902', name: 'Second Admin',
+                email: 'emp902@company.com', department: 'MIS', role: 'Admin',
+                password: 'pass123'})
+        })
+    """)
+    page.evaluate("""
+        () => fetch('/api/users', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({emp_id: 'EMP903', name: 'Erasure Subject',
+                email: 'emp903@company.com', department: 'MIS', role: 'Employee',
+                password: 'pass123'})
+        })
+    """)
+    page.goto(BASE_URL + '/admin/users')
+    page.wait_for_timeout(1500)
+    page.on('dialog', lambda dialog: dialog.accept())
+
+    # The erasure action is only offered for an archived employee.
+    page.fill('#searchInput', 'EMP903')
+    page.wait_for_timeout(1500)
+    assert page.locator("button[title='Anonymise (irreversible, two-person)']").count() == 0
+
+    page.click("button[title='Archive']")
+    page.wait_for_timeout(2500)
+    page.fill('#searchInput', 'EMP903')
+    page.wait_for_timeout(1500)
+    page.click("button[title='Anonymise (irreversible, two-person)']")
+    page.wait_for_timeout(2000)
+    assert page.is_visible('#anonModal'), 'anonymisation modal did not open'
+    plan = page.text_content('#anonPlan')
+    assert 'Erasing' in plan and 'Keeping' in plan and 'audit rows to scrub' in plan, plan
+
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/users/EMP903/anonymise') and r.request.method == 'POST'
+    ) as resp:
+        page.click('#anonProposeBtn')
+    assert resp.value.status == 201, resp.value.status
+    body = resp.value.json()
+    assert body['status'] == 'proposed' and body['requested_by'] == 'EMP001'
+    page.wait_for_timeout(1000)
+    assert page.is_visible('#anonConfirmBtn'), 'the confirm step did not appear'
+    request_id = body['request_id']
+
+    # The requester is refused: it takes a different person.
+    refused = page.evaluate(
+        f"fetch('/api/anonymisation/{request_id}/confirm', {{method: 'POST'}}).then(r => r.status)"
+    )
+    assert refused == 409, refused
+
+    # A different administrator confirms, and the system applies the erasure.
+    _login(page, 'EMP902')
+    applied = page.evaluate(
+        f"fetch('/api/anonymisation/{request_id}/confirm', {{method: 'POST'}}).then(r => r.json())"
+    )
+    assert applied['status'] == 'applied', applied
+    assert applied['confirmed_by'] == 'EMP902'
+    assert applied['result']['emp_id'] == 'EMP903'
+
+    _login(page, 'EMP001')
+    user = page.evaluate("fetch('/api/users/EMP903').then(r => r.json())")
+    assert user['name'] == 'Anonymised Employee', user
+    assert user['email'].endswith('@anonymised.invalid'), user
+    audit = page.evaluate("fetch('/api/audit-log').then(r => r.json())")
+    rows = [r for r in audit['data'] if r['action'] == 'USER_ANONYMISED']
+    assert rows, 'the erasure was not audited'
 
 def test_breaks_tab_shows_on_user_dashboard(page):
     page.goto(BASE_URL + '/login')

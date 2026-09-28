@@ -43,6 +43,7 @@ from security import (
 
 load_dotenv()
 
+import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
@@ -675,6 +676,24 @@ def init_db():
         )
     ''')
 
+
+    # ── Two-person anonymisation requests (FR-USR) ──────────────────
+    # Compatibility shape; the v2.0 target owns the identity key and JSONB.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS anonymisation_requests (
+            request_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'proposed',
+            requested_by VARCHAR,
+            confirmed_by VARCHAR,
+            plan_summary VARCHAR,
+            result_summary VARCHAR,
+            failure_reason VARCHAR,
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            confirmed_at TIMESTAMP,
+            applied_at TIMESTAMP
+        )
+    ''')
 
     # ── Background import jobs (FR-USR-04) ────────────────────────
     # Compatibility shape: the identity key of the v2.0 target becomes an
@@ -2279,9 +2298,12 @@ _ROUTE_MODULES = {
     'delete_user': 'users', 'get_user_permissions': 'users',
     'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
     'get_leave_policy': 'leaves', 'update_leave_policy': 'leaves',
+    'propose_anonymisation': 'policy_admin', 'anonymisation_status': 'policy_admin',
+    'anonymisation_list': 'policy_admin', 'confirm_anonymisation': 'policy_admin',
+    'cancel_anonymisation': 'policy_admin',
     'import_users_csv': 'import_users', 'import_users_page': 'import_users',
     'import_job_status': 'import_users', 'import_job_list': 'import_users',
-    'cancel_import_job': 'import_users',
+    'cancel_import_job': 'import_users', 'run_import_job': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
@@ -3126,6 +3148,127 @@ def reject_regularization(rid):
     return jsonify({'message': 'Rejected'}), 200
 
 
+
+@app.route('/api/users/<emp_id>/anonymise', methods=['POST'])
+@admin_required
+def propose_anonymisation(emp_id):
+    """Propose the anonymisation of an archived employee (FR-USR, first of two).
+
+    Nothing is erased here. ``?dry_run=1`` returns the plan without even
+    creating a request, which is the safety net that makes the operation
+    reviewable before a second person is asked to approve it.
+    """
+    dry_run = request.args.get('dry_run', '').lower() in ('1', 'true', 'yes', 'on')
+    conn = get_db()
+    try:
+        if dry_run:
+            return jsonify({'dry_run': True, 'plan': anonymise.plan(conn, emp_id)}), 200
+        request_row = anonymise.create_request(
+            conn, emp_id, session['emp_id'],
+            detail=(request.get_json(silent=True) or {}).get('reason'),
+        )
+    except anonymise.AnonymisationError as exc:
+        return jsonify({'error': str(exc)}), exc.status
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'USER_ANONYMISATION_REQUESTED',
+        f"Anonymisation proposed for {request_row['emp_id']} (request {request_row['request_id']})",
+        entity='anonymisation_requests', entity_id=request_row['request_id'],
+        after={'status': request_row['status']},
+    )
+    return jsonify(request_row), 201
+
+
+@app.route('/api/anonymisation/<int:request_id>', methods=['GET'])
+@admin_required
+def anonymisation_status(request_id):
+    conn = get_db()
+    try:
+        row = anonymise.get_request(conn, request_id)
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'Anonymisation request not found'}), 404
+    return jsonify(row), 200
+
+
+@app.route('/api/anonymisation', methods=['GET'])
+@admin_required
+def anonymisation_list():
+    """Recent anonymisation requests (the audit view an admin needs)."""
+    limit = request.args.get('limit', 20, type=int)
+    conn = get_db()
+    try:
+        return jsonify({'requests': anonymise.list_requests(conn, limit)}), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/anonymisation/<int:request_id>/confirm', methods=['POST'])
+@admin_required
+def confirm_anonymisation(request_id):
+    """Second approver. The system applies the erasure from here on.
+
+    The confirmer must be a different person from the requester — that is the
+    two-person control, and it is enforced in the module, not the UI. Applying is
+    idempotent, so a retry after a crash converges instead of double-erasing.
+    """
+    conn = get_db()
+    try:
+        subject = conn.execute(
+            'SELECT emp_id FROM anonymisation_requests WHERE request_id = ?', [request_id]
+        ).fetchone()
+        row = anonymise.confirm_and_apply(conn, request_id, session['emp_id'])
+    except anonymise.AnonymisationError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), exc.status
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    # The audit row records the *fact* of the erasure and the counts. It must
+    # never carry an erased value, or the control would defeat itself.
+    audit_log(
+        session['emp_id'], 'USER_ANONYMISED',
+        f"Anonymised {row['emp_id']} (request {request_id}, confirmed by "
+        f"{row['confirmed_by']}); audit history of the subject was value-scrubbed",
+        entity='anonymisation_requests', entity_id=request_id,
+        before={'status': 'archived'},
+        after={
+            'emp_id': row['emp_id'],
+            'status': 'anonymised',
+            'rows': (row.get('result') or {}).get('rows'),
+            'erased_fields': (row.get('result') or {}).get('erased_fields'),
+            'kept_fields': (row.get('result') or {}).get('kept_fields'),
+            'unsrubbed_free_text': (row.get('result') or {}).get('unsrubbed_free_text'),
+        },
+    )
+    if subject:
+        _revoke_redis_sessions(subject[0])
+    return jsonify(row), 200
+
+
+@app.route('/api/anonymisation/<int:request_id>/cancel', methods=['POST'])
+@admin_required
+def cancel_anonymisation(request_id):
+    conn = get_db()
+    try:
+        row = anonymise.cancel_request(conn, request_id, session['emp_id'])
+    except anonymise.AnonymisationError as exc:
+        return jsonify({'error': str(exc)}), exc.status
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'USER_ANONYMISATION_CANCELLED',
+        f'Anonymisation request {request_id} cancelled',
+        entity='anonymisation_requests', entity_id=request_id,
+        after={'status': row['status']},
+    )
+    return jsonify(row), 200
+
 # ══════════════════════════════════════════════════════════════════════
 #  CSV IMPORT
 # ══════════════════════════════════════════════════════════════════════
@@ -3204,6 +3347,21 @@ def cancel_import_job(job_id):
         return jsonify({
             'error': f"Job is {existing['status']} and can no longer be cancelled",
         }), 409
+    return jsonify(job), 200
+
+
+@app.route('/api/v1/users/import/<int:job_id>/run', methods=['POST'])
+@app.route('/api/users/import/<int:job_id>/run', methods=['POST'])
+@admin_required
+def run_import_job(job_id):
+    """Process one queued import now instead of waiting for the next tick.
+
+    The claim is the same conditional transition the dispatcher uses, so this is
+    safe to press twice and safe against the scheduler running concurrently.
+    """
+    job = imports.dispatch_job(job_id)
+    if not job:
+        return jsonify({'error': 'Import job not found'}), 404
     return jsonify(job), 200
 
 
@@ -7745,13 +7903,16 @@ def admin_users():
     # The PII action is only rendered for an actor that can actually use it.
     conn = get_db()
     try:
-        can_reveal_pii = policy.can(policy.current_actor(conn), 'pii_reveal', conn=conn)
+        actor = policy.current_actor(conn)
+        can_reveal_pii = policy.can(actor, 'pii_reveal', conn=conn)
+        can_anonymise = policy.can(actor, 'policy_admin', conn=conn)
     finally:
         conn.close()
     return render_template(
         'admin_users.html',
         my_emp_id=session['emp_id'],
         can_reveal_pii=can_reveal_pii,
+        can_anonymise=can_anonymise,
     )
 
 

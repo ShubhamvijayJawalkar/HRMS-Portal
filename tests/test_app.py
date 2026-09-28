@@ -759,6 +759,264 @@ def test_user_partial_update_preserves_fields_and_audits_role(client):
         _cleanup_user_contract_rows('EMP907')
 
 
+@pytest.fixture(autouse=True)
+def _anonymisation_salt():
+    """Anonymisation refuses to run without a salt; give the whole suite one."""
+    os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
+    yield
+
+
+def _clear_anonymisation_rows():
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM anonymisation_requests")
+        conn.execute("DELETE FROM audit_log WHERE entity = 'anonymisation_requests'")
+        conn.execute("DELETE FROM audit_log WHERE action LIKE 'USER_ANONYMIS%'")
+    finally:
+        conn.close()
+
+
+# ── FR-USR two-person anonymisation ────────────────────────────────────────
+
+def test_anonymisation_refuses_without_a_strong_salt(client):
+    """A missing/short salt would make the mapping guessable, so it stops."""
+    import os
+
+    import anonymise
+
+    _set_admin_session(client, 99874)
+    try:
+        _create_policy_user(client, 'EMP960', role='Employee')
+        assert client.post('/api/users/EMP960/archive').status_code == 200
+        previous = os.environ.pop('ANONYMISATION_SALT', None)
+        try:
+            os.environ['ANONYMISATION_SALT'] = 'short'
+            refused = client.post('/api/users/EMP960/anonymise')
+            assert refused.status_code == 503
+            assert 'ANONYMISATION_SALT' in refused.get_json()['error']
+        finally:
+            if previous is not None:
+                os.environ['ANONYMISATION_SALT'] = previous
+        assert anonymise.MIN_SALT_LENGTH == 16
+    finally:
+        _clear_anonymisation_rows()
+        _cleanup_user_contract_rows('EMP960')
+
+
+def test_anonymisation_is_two_person_and_irreversible(client):
+    """Propose -> confirm by someone else -> applied. One person cannot do it."""
+    import os
+
+    os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
+    _set_admin_session(client, 99873)
+    try:
+        _create_policy_user(client, 'EMP961', role='Employee')
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET address = '12 Test Road', phone = '9999999999', "
+            "emergency_contact_name = 'Kin', emergency_contact_phone = '8888888888' "
+            "WHERE emp_id = 'EMP961'"
+        )
+        conn.execute(
+            "INSERT INTO dependents (dependent_id, emp_id, name, relationship, date_of_birth) "
+            "VALUES (-700021, 'EMP961', 'Dep One', 'Child', '2015-05-05')"
+        )
+        conn.close()
+        assert client.post('/api/users/EMP961/archive').status_code == 200
+
+        # A dry run changes nothing at all.
+        dry = client.post('/api/users/EMP961/anonymise?dry_run=1')
+        assert dry.status_code == 200
+        plan = dry.get_json()['plan']
+        assert plan['rows']['dependents_deleted'] == 1
+        assert plan['erased_fields']['address'] == '12 Test Road'
+        conn = get_db()
+        row = conn.execute("SELECT name, address FROM users WHERE emp_id = 'EMP961'").fetchone()
+        conn.close()
+        assert row == ('Policy EMP961', '12 Test Road'), 'the dry run wrote something'
+
+        # An active account can never be anonymised, whatever the approval.
+        proposed = client.post('/api/users/EMP961/anonymise', json={'reason': 'offboarded 2026'})
+        assert proposed.status_code == 201, proposed.get_json()
+        request_id = proposed.get_json()['request_id']
+        assert proposed.get_json()['status'] == 'proposed'
+        assert proposed.get_json()['requested_by'] == 'EMP001'
+
+        # The requester cannot confirm their own request: the two-person control.
+        self_confirm = client.post(f'/api/anonymisation/{request_id}/confirm')
+        assert self_confirm.status_code == 409
+        assert 'second person' in self_confirm.get_json()['error']
+        conn = get_db()
+        assert conn.execute(
+            "SELECT name FROM users WHERE emp_id = 'EMP961'"
+        ).fetchone()[0] == 'Policy EMP961', 'a self-confirm erased the record'
+        conn.close()
+
+        # A *different* admin confirms, and the system applies the erasure.
+        _create_policy_user(client, 'EMP965', role='Admin')
+        _login_as(client, 'EMP965', 'Admin', 99872)
+        applied = client.post(f'/api/anonymisation/{request_id}/confirm')
+        assert applied.status_code == 200, applied.get_json()
+        payload = applied.get_json()
+        assert payload['status'] == 'applied'
+        assert payload['confirmed_by'] == 'EMP965'
+        assert payload['result']['rows']['dependents_deleted'] == 1
+
+        conn = get_db()
+        subject = conn.execute(
+            "SELECT emp_id, name, email, phone, address, date_of_birth, "
+            "emergency_contact_name, emergency_contact_phone, department, allow_login "
+            "FROM users WHERE emp_id = 'EMP961'"
+        ).fetchone()
+        dependents = conn.execute(
+            "SELECT COUNT(*) FROM dependents WHERE emp_id = 'EMP961'"
+        ).fetchone()[0]
+        conn.close()
+        # Direct identifiers gone...
+        assert subject[1] == 'Anonymised Employee'
+        assert subject[2].endswith('@anonymised.invalid')
+        assert subject[3] is None and subject[4] is None
+        assert subject[5] is None and subject[6] is None and subject[7] is None
+        assert subject[8] == 'MIS'          # kept: the statutory record survives
+        assert subject[9] == 0              # and the account cannot be used
+        assert dependents == 0
+
+        # The audit row for the erasure records the fact and no erased value.
+        conn = get_db()
+        audit = conn.execute(
+            'SELECT "before", "after", details FROM audit_log '
+            "WHERE action = 'USER_ANONYMISED' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        blob = ' '.join(str(part) for part in audit)
+        conn.close()
+        for leaked in ('12 Test Road', '9999999999', 'Policy EMP961', 'Kin', '8888888888'):
+            assert leaked not in blob, f'the audit row leaked {leaked!r}'
+        assert json.loads(audit[1])['status'] == 'anonymised'
+        assert json.loads(audit[1])['rows']['dependents_deleted'] == 1
+        assert 'unsrubbed_free_text' in json.loads(audit[1])
+    finally:
+        _clear_anonymisation_rows()
+        _cleanup_user_contract_rows('EMP961', 'EMP965')
+
+
+def test_anonymisation_scrubs_the_subjects_own_audit_history(client):
+    """Value substitution keeps the trail of what happened, not the personal data."""
+    import os
+
+    os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
+    _set_admin_session(client, 99871)
+    try:
+        _create_policy_user(client, 'EMP962', role='Employee')
+        assert client.put(
+            '/api/users/EMP962', json={'name': 'Renamed Person', 'designation': 'Analyst'}
+        ).status_code == 200
+        assert client.post('/api/users/EMP962/archive').status_code == 200
+        request_id = client.post(
+            '/api/users/EMP962/anonymise'
+        ).get_json()['request_id']
+        _create_policy_user(client, 'EMP966', role='Admin')
+        _login_as(client, 'EMP966', 'Admin', 99870)
+        assert client.post(f'/api/anonymisation/{request_id}/confirm').status_code == 200
+
+        conn = get_db()
+        rows = conn.execute(
+            'SELECT details, "before", "after" FROM audit_log WHERE entity_id = ?',
+            ['EMP962'],
+        ).fetchall()
+        conn.close()
+        assert rows, 'the subject had no audit history to scrub'
+        blob = ' '.join(str(part) for row in rows for part in row)
+        assert 'Renamed Person' not in blob
+        assert 'ANON-' in blob, 'the scrubbed value should be the pseudonym'
+
+        # Another employee's history is left completely alone.
+        _set_admin_session(client, 99869)
+        _create_policy_user(client, 'EMP969', role='Employee')
+        assert client.put(
+            '/api/users/EMP969', json={'name': 'Someone Else Entirely'}
+        ).status_code == 200
+        conn = get_db()
+        leaked = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE entity = 'users' AND entity_id = 'EMP969' "
+            "AND (details LIKE '%ANON-%' OR details LIKE '%Renamed Person%')"
+        ).fetchone()[0]
+        name_intact = conn.execute(
+            "SELECT name FROM users WHERE emp_id = 'EMP969'"
+        ).fetchone()[0]
+        conn.close()
+        assert leaked == 0, 'the scrub leaked into another employee\'s rows'
+        assert name_intact == 'Someone Else Entirely'
+    finally:
+        _clear_anonymisation_rows()
+        _cleanup_user_contract_rows('EMP962', 'EMP966', 'EMP969')
+
+
+def test_anonymisation_is_idempotent_and_guards_the_states(client):
+    import os
+
+    os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
+    _set_admin_session(client, 99870)
+    try:
+        _create_policy_user(client, 'EMP963', role='Employee')
+        # Only an archived account qualifies.
+        assert client.post('/api/users/EMP963/anonymise').status_code == 409
+        assert 'archived' in client.post('/api/users/EMP963/anonymise').get_json()['error']
+        assert client.post('/api/users/EMP963/archive').status_code == 200
+
+        first = client.post('/api/users/EMP963/anonymise').get_json()['request_id']
+        # A second open request for the same employee is refused.
+        assert client.post('/api/users/EMP963/anonymise').status_code == 409
+        # Cancelling only works while proposed.
+        assert client.post(f'/api/anonymisation/{first}/cancel').status_code == 200
+        assert client.post(f'/api/anonymisation/{first}/cancel').status_code == 409
+        # After cancelling, a new request can be raised.
+        second = client.post('/api/users/EMP963/anonymise').get_json()['request_id']
+        assert second != first
+        _create_policy_user(client, 'EMP967', role='Admin')
+        _login_as(client, 'EMP967', 'Admin', 99866)
+        assert client.post(f'/api/anonymisation/{second}/confirm').status_code == 200
+        # Confirming an applied request replays instead of erasing again.
+        replay = client.post(f'/api/anonymisation/{second}/confirm')
+        assert replay.status_code == 200
+        assert replay.get_json()['status'] == 'applied'
+        assert client.post(f'/api/anonymisation/{second}/cancel').status_code == 409
+        assert client.get('/api/anonymisation/999999').status_code == 404
+        assert client.post('/api/anonymisation/999999/confirm').status_code == 404
+        listed = client.get('/api/anonymisation').get_json()['requests']
+        assert any(row['request_id'] == second for row in listed)
+    finally:
+        _clear_anonymisation_rows()
+        _cleanup_user_contract_rows('EMP963', 'EMP967')
+
+
+def test_anonymisation_needs_the_policy_admin_module(client):
+    """Denying `policy_admin` removes the whole erasure surface."""
+    _set_admin_session(client, 99869)
+    try:
+        _create_policy_user(client, 'EMP964', role='Admin')
+        _create_policy_user(client, 'EMP968', role='Employee')
+        assert client.post('/api/users/EMP968/archive').status_code == 200
+        # An admin without `policy_admin` cannot even *plan* an erasure.
+        assert client.put(
+            '/api/users/EMP964/permissions', json={'modules': {'policy_admin': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP964', 'Admin', 99866)
+        assert client.post('/api/users/EMP968/anonymise?dry_run=1').status_code in (302, 403)
+        assert client.post('/api/users/EMP968/anonymise').status_code in (302, 403)
+        assert client.get('/api/anonymisation').status_code in (302, 403)
+        # ...and with the capability the plan is readable.
+        _set_admin_session(client, 99867)
+        assert client.put(
+            '/api/users/EMP964/permissions', json={'modules': {'policy_admin': True}}
+        ).status_code == 200
+        _login_as(client, 'EMP964', 'Admin', 99865)
+        assert client.post('/api/users/EMP968/anonymise?dry_run=1').status_code == 200
+    finally:
+        _clear_permission_rows('EMP964')
+        _clear_anonymisation_rows()
+        _cleanup_user_contract_rows('EMP964', 'EMP968')
+
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):

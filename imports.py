@@ -260,6 +260,49 @@ def cancel_job(job_id, actor_emp_id) -> dict | None:
     return job
 
 
+def dispatch_job(job_id) -> dict | None:
+    """Claim and process one *specific* job now (the "run it" button).
+
+    The same conditional claim as :func:`dispatch_once`, so it is safe when the
+    scheduler tick races this call: whoever wins the transition does the work
+    and the other one gets the finished job back.
+    """
+    get_db, _ = _from_app()
+    conn = get_db()
+    if not _table_exists(conn):
+        conn.close()
+        return None
+    now = datetime.now()
+    try:
+        row = conn.execute(
+            "SELECT job_id, stored_path, status FROM import_jobs WHERE job_id = ?", [job_id]
+        ).fetchone()
+        if not row:
+            return None
+        if row[2] in TERMINAL:
+            return _read_job(conn, job_id)          # already finished
+        claimed = conn.execute(
+            "UPDATE import_jobs SET status = 'running', started_at = ? "
+            "WHERE job_id = ? AND status = 'pending'",
+            [now, job_id],
+        )
+        if not claimed.rowcount:
+            return _read_job(conn, job_id)          # the scheduler won the race
+        path = row[1]
+    finally:
+        conn.close()
+    try:
+        _process(job_id, path)
+    except Exception as exc:
+        _fail(job_id, f'{type(exc).__name__}: {str(exc)[:400]}')
+        _discard_file(path)
+    conn = get_db()
+    try:
+        return _read_job(conn, job_id)
+    finally:
+        conn.close()
+
+
 def dispatch_once() -> str | None:
     """Claim and process at most one job. Returns the processed job id.
 

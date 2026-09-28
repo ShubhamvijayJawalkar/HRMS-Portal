@@ -62,6 +62,9 @@ services:
       APP_DB_SCHEMA: public
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-hrms}
       REDIS_URL: redis://redis:6379/0
+      # Required only to anonymise an employee (FR-USR); without it the
+      # anonymisation routes refuse to run rather than use a weak mapping.
+      ANONYMISATION_SALT: ${ANONYMISATION_SALT:-}
       DB_FILE: /data/hrms.duckdb
       PORT: 10000
     depends_on:

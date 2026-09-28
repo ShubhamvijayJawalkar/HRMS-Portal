@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 111 on DuckDB, 116 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2.5 min, 20 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 116 on DuckDB, 121 on PostgreSQL)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,14 +28,18 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (111 on DuckDB, 116 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (116 on DuckDB, 121 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
-- `tests/test_playwright.py` — Playwright browser tests (20 tests)
+- `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
-- The browser fixture runs the dev server **single-threaded** on DuckDB (see the
-  FR-LEA section: DuckDB attaches a file once per process)
+- The browser fixture runs the dev server **single-threaded on DuckDB and with
+  the scheduler off** (DuckDB attaches a file once per process, so an
+  overlapping request or a background job collides); PostgreSQL gets a threaded
+  server and a live scheduler
+- `ANONYMISATION_SALT` is set for both suites (anonymisation refuses to run
+  without one)
 - Each browser test logs in fresh, waits 3-5s for session to stabilize
 - Use `wait_until='commit'` for `goto` when page redirects are expected
 - Use `page.evaluate()` for direct API calls when page JS doesn't load properly (e.g., leaves page JS with CDN dependency issues)
@@ -310,8 +314,10 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: two-person anonymisation (the only FR-USR item
-  left).
+- **Every FR-USR item is now implemented.** The open follow-ups are the
+  recorded trade-offs above (keeping `emp_id`, leaving free text), the
+  `monthly_leave_grants` accrual ledger, and extending `pii_reveal` to
+  `dependents`/`candidates`.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -548,6 +554,58 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   Redis, 20 browser tests, and preflight + CC-01 + probe green on the clean v2.0
   target.
 - Run `36426274705` is green on both jobs.
+
+## FR-USR two-person anonymisation (`anonymise.py`)
+- The last FR-USR item. Anonymisation is a **two-person, irreversible** state
+  machine in the database, not a UI convention: `proposed → confirmed →
+  applied`, the confirmer must be a *different* user (`409` on a self-confirm),
+  and only an **archived** account qualifies (`409` otherwise, so there is a
+  deliberate gap between disabling someone and erasing them).
+- `POST /api/users/<id>/anonymise?dry_run=1` returns the plan and writes
+  nothing — that is the safety net that makes the operation reviewable before a
+  second person is asked to approve it. The admin user list shows the action
+  only for archived rows and only when the actor holds `policy_admin`.
+- What is erased: `name`, `email`, `phone`, `date_of_birth`, `address`,
+  `emergency_contact_name`, `emergency_contact_phone`; the `dependents` rows
+  (a third party with no statutory retention); any open session is closed and
+  `allow_login`/`allow_breaks` go to 0. What is kept: `emp_id`, department,
+  designation, grade, joining date and every payroll / leave / attendance /
+  break row.
+- **The audit history of the subject is scrubbed by value substitution**, and
+  the scrub set is the union of the *current* values and every value the subject
+  ever had under an erased field, read back out of their own audit rows — a
+  renamed employee would otherwise keep their old name in the log and the
+  "anonymised" row would still be trivially identifiable. A test covers exactly
+  that case, and another asserts another employee's rows are untouched.
+- The `USER_ANONYMISED` audit row records the *fact*, the counts and the
+  category lists, and is asserted to contain no erased value — the record of the
+  erasure must not defeat it. `ANONYMISATION_SALT` (≥16 chars, from the secret
+  manager) is **required**: without it the operation returns `503` rather than
+  falling back to a weak mapping.
+- Idempotent by construction (`apply` is safe to re-run and a confirm on an
+  applied request replays), and the state guards are covered: a second open
+  request for the same employee is `409`, cancel only works while `proposed`.
+- Two trade-offs recorded in `docs/ANONYMISATION.md` rather than hidden:
+  `emp_id` is **kept** (it is the join key for seven years of statutory records;
+  rewriting ~30 foreign keys in one operation is not a safe first version, and
+  the residual insider-recognition risk is stated), and free text
+  (`tickets.subject`, `expenses.description`, notification messages, leave
+  reasons) is **left as is** — it cannot be scrubbed reliably and it is the
+  operational record; the audit row lists exactly which tables those are.
+- New table `anonymisation_requests` via Alembic revision
+  `0005_anonymisation_requests` (identity PK, `JSONB` plan/result summaries)
+  plus the compatibility DDL; the cutover preflight expects that head.
+- New: `POST /api/users/import/<job_id>/run` processes one queued import now
+  instead of waiting for the tick (same atomic claim, so it is safe against the
+  scheduler and safe to press twice). This also made the browser suite
+  deterministic: on DuckDB the scheduler is now off during the run, because a
+  background job opening its own connection while a request is in flight is the
+  original "Unique file handle conflict". PostgreSQL keeps a threaded server and
+  a live scheduler.
+- 5 new unit tests + 1 new Playwright test. DuckDB is 116 passed / 6 skipped;
+  PostgreSQL 121 passed / 1 skipped (also with Redis); Playwright 21/21 on both
+  backends (DuckDB run twice for stability); the clean v2.0 probe is 97/97 GET
+  + 44/44 write, and the CC-01 checker and preflight pass on it.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
