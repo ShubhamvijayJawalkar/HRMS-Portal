@@ -511,12 +511,36 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     # FR-USR-01: employee IDs are ``EMP`` + >=3 digits (app.py ``_EMP_ID_RE``).
     uniq = f"EMP{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+    # Clear residue from an earlier probe run so the create flow stays a 201
+    # (and so the permission override rows below never accumulate).
+    with psycopg.connect(pg_dsn) as probe_pc:
+        probe_pc.execute("DELETE FROM user_permissions WHERE emp_id = %s", [uniq])
+        probe_pc.execute("DELETE FROM audit_log WHERE entity_id = %s", [uniq])
+        probe_pc.execute("DELETE FROM users WHERE emp_id = %s", [uniq])
 
     def create_user():
         return _post(cl_a, tok_a, "/api/users",
                      {"emp_id": uniq, "name": "Probe Tester", "email": f"{uniq.lower()}@company.com",
                       "department": "MIS", "role": "Employee", "password": "pass123"}).status_code
     run("users(create)", create_user)
+
+    # FR-USR-09: user_permissions is an identity key with a BOOLEAN flag on
+    # v2.0 (INTEGER + no sequence on the compat schema) and the route writes
+    # ints, so this exercises the allocator and the boolean adapter together.
+    def put_permissions():
+        return _put(cl_a, tok_a, f"/api/users/{uniq}/permissions",
+                    {"modules": {"tickets": False, "goals": True}}).status_code
+    run("user-permissions(put)", put_permissions)
+
+    def get_permissions():
+        body = cl_a.get(f"/api/users/{uniq}/permissions").get_json() or {}
+        overrides = body.get("overrides") or {}
+        effective = body.get("effective") or {}
+        if (overrides.get("tickets") is False and effective.get("tickets") is False
+                and effective.get("breaks") is True):
+            return 200
+        return 409
+    run("user-permissions(get)", get_permissions)
 
     def approve_lunch():
         rows = cl_a.get("/api/break-approvals").get_json() or []

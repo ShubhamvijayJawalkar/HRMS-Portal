@@ -663,18 +663,51 @@ self-actions with `409`, and retain payroll/audit history; login rejects
   `uq_users_email_ci` in `0001_baseline`; DuckDB/`legacy` rely on the API
   pre-check.
 
-Validation: **81 DuckDB unit tests passed / 5 skipped**, **85 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **16 Playwright tests passed on
-DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 42/42
+Validation: **90 DuckDB unit tests passed / 6 skipped**, **95 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **17 Playwright tests passed on
+DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 44/44
 write flows**.
+
+### 14.3 Permission policy (implemented, enforcement wiring still pending)
+
+`policy.py` now owns the role → module matrix and the resolution order:
+
+1. a module outside the 27-module list **fails closed** (deny);
+2. an override row with `allow = FALSE` denies — including for Admin/Super Admin;
+3. an override row with `allow = TRUE` grants, lifting a role-default deny;
+4. otherwise the role default applies; an unknown role denies everything.
+
+`user_permissions` had no rows and no read path before this change, so an empty
+table resolves to exactly `ROLE_DEFAULTS[role]` and **no existing authorization
+outcome changes**. Two new routes carry the feature —
+`GET`/`PUT /api/users/<emp_id>/permissions`, where the GET separates
+`defaults` / `overrides` / `effective` (so an admin can see why a permission is
+on) and the PUT is a full replace of the override set. Guards: self-edit and
+blocked/archived targets are `409`, unknown modules and non-boolean values are
+`400`, an actor without `policy_admin` is `403`, and a change that would leave
+no administrator able to manage users is refused. Every change is audited with
+the before/after maps and an added/removed/changed summary. The admin user list
+exposes the same matrix in a modal that stores only the differences from the
+role default.
+
+`perm_id` is allocated through the sequence-safe allocator (the compatibility
+column has no sequence) and `allow` is written as an int, which the adapter
+rewrites for the v2.0 `BOOLEAN` column — verified by the new probe flows
+`user-permissions(put|get)` on a clean v2.0 database and by a PG-gated test that
+asserts both column shapes.
+
+Still pending (deliberately separate commit): the decorators, the remaining
+inline role checks, and `templates/_navbar.html` keep their own comparisons, so
+`policy.can()` is not yet the enforcement point, and `pii_reveal` is modelled
+but not yet applied to any read path.
 
 ## 15. Next steps
 
 1. Complete the Phase 5 maintenance-window final delta sync and traffic
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
-3. Continue the FR-USR hardening follow-up. The archive/restore and directory
-   contract slices are implemented; next add permission-policy evaluation
-   (`user_permissions` is DDL-only today; the navbar and the API duplicate
-   role checks), policy-derived leave balances, background bulk/import jobs, and
-   two-person anonymisation.
+3. Continue the FR-USR hardening follow-up. The archive/restore, directory
+   contract, and permission-policy (API + matrix) slices are implemented; next
+   wire `policy.can()` into the decorators, the inline role checks, and
+   `_navbar.html` (which still duplicates the matrix), then add policy-derived
+   leave balances, background bulk/import jobs, and two-person anonymisation.

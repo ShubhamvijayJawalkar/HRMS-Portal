@@ -114,6 +114,49 @@ def test_admin_create_user(page):
     body = page.text_content('#usersTableBody')
     assert 'EMP901' in body, f'EMP901 not found in {body}'
 
+def test_admin_edits_user_permissions(page):
+    """FR-USR-09: the permissions modal reads defaults and stores an override."""
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+    page.goto(BASE_URL + '/admin/users')
+    page.wait_for_timeout(1500)
+    page.fill('#searchInput', 'EMP002')
+    page.wait_for_timeout(1500)
+    page.click("button[title='Permissions']")
+    page.wait_for_timeout(1500)
+    assert page.is_visible('#perm-tickets'), 'permission grid did not render'
+    # The Employee role default for tickets is allowed; deny it as an override.
+    assert page.is_checked('#perm-tickets')
+    page.uncheck('#perm-tickets')
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/users/EMP002/permissions') and r.request.method == 'PUT'
+    ) as resp:
+        page.click('#permissionsModal .btn-primary')
+    assert resp.value.ok, f'Permission update failed: {resp.value.status}'
+    payload = resp.value.json()
+    assert payload['overrides'] == {'tickets': False}
+    assert payload['effective']['tickets'] is False
+    # Everything else keeps the role default (no override row).
+    assert payload['effective']['breaks'] is True
+    page.wait_for_timeout(1000)
+
+    # Re-opening shows the stored override, and clearing it reverts to default.
+    page.click("button[title='Permissions']")
+    page.wait_for_timeout(1500)
+    assert not page.is_checked('#perm-tickets')
+    page.check('#perm-tickets')
+    page.click('#permissionsModal .btn-primary')
+    page.wait_for_timeout(1500)
+    state = page.evaluate(
+        "fetch('/api/users/EMP002/permissions').then(r => r.json())"
+    )
+    assert state['overrides'] == {}, state['overrides']
+    assert state['effective']['tickets'] is True
+
+
 def test_breaks_tab_shows_on_user_dashboard(page):
     page.goto(BASE_URL + '/login')
     page.fill('#empId', 'EMP002')

@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 81 on DuckDB, 85 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 90 on DuckDB, 95 on PostgreSQL)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 17 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,9 +28,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (81 on DuckDB, 85 on PostgreSQL; the
-  5 PG-gated compatibility/public tests skip on DuckDB)
-- `tests/test_playwright.py` — Playwright browser tests (16 tests)
+- `tests/test_app.py` — Flask unit tests (90 on DuckDB, 95 on PostgreSQL; the
+  6 PG-gated compatibility/public tests skip on DuckDB)
+- `tests/test_playwright.py` — Playwright browser tests (17 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
@@ -290,9 +290,8 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   `test_user_create_validation_and_email_uniqueness`,
   `test_user_partial_update_preserves_fields_and_audits_role`,
   `test_user_import_rejects_rows_that_break_the_directory_contract`). DuckDB
-  suite is 81 passed / 5 skipped; PostgreSQL is 85 passed / 1 skipped (also with
-  Redis); Playwright is 16/16 on both backends. The public-flip probe stays
-  green (94/94 GET + 42/42 writes).
+  suite is 81 passed / 5 skipped at this point; the current totals are 90/6
+  (DuckDB) and 95/1 (PostgreSQL), see the permission section below.
 - The CSV import (`POST /api/users/import`) now validates every row through the
   same contract, reports `imported`/`skipped`/`errors` (spreadsheet row
   numbers, first 20 shown) instead of inserting silently, and
@@ -309,8 +308,52 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: permission-policy evaluation, policy-derived leave
-  balances, bulk/import jobs, and two-person anonymisation.
+- Remaining follow-up work: wiring `policy.can()` into the decorators and the
+  navbar, policy-derived leave balances, background bulk/import jobs, and
+  two-person anonymisation.
+
+## FR-USR-09 permission policy (`policy.py`)
+- `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
+  resolution order: unknown module → **deny**; an override row with
+  `allow = FALSE` → deny (beats the role default, including for
+  Admin/Super Admin); an override row with `allow = TRUE` → grant (lifts a
+  default deny); otherwise the role default. An unknown role denies everything.
+- **Backward-compat invariant:** `user_permissions` has no rows today, and an
+  empty table resolves to exactly `ROLE_DEFAULTS[role]`, so introducing the
+  module cannot change an existing authorization outcome.
+- `policy.current_actor(conn)` resolves the actor's `emp_id`/`role`/`department`
+  from the **database**, never from the session copy (which goes stale on a role
+  change). `policy.can(actor, module, resource, conn=...)` is the CC-11
+  signature; scope (`self`/reports/department/all) is the `resource` argument,
+  not a column.
+- New routes: `GET` and `PUT /api/users/<emp_id>/permissions` (`@admin_required`).
+  The GET returns `modules`, `defaults`, `overrides` and `effective` separately,
+  so an admin can see *why* a permission is on. The PUT is a **full replace** of
+  the override set: a listed module is upserted, an absent module's row is
+  deleted and the user reverts to the role default.
+- Guards: self-edit `409`; blocked/archived target `409`; unknown module or
+  non-boolean `allow` `400`; actor without `policy_admin` `403`; and a change
+  that would leave **no** administrator able to manage `users`/`import_users` is
+  refused with `409` (anti-lockout).
+- Writes allocate `perm_id` through `_next_generated_id` (the compat
+  `perm_id INTEGER PRIMARY KEY` has no sequence) and store `allow` as `int`, so
+  the v2.0 `BOOLEAN` identity column is handled by the existing adapter rewrites.
+  Reads use `bool(row)` and treat a NULL `allow` as a deny.
+- The admin user list has a **Permissions** action: a modal renders all 27
+  modules with the current effective value, marks real overrides, and stores
+  only the differences from the role default.
+- Deliberate widenings in the matrix (they become real when the decorators are
+  wired): Team Leader may use leaves/regularization/goals/performance/documents
+  and approve their own team's items; HR may administer holidays/expenses.
+- 9 new unit tests + 1 PG-gated adapter test, and 1 new Playwright test.
+  DuckDB suite is 90 passed / 6 skipped; PostgreSQL is 95 passed / 1 skipped
+  (also with Redis); Playwright is 17/17 on both backends. The public-flip probe
+  gained `user-permissions(put|get)` write flows: **94/94 GET + 44/44 write**.
+- **Not done yet (next slice):** the decorators (`admin_required`,
+  `hr_or_admin_required`, `finance_or_admin_required`, `department_required`),
+  the ~15 inline role checks, and `templates/_navbar.html` still use their own
+  role comparisons, so `can()` is not yet the enforcement point. `pii_reveal` is
+  modelled but no read path is gated by it yet — do not claim that control.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

@@ -781,6 +781,313 @@ def test_user_import_rejects_rows_that_break_the_directory_contract(client):
         _cleanup_user_contract_rows('EMP908', 'EMP909', 'EMP910', 'BAD1')
 
 
+# ── FR-USR-09 / FR-USR-15 permission policy ──────────────────────────────
+
+def _create_policy_user(client, emp_id, role='Employee'):
+    response = client.post('/api/users', json={
+        'emp_id': emp_id, 'name': f'Policy {emp_id}',
+        'email': f'{emp_id.lower()}@company.com',
+        'department': 'MIS', 'role': role, 'password': 'policy-pass-123',
+    })
+    assert response.status_code == 201, response.get_json()
+
+
+def _login_as(client, emp_id, role, session_id):
+    with client.session_transaction() as sess:
+        sess.clear()
+        sess['emp_id'] = emp_id
+        sess['name'] = emp_id
+        sess['role'] = role
+        sess['department'] = 'MIS'
+        sess['session_id'] = session_id
+
+
+def _clear_permission_rows(*emp_ids):
+    if not emp_ids:
+        return
+    placeholders = ','.join('?' for _ in emp_ids)
+    conn = get_db()
+    try:
+        conn.execute(f"DELETE FROM user_permissions WHERE emp_id IN ({placeholders})", list(emp_ids))
+        conn.execute(
+            f"DELETE FROM audit_log WHERE entity = 'user_permissions' AND entity_id IN ({placeholders})",
+            list(emp_ids),
+        )
+    finally:
+        conn.close()
+
+
+def test_role_defaults_cover_every_module_and_deny_unknown_roles():
+    """The SRS matrix is complete, and an unknown role is never guessed around."""
+    import policy
+
+    assert set(policy.ROLE_DEFAULTS) == {
+        'Employee', 'Team Leader', 'HR', 'Finance', 'Admin', 'Super Admin'
+    }
+    for role, cells in policy.ROLE_DEFAULTS.items():
+        assert set(cells) == policy.PERMISSION_MODULES, role
+        assert all(isinstance(value, bool) for value in cells.values()), role
+    assert set(policy.role_defaults('Admin')) == policy.PERMISSION_MODULES
+    assert set(policy.role_defaults('Wizard')) == policy.PERMISSION_MODULES
+    assert not any(policy.role_defaults('Wizard').values())
+    # Admin/Super Admin see every module (SRS Appendix B).
+    for role in policy.ADMIN_ROLES:
+        assert all(policy.ROLE_DEFAULTS[role].values()), role
+    # An employee never administers the directory, payroll, or the policy.
+    employee = policy.ROLE_DEFAULTS['Employee']
+    for module in ('users', 'import_users', 'payroll', 'payroll_approve', 'policy_admin'):
+        assert not employee[module], module
+
+
+def test_empty_user_permissions_reproduces_role_defaults(client):
+    """Backward-compat invariant: no override rows == the role default map."""
+    import policy
+
+    _set_admin_session(client, 99885)
+    try:
+        _create_policy_user(client, 'EMP920', role='Finance')
+        payload = client.get('/api/users/EMP920/permissions').get_json()
+        assert payload['role'] == 'Finance'
+        assert payload['modules'] == sorted(policy.PERMISSION_MODULES)
+        assert payload['overrides'] == {}
+        assert payload['effective'] == policy.ROLE_DEFAULTS['Finance']
+        assert payload['defaults'] == policy.ROLE_DEFAULTS['Finance']
+    finally:
+        _clear_permission_rows('EMP920')
+        _cleanup_user_contract_rows('EMP920')
+
+
+def test_permission_override_deny_beats_role_allow_and_allow_grants(client):
+    """Deny beats the role default; an allow row lifts a default deny."""
+    _set_admin_session(client, 99886)
+    try:
+        _create_policy_user(client, 'EMP921', role='Admin')
+        _create_policy_user(client, 'EMP922', role='Finance')
+
+        response = client.put('/api/users/EMP921/permissions', json={
+            'modules': {'users': False, 'tickets': True}
+        })
+        assert response.status_code == 200, response.get_json()
+        payload = response.get_json()
+        # An explicit deny wins even though the Admin default is True.
+        assert payload['effective']['users'] is False
+        # An explicit allow lifts the default deny.
+        assert payload['effective']['tickets'] is True
+        # Untouched modules keep the role default.
+        assert payload['effective']['import_users'] is True
+        assert payload['overrides'] == {'users': False, 'tickets': True}
+        assert payload['changes'] == {'added': ['tickets', 'users'], 'removed': [], 'changed': []}
+
+        response = client.put('/api/users/EMP922/permissions', json={'modules': {'tickets': True}})
+        assert response.status_code == 200
+        assert response.get_json()['effective']['tickets'] is True
+    finally:
+        _clear_permission_rows('EMP921', 'EMP922')
+        _cleanup_user_contract_rows('EMP921', 'EMP922')
+
+
+def test_put_permissions_replaces_the_override_set_and_audits_the_diff(client):
+    _set_admin_session(client, 99887)
+    try:
+        _create_policy_user(client, 'EMP923')
+        first = client.put('/api/users/EMP923/permissions', json={
+            'modules': {'goals': False, 'documents': False}
+        })
+        assert first.status_code == 200, first.get_json()
+        # A second PUT is a full replace: 'goals' is dropped from the override
+        # set, so it reverts to the role default.
+        second = client.put('/api/users/EMP923/permissions', json={'modules': {'documents': True}})
+        assert second.status_code == 200, second.get_json()
+        payload = second.get_json()
+        assert payload['overrides'] == {'documents': True}
+        assert payload['changes'] == {
+            'added': [], 'removed': ['goals'], 'changed': ['documents:0->1']
+        }
+        # The Employee default for goals is True, so the removed row reverts to True.
+        assert payload['effective']['goals'] is True
+        assert payload['effective']['documents'] is True
+
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT module, allow FROM user_permissions WHERE emp_id = 'EMP923'"
+        ).fetchall()
+        audit = conn.execute(
+            'SELECT "before", "after", details FROM audit_log '
+            "WHERE action = 'USER_PERMISSIONS_UPDATE' AND entity_id = 'EMP923' "
+            'ORDER BY created_at DESC LIMIT 1'
+        ).fetchone()
+        conn.close()
+        assert [row[0] for row in rows] == ['documents']
+        assert bool(rows[0][1]) is True
+        assert json.loads(audit[0]) == {'goals': False, 'documents': False}
+        assert json.loads(audit[1]) == {'documents': True}
+        assert 'removed=[goals]' in audit[2]
+        assert 'changed=[documents:0->1]' in audit[2]
+    finally:
+        _clear_permission_rows('EMP923')
+        _cleanup_user_contract_rows('EMP923')
+
+
+def test_put_permissions_rejects_unknown_module_and_non_boolean(client):
+    _set_admin_session(client, 99888)
+    try:
+        _create_policy_user(client, 'EMP924')
+        unknown = client.put('/api/users/EMP924/permissions', json={
+            'modules': {'payroll_approvals': True}
+        })
+        assert unknown.status_code == 400
+        assert 'unknown permission modules' in unknown.get_json()['error']
+        assert client.put(
+            '/api/users/EMP924/permissions', json={'modules': {'goals': 'maybe'}}
+        ).status_code == 400
+        assert client.put(
+            '/api/users/EMP924/permissions', json={'modules': 'goals'}
+        ).status_code == 400
+        assert client.put('/api/users/EMP924/permissions', json={}).status_code == 400
+        conn = get_db()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM user_permissions WHERE emp_id = 'EMP924'"
+        ).fetchone()[0]
+        conn.close()
+        assert count == 0, 'a rejected payload must not write override rows'
+    finally:
+        _clear_permission_rows('EMP924')
+        _cleanup_user_contract_rows('EMP924')
+
+
+def test_permission_routes_require_admin_and_reject_self_edits(client):
+    _set_admin_session(client, 99888)
+    try:
+        _create_policy_user(client, 'EMP925')
+        _login_as(client, 'EMP925', 'Employee', 99889)
+        # A non-admin is refused: the GET is redirected away like every other
+        # admin-only page/API read, the JSON PUT gets an explicit 403.
+        assert client.get('/api/users/EMP002/permissions').status_code in (302, 403)
+        assert client.put('/api/users/EMP002/permissions', json={'modules': {}}).status_code == 403
+
+        _set_admin_session(client, 99890)
+        self_edit = client.put('/api/users/EMP001/permissions', json={'modules': {'tickets': False}})
+        assert self_edit.status_code == 409
+        assert 'own permissions' in self_edit.get_json()['error']
+        assert client.get('/api/users/EMP404/permissions').status_code == 404
+    finally:
+        _clear_permission_rows('EMP925', 'EMP001')
+        _cleanup_user_contract_rows('EMP925')
+
+
+def test_put_permissions_refuses_to_lock_out_the_last_admin(client):
+    _set_admin_session(client, 99891)
+    try:
+        _create_policy_user(client, 'EMP926', role='Admin')
+        # EMP001 is still an active Admin, so the target may be narrowed.
+        allowed = client.put('/api/users/EMP926/permissions', json={'modules': {'users': False}})
+        assert allowed.status_code == 200, allowed.get_json()
+
+        # Narrowing the remaining administrator as well would leave nobody able
+        # to manage users, so it is refused.
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at, updated_at) "
+            "VALUES (?, 'EMP001', 'users', 0, ?, ?)",
+            [-700001, datetime.now(), datetime.now()],
+        )
+        conn.close()
+        blocked = client.put('/api/users/EMP926/permissions', json={
+            'modules': {'users': False, 'import_users': False}
+        })
+        assert blocked.status_code == 409
+        assert 'no administrator' in blocked.get_json()['error']
+    finally:
+        _clear_permission_rows('EMP926', 'EMP001')
+        _cleanup_user_contract_rows('EMP926')
+
+
+def test_permission_override_row_with_unknown_module_fails_closed(client):
+    import policy
+
+    _set_admin_session(client, 99892)
+    try:
+        _create_policy_user(client, 'EMP927')
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at, updated_at) "
+            "VALUES (?, 'EMP927', 'warp_drive', 1, ?, ?)",
+            [-700002, datetime.now(), datetime.now()],
+        )
+        conn.execute(
+            "INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at, updated_at) "
+            "VALUES (?, 'EMP927', 'goals', NULL, ?, ?)",
+            [-700003, datetime.now(), datetime.now()],
+        )
+        conn.close()
+        payload = client.get('/api/users/EMP927/permissions').get_json()
+        assert 'warp_drive' not in payload['overrides']
+        # A NULL allow is the only safe reading of the nullable compat column.
+        assert payload['overrides']['goals'] is False
+        actor = {'emp_id': 'EMP927', 'role': 'Employee'}
+        assert policy.can(actor, 'warp_drive') is False
+        assert policy.can(actor, 'goals') is False
+    finally:
+        _clear_permission_rows('EMP927')
+        _cleanup_user_contract_rows('EMP927')
+
+
+def test_permission_policy_rejects_blocked_and_archived_targets(client):
+    _set_admin_session(client, 99893)
+    try:
+        _create_policy_user(client, 'EMP928')
+        assert client.post('/api/users/EMP928/block').status_code == 200
+        blocked = client.put('/api/users/EMP928/permissions', json={'modules': {'goals': False}})
+        assert blocked.status_code == 409
+        assert 'blocked' in blocked.get_json()['error']
+        assert client.get('/api/users/EMP928/permissions').status_code == 409
+        assert client.post('/api/users/EMP928/unblock').status_code == 200
+        assert client.post('/api/users/EMP928/archive').status_code == 200
+        archived = client.put('/api/users/EMP928/permissions', json={'modules': {'goals': False}})
+        assert archived.status_code == 409
+        assert 'archived' in archived.get_json()['error']
+        assert client.post('/api/users/EMP928/restore').status_code == 200
+    finally:
+        _clear_permission_rows('EMP928')
+        _cleanup_user_contract_rows('EMP928')
+
+
+@pytest.mark.skipif(
+    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+    reason='the boolean adapter snoop needs PostgreSQL and both schemas',
+)
+def test_user_permissions_allow_column_shape_public_and_inert_legacy():
+    """v2.0 stores BOOLEAN, legacy stores INTEGER; the adapter only rewrites one."""
+    from db_backend import _coerce_boolean_comparison_params, _coerce_insert_boolean_params
+
+    conn = get_db()
+    shapes = {
+        row[0]: row[1] for row in conn.execute(
+            "SELECT table_schema, data_type FROM information_schema.columns "
+            "WHERE table_name = 'user_permissions' AND column_name = 'allow'"
+        ).fetchall()
+    }
+    conn.close()
+    assert shapes.get('public') == 'boolean', shapes
+    assert shapes.get('legacy') == 'integer', shapes
+
+    # The route writes ints; the adapter rewrites them only where the column is
+    # actually a boolean.
+    update_sql = "UPDATE user_permissions SET allow = ?, updated_at = ? WHERE emp_id = ?"
+    _, public_params = _coerce_boolean_comparison_params(update_sql, [0, 'now', 'EMP001'], 'public')
+    assert public_params == [False, 'now', 'EMP001']
+    legacy_sql, legacy_params = _coerce_boolean_comparison_params(update_sql, [0, 'now', 'EMP001'], 'legacy')
+    assert legacy_sql == update_sql
+    assert legacy_params == [0, 'now', 'EMP001']
+
+    insert_sql = ("INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at) "
+                  "VALUES (?, ?, ?, ?, ?)")
+    _, coerced = _coerce_insert_boolean_params(insert_sql, [1, 'EMP001', 'goals', 1, 'now'], 'public')
+    assert coerced[3] is True
+    _, insert_legacy = _coerce_insert_boolean_params(insert_sql, [1, 'EMP001', 'goals', 1, 'now'], 'legacy')
+    assert insert_legacy[3] == 1
+
+
 def test_user_archive_restore_preserves_records_and_revokes_sessions(client):
     emp_id = f"ARC{datetime.now().strftime('%H%M%S%f')}"
     now = datetime.now()

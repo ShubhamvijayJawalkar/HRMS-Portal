@@ -40,6 +40,13 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR-09 permission policy implemented: policy.py owns the 27-module role matrix "
+     "with deny-beats-allow per-user overrides, GET/PUT /api/users/<id>/permissions does a full "
+     "replace with an audit diff and an anti-lockout guard, and the admin user list gained a "
+     "permissions modal. Empty overrides reproduce the role defaults exactly, so no existing "
+     "authorization outcome changes; decorator/navbar enforcement is the next slice. "
+     "DuckDB 90 passed / 6 skipped; PostgreSQL 95 passed / 1 skipped; Playwright 17 passed; "
+     "public probe 94/94 GET + 44/44 write."),
     ("2026-09-28", "FR-USR directory contract implemented: GET /api/users caps per_page at 200 and "
      "sorts through an allow-list (400 on invalid input), POST/PUT validate the employee ID, email, "
      "role, department and status with case-insensitive uniqueness, PUT became a true partial update "
@@ -105,18 +112,20 @@ TASKS = [
     # ── Follow-up backend hardening ────────────────────────────────────────
     ("Follow-up", "FR-USR archive/restore and session revocation", "Hard delete replaced with retained archive/restore; admin UI and cross-backend tests updated", DONE),
     ("Follow-up", "FR-USR directory contract (bounded pagination, sorting, validation)", "per_page capped at 200, allow-listed sorting, EMP/email/role/department validation, case-insensitive uniqueness, partial PUT with role-change audit, CSV import under the same contract", DONE),
-    ("Follow-up", "FR-USR permissions, policy balances, bulk import jobs, anonymisation", "Next backend slice after the directory contract", PENDING),
+    ("Follow-up", "FR-USR-09 permission policy (policy.py matrix + permissions API/UI)", "27-module role matrix, deny-beats-allow overrides, full-replace PUT with audit diff, anti-lockout guard, admin permissions modal", DONE),
+    ("Follow-up", "FR-USR policy enforcement wiring (decorators, inline role checks, navbar)", "policy.can() is not yet the enforcement point; the navbar and decorators still compare role strings", PENDING),
+    ("Follow-up", "FR-USR policy leave balances, bulk import jobs, anonymisation", "Next backend slices after the policy wiring", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "81 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "85 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "85 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "90 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "95 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "95 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "DuckDB", "17 passed"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "17 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 42/42 write flows; lifecycle paths included"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 44/44 write flows; lifecycle + permission paths included"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0003, identity/sequence rules, required tables, and delta report generated"),
     ("Disposable Phase 5 rehearsal", "hrms_cutover_rehearsal", "ETL Phase-1/2 + CC-05 cleanup + preflight + 94/42 probe + authenticated smoke + CC-01 sequence check passed"),
 ]

@@ -33,6 +33,7 @@ from security import (
 load_dotenv()
 
 import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
+import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
@@ -7684,6 +7685,145 @@ def delete_user(emp_id):
     if emp_id == session.get('emp_id'):
         return jsonify({'error': 'Cannot archive your own account'}), 409
     return _set_user_access_status(emp_id, 'Archived', 0, 'archive', session['emp_id'])
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  USER PERMISSIONS (FR-USR-09 / FR-USR-15, matrix in policy.py)
+# ══════════════════════════════════════════════════════════════════════
+
+def _permissions_target(conn, emp_id):
+    """Resolve a permission-editing target, or return an error response."""
+    row = conn.execute(
+        "SELECT emp_id, name, role, department, status FROM users WHERE UPPER(emp_id) = ?",
+        [emp_id.strip().upper()],
+    ).fetchone()
+    if not row:
+        return None, (jsonify({'error': 'User not found'}), 404)
+    target = {
+        'emp_id': row[0], 'name': row[1], 'role': row[2], 'department': row[3], 'status': row[4],
+    }
+    if target['status'] in ('Archived', 'Blocked'):
+        return None, (jsonify({
+            'error': f'{target["status"].lower()} users cannot have permissions changed; '
+                     'restore or unblock them first',
+        }), 409)
+    return target, None
+
+
+def _last_admin_would_be_locked_out(conn, target, overrides):
+    """Refuse a change that leaves no administrator able to manage users."""
+    guarded = ('users', 'import_users')
+    defaults = policy.role_defaults(target['role'])
+    if not any(not overrides.get(module, defaults[module]) for module in guarded):
+        return False
+    if str(target['role']) not in policy.ADMIN_ROLES:
+        return False
+    rows = conn.execute(
+        "SELECT emp_id, role FROM users WHERE status = 'Active' AND role IN ('Admin', 'Super Admin')"
+    ).fetchall()
+    for row in rows:
+        if row[0] == target['emp_id']:
+            continue
+        effective = policy.effective_permissions(conn, row[0], row[1])
+        if all(effective.get(module, False) for module in guarded):
+            return False
+    return True
+
+
+@app.route('/api/users/<emp_id>/permissions', methods=['GET'])
+@admin_required
+def get_user_permissions(emp_id):
+    conn = get_db()
+    try:
+        target, error = _permissions_target(conn, emp_id)
+        if error:
+            return error
+        overrides = policy.override_rows(conn, target['emp_id'])
+        return jsonify({
+            'emp_id': target['emp_id'],
+            'name': target['name'],
+            'role': target['role'],
+            'modules': sorted(policy.PERMISSION_MODULES),
+            'defaults': policy.role_defaults(target['role']),
+            'overrides': overrides,
+            'effective': policy.effective_permissions(conn, target['emp_id'], target['role']),
+        }), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/users/<emp_id>/permissions', methods=['PUT'])
+@admin_required
+def update_user_permissions(emp_id):
+    """Full replace of a user's override set (FR-USR-09).
+
+    A module present in ``modules`` is upserted; a module that is absent has its
+    row deleted, so the user reverts to the role default.
+    """
+    payload = request.get_json(silent=True) or {}
+    try:
+        requested = policy.validate_module_map(payload.get('modules'))
+    except policy.PolicyError as exc:
+        return jsonify({'error': str(exc)}), exc.status
+    conn = get_db()
+    try:
+        target, error = _permissions_target(conn, emp_id)
+        if error:
+            return error
+        if target['emp_id'] == session.get('emp_id'):
+            return jsonify({'error': 'You cannot change your own permissions'}), 409
+        actor = policy.current_actor(conn)
+        if not policy.can(actor, 'policy_admin', target, conn=conn):
+            return jsonify({'error': 'Policy administration access required'}), 403
+        if _last_admin_would_be_locked_out(conn, target, requested):
+            return jsonify({
+                'error': 'This change would leave no administrator able to manage users',
+            }), 409
+
+        before = policy.override_rows(conn, target['emp_id'])
+        for module in sorted(set(before) - set(requested)):
+            conn.execute(
+                "DELETE FROM user_permissions WHERE emp_id = ? AND module = ?",
+                [target['emp_id'], module],
+            )
+        now = datetime.now()
+        for module, allow in sorted(requested.items()):
+            if module in before:
+                if before[module] == allow:
+                    continue
+                conn.execute(
+                    "UPDATE user_permissions SET allow = ?, updated_at = ? WHERE emp_id = ? AND module = ?",
+                    [int(allow), now, target['emp_id'], module],
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    [_next_generated_id(conn, 'user_permissions', 'perm_id'), target['emp_id'],
+                     module, int(allow), now, now],
+                )
+        effective = policy.effective_permissions(conn, target['emp_id'], target['role'])
+    finally:
+        conn.close()
+    changes = policy.diff_overrides(before, requested)
+    audit_log(
+        session['emp_id'],
+        'USER_PERMISSIONS_UPDATE',
+        f'Updated permissions for {target["emp_id"]}: '
+        f'added=[{",".join(changes["added"])}] removed=[{",".join(changes["removed"])}] '
+        f'changed=[{",".join(changes["changed"])}]',
+        entity='user_permissions',
+        entity_id=target['emp_id'],
+        before=before,
+        after=requested,
+    )
+    return jsonify({
+        'message': f'Permissions updated for {target["emp_id"]}',
+        'emp_id': target['emp_id'],
+        'overrides': requested,
+        'effective': effective,
+        'changes': changes,
+    }), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
