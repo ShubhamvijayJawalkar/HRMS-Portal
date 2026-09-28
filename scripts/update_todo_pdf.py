@@ -40,6 +40,15 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-LEA-06/08 policy-derived leave balances: the entitlement now comes from the "
+     "effective leave_policy_assignments (accrual rate x 12, capped by carry-forward) and falls back "
+     "to the published defaults, so deriving changes nothing until a policy is assigned. The apply "
+     "path always enforces (it used to skip employees with no row) and reserves the days while a "
+     "request is pending, which is the first write to the reserved column and closes the "
+     "double-spending hole. Added an audited policy API plus an admin modal. Also fixed the "
+     "intermittent DuckDB browser-suite flake (DuckDB attaches a file once per process, so the "
+     "dev server runs single-threaded there). DuckDB 107 passed / 6 skipped; PostgreSQL 112 passed / "
+     "1 skipped; Playwright 19 passed; probe 94/94 GET + 44/44 write."),
     ("2026-09-28", "FR-USR-15 scope + PII: no handler branches on the session role copy any "
      "more (test-enforced), the company-wide list split became policy.can_view_all (CC-11 scope), "
      "the dashboard variant follows sees_admin_surface(), and pii_reveal is now enforced and "
@@ -128,16 +137,17 @@ TASKS = [
     ("Follow-up", "FR-USR-09 permission policy (policy.py matrix + permissions API/UI)", "27-module role matrix, deny-beats-allow overrides, full-replace PUT with audit diff, anti-lockout guard, admin permissions modal", DONE),
     ("Follow-up", "FR-USR-15 policy enforcement wiring (decorators + navbar)", "Role gates narrowed by policy.can(); navbar derived from the same gate/module tags; department grant modelled; nav/API drift tests", DONE),
     ("Follow-up", "FR-USR-15 inline scope checks + audited pii_reveal", "No handler branches on the session role copy; can_view_all is the CC-11 scope half; PII reveal route audited per cross-employee read", DONE),
-    ("Follow-up", "FR-USR policy leave balances, background bulk import jobs, anonymisation", "Next backend slices after the PII reveal", PENDING),
+    ("Follow-up", "FR-LEA-06/08 policy-derived leave balances", "Entitlement derived from the effective leave_policy_assignments; reserved ledger enforced; audited policy API + admin modal", DONE),
+    ("Follow-up", "FR-USR background bulk import jobs, two-person anonymisation", "Next backend slices after the derived leave balances", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "102 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "107 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "107 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "18 passed"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "18 passed"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "107 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "112 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "112 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "DuckDB", "19 passed (single-threaded server)"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "19 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 44/44 write flows; lifecycle + permission paths included"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0003, identity/sequence rules, required tables, and delta report generated"),

@@ -1458,6 +1458,212 @@ def test_pii_admin_page_hides_the_reveal_without_the_module(client):
         _cleanup_user_contract_rows('EMP943')
 
 
+# ── FR-LEA-06/08 policy-derived leave balances ────────────────────────────
+
+def _leave_balance(emp_id, leave_type, year=None):
+    year = year or datetime.now().year
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT total_days, used_days, reserved FROM leave_balance "
+            "WHERE emp_id = ? AND leave_type = ? AND year = ?",
+            [emp_id, leave_type, year],
+        ).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else {'total': row[0], 'used': row[1], 'reserved': row[2]}
+
+
+def _cleanup_leave_rows(emp_id, leave_type=None, year=None):
+    year = year or datetime.now().year
+    conn = get_db()
+    try:
+        if leave_type:
+            conn.execute(
+                "DELETE FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",
+                [emp_id, leave_type, year],
+            )
+        else:
+            conn.execute("DELETE FROM leave_balance WHERE emp_id = ?", [emp_id])
+        conn.execute("DELETE FROM leave_policy_assignments WHERE emp_id = ?", [emp_id])
+        conn.execute("DELETE FROM leave_requests WHERE emp_id = ?", [emp_id])
+        conn.execute("DELETE FROM notifications WHERE emp_id = ?", [emp_id])
+        conn.execute("DELETE FROM audit_log WHERE entity_id = ?", [emp_id])
+    finally:
+        conn.close()
+
+
+def test_leave_entitlement_defaults_to_the_published_matrix(client):
+    """With no assignment the entitlement is exactly what the boot seed wrote."""
+    import leave_policy
+
+    conn = get_db()
+    try:
+        assert leave_policy.entitlement_days(conn, 'EMP001', 'Casual') == (12, 'default')
+        assert leave_policy.entitlement_days(conn, 'EMP001', 'Sick') == (10, 'default')
+        assert leave_policy.entitlement_days(conn, 'EMP001', 'Annual') == (20, 'default')
+        # A type with no entitlement is "unlimited", as before.
+        assert leave_policy.entitlement_days(conn, 'EMP001', 'Sabbatical') == (0, 'unlimited')
+    finally:
+        conn.close()
+
+
+def test_leave_policy_assignment_derives_and_caps_the_entitlement(client):
+    """accrual_rate x 12 is the annual entitlement, capped by carry_forward_cap."""
+    _set_admin_session(client, 99871)
+    try:
+        _create_policy_user(client, 'EMP950', role='Employee')
+        today = datetime.now().date()
+        capped = client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '2.0', 'carry_forward_cap': 18,
+            'effective_from': today.isoformat(), 'grade': 'L3',
+        })
+        assert capped.status_code == 200, capped.get_json()
+        payload = capped.get_json()
+        annual = next(b for b in payload['balances'] if b['leave_type'] == 'Annual')
+        assert annual['total_days'] == 18, annual      # 2.0 x 12 = 24, capped at 18
+        assert annual['source'] == 'policy'
+
+        # A future assignment is not in force yet.
+        future = (today + __import__('datetime').timedelta(days=30)).isoformat()
+        client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '3.0', 'effective_from': future,
+        })
+        conn = get_db()
+        try:
+            import leave_policy
+            assert leave_policy.entitlement_days(conn, 'EMP950', 'Annual')[0] == 18
+        finally:
+            conn.close()
+
+        # Bad payloads are refused without writing.
+        assert client.put('/api/users/EMP950/leave-policy', json={'accrual_rate': '1.5'}).status_code == 400
+        assert client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '1.5', 'effective_from': '2026-01-01', 'nope': 1,
+        }).status_code == 400
+        assert client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '99', 'effective_from': '2026-01-01',
+        }).status_code == 400
+    finally:
+        _cleanup_leave_rows('EMP950')
+        _cleanup_user_contract_rows('EMP950')
+
+
+def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):
+    """FR-LEA-06: reservations stop two pending requests spending one balance."""
+    import leave_policy
+
+    _set_admin_session(client, 99872)
+    _create_policy_user(client, 'EMP951', role='Employee')
+    _login_as(client, 'EMP951', 'Employee', 99870)
+    year = datetime.now().year
+    conn = get_db()
+    try:
+        leave_policy.ensure_balances(conn, 'EMP951', year)
+    finally:
+        conn.close()
+    assert _leave_balance('EMP951', 'Casual') == {'total': 12, 'used': 0, 'reserved': 0}
+
+    today = datetime.now().date()
+    # 12 days of entitlement: two requests of 8 must not both be accepted.
+    first = client.post('/api/leaves', json={
+        'leave_type': 'Casual',
+        'start_date': today.isoformat(),
+        'end_date': (today + __import__('datetime').timedelta(days=7)).isoformat(),
+        'reason': 'policy reserve 1',
+    })
+    assert first.status_code == 201, first.get_json()
+    assert _leave_balance('EMP951', 'Casual')['reserved'] == 8
+
+    second = client.post('/api/leaves', json={
+        'leave_type': 'Casual',
+        'start_date': (today + __import__('datetime').timedelta(days=10)).isoformat(),
+        'end_date': (today + __import__('datetime').timedelta(days=17)).isoformat(),
+        'reason': 'policy reserve 2',
+    })
+    assert second.status_code == 400
+    assert 'Insufficient balance' in second.get_json()['error']
+
+    # A different type is unaffected.
+    other = client.post('/api/leaves', json={
+        'leave_type': 'Sick',
+        'start_date': (today + __import__('datetime').timedelta(days=10)).isoformat(),
+        'end_date': (today + __import__('datetime').timedelta(days=11)).isoformat(),
+        'reason': 'policy other type',
+    })
+    assert other.status_code == 201, other.get_json()
+
+    # Approval moves reserved -> used; rejection releases.
+    _set_admin_session(client, 99869)
+    rows = [row for row in client.get('/api/leaves').get_json() if row['emp_id'] == 'EMP951']
+    casual = [row for row in rows if row['leave_type'] == 'Casual']
+    sick = [row for row in rows if row['leave_type'] == 'Sick']
+    assert len(casual) == 1 and len(sick) == 1
+    assert client.post(f"/api/leaves/{casual[0]['leave_id']}/approve").status_code == 200
+    balance = _leave_balance('EMP951', 'Casual')
+    assert balance['used'] == 8 and balance['reserved'] == 0, balance
+    assert client.post(f"/api/leaves/{sick[0]['leave_id']}/reject").status_code == 200
+    balance = _leave_balance('EMP951', 'Sick')
+    assert balance['used'] == 0 and balance['reserved'] == 0, balance
+
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM leave_requests WHERE emp_id = 'EMP951'")
+        conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP951'")
+    finally:
+        conn.close()
+    _cleanup_leave_rows('EMP951')
+    _cleanup_user_contract_rows('EMP951')
+
+
+def test_leave_policy_routes_require_hr_and_report_the_source(client):
+    _set_admin_session(client, 99868)
+    try:
+        _create_policy_user(client, 'EMP952', role='HR')
+        payload = client.get('/api/users/EMP952/leave-policy').get_json()
+        assert payload['emp_id'] == 'EMP952'
+        assert payload['effective'] is None
+        assert payload['entitlements']['Annual'] == {'days': 20, 'source': 'default'}
+        assert payload['defaults'] == {'Casual': 12, 'Sick': 10, 'Annual': 20}
+
+        # An Employee cannot read or write somebody else's leave policy. The
+        # role has to change in the database: the gate reads the live row.
+        conn = get_db()
+        conn.execute("UPDATE users SET role = 'Employee' WHERE emp_id = 'EMP952'")
+        conn.close()
+        _login_as(client, 'EMP952', 'Employee', 99867)
+        assert client.get('/api/users/EMP001/leave-policy').status_code == 403
+        assert client.put('/api/users/EMP001/leave-policy', json={
+            'effective_from': '2026-01-01',
+        }).status_code == 403
+    finally:
+        _cleanup_leave_rows('EMP952')
+        _cleanup_user_contract_rows('EMP952')
+
+
+def test_leave_policy_assignment_is_audited(client):
+    _set_admin_session(client, 99866)
+    try:
+        _create_policy_user(client, 'EMP953', role='Employee')
+        assert client.put('/api/users/EMP953/leave-policy', json={
+            'accrual_rate': '1.0', 'effective_from': datetime.now().date().isoformat(),
+        }).status_code == 200
+        conn = get_db()
+        row = conn.execute(
+            'SELECT "before", "after" FROM audit_log WHERE action = \'LEAVE_POLICY_ASSIGN\' '
+            "AND entity_id = 'EMP953' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert row is not None, 'leave policy assignment was not audited'
+        # No prior assignment, so the `before` column is NULL rather than 'null'.
+        assert row[0] is None
+        after = json.loads(row[1])
+        assert after['accrual_rate'] == 1.0
+    finally:
+        _cleanup_leave_rows('EMP953')
+        _cleanup_user_contract_rows('EMP953')
+
+
 @pytest.mark.skipif(
     os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
     reason='the boolean adapter snoop needs PostgreSQL and both schemas',

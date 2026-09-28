@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 102 on DuckDB, 107 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 18 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 107 on DuckDB, 112 on PostgreSQL)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~2.5 min, 19 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,12 +28,14 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (102 on DuckDB, 107 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (107 on DuckDB, 112 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
-- `tests/test_playwright.py` — Playwright browser tests (18 tests)
+- `tests/test_playwright.py` — Playwright browser tests (19 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
+- The browser fixture runs the dev server **single-threaded** on DuckDB (see the
+  FR-LEA section: DuckDB attaches a file once per process)
 - Each browser test logs in fresh, waits 3-5s for session to stabilize
 - Use `wait_until='commit'` for `goto` when page redirects are expected
 - Use `page.evaluate()` for direct API calls when page JS doesn't load properly (e.g., leaves page JS with CDN dependency issues)
@@ -308,8 +310,8 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: policy-derived leave balances, background
-  bulk/import jobs, and two-person anonymisation.
+- Remaining follow-up work: background bulk/import jobs and two-person
+  anonymisation.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -427,6 +429,54 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - 5 new unit tests + 1 new Playwright test. DuckDB is 102 passed / 6 skipped;
   PostgreSQL 107 passed / 1 skipped (also with Redis); Playwright 18/18 on both
   backends; probe 94/94 GET + 44/44 write.
+
+## FR-LEA-06/08 policy-derived leave balances (`leave_policy.py`)
+- The entitlement is no longer a hand-written ledger. `leave_policy.py` derives
+  it from the employee's effective `leave_policy_assignments` row
+  (`effective_from <= as_of <= effective_to`, latest start wins): `accrual_rate`
+  is read as **days earned per month**, so 12 months is the annual entitlement,
+  capped by `carry_forward_cap`. With no assignment the published matrix applies
+  — **Casual 12 / Sick 10 / Annual 20, the exact numbers the boot seed wrote** —
+  so deriving changes nothing until a policy is actually assigned. The rate
+  drives the Annual type only; the other types keep the published value.
+- The balance now has three explicit parts: `total_days` (derived and
+  materialised on read, so approving a policy change moves the ceiling without
+  rewriting history), `used_days` (approval ledger) and `reserved` (the pending
+  ledger, which FR-LEA-06 describes but nothing ever wrote).
+- **Two holes are closed.** The apply path enforced the balance only
+  `if balance:`, so an employee created after the seed had no row and the check
+  was skipped — unlimited leave. It now always enforces, and the requested days
+  are *reserved* while the request is Pending and released on reject / moved
+  into `used` on approve, so two pending requests can no longer spend the same
+  remaining days. A leave type with no entitlement keeps the old "unlimited"
+  behaviour.
+- `GET /api/leave-balance` derives before answering and returns
+  `total_days / used_days / reserved_days / remaining / source` (plus
+  `?year=`), so an admin can see whether a number came from a policy or a
+  default. `GET`/`PUT /api/users/<id>/leave-policy` (`hr_or_admin_required`,
+  module `leaves`) read and assign the policy; a new assignment closes the
+  previous open-ended row the day before it starts, and the change is audited
+  (`LEAVE_POLICY_ASSIGN`) with the effective-policy before/after. The admin user
+  list gained a **Leave policy** action with a modal that shows the current
+  entitlement, its source and the balances.
+- The compatibility schema gains `leave_policy_assignments` through
+  `CREATE TABLE IF NOT EXISTS`; v2.0 `public` already owns it (identity key +
+  `no_overlapping_policy`) and is not reshaped at boot. No Alembic revision.
+- 5 new unit tests + 1 new Playwright test. DuckDB is 107 passed / 6 skipped;
+  PostgreSQL 112 passed / 1 skipped (also with Redis); Playwright 19/19 on both
+  backends; probe 94/94 GET + 44/44 write.
+- Not in this slice: `monthly_leave_grants` (the v2.0 monthly accrual ledger)
+  is still unused. Turning `accrual_rate` into monthly grant rows is a
+  scheduler job and would change how `total_days` accrues, so it is a separate
+  change.
+- The DuckDB browser suite is deterministic again. The intermittent
+  "Unique file handle conflict" was DuckDB attaching the file twice under two
+  overlapping requests: DuckDB attaches a file once per process, so the Playwright
+  fixture now runs the dev server single-threaded on that backend (PostgreSQL
+  keeps threading). A process-wide shared connection was tried and reverted —
+  it corrupts results under a threaded server (`ValueError: not enough values
+  to unpack`), because one connection means one cursor state. Both facts are
+  recorded in `get_db()` so this is not re-attempted.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

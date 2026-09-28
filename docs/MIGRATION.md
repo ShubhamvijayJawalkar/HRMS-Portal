@@ -705,8 +705,33 @@ self-actions with `409`, and retain payroll/audit history; login rejects
   viewer. The admin user list only offers the action to an actor that holds the
   capability.
 
-Validation: **102 DuckDB unit tests passed / 6 skipped**, **107 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **18 Playwright tests passed on
+### 14.6 Policy-derived leave balances (implemented)
+
+`leave_policy.py` derives the entitlement from the employee's effective
+`leave_policy_assignments` row instead of a hand-written ledger: `accrual_rate`
+is read as days earned per month, so 12 months is the annual entitlement, capped
+by `carry_forward_cap`. Without an assignment the published matrix applies
+(Casual 12 / Sick 10 / Annual 20 — the exact numbers the boot seed wrote), so
+nothing changes until a policy is assigned.
+
+Two holes closed along the way:
+
+- the apply path enforced the balance only `if balance:`, so an employee
+  created after the seed had no row and the check was skipped entirely;
+- the `reserved` column (FR-LEA-06, "reserved by Pending leaves") was never
+  written, so two pending requests could spend the same remaining days. Days are
+  now reserved on apply, released on reject and moved into `used` on approve.
+
+`GET /api/leave-balance` derives before answering and reports the source of each
+number; `GET`/`PUT /api/users/<id>/leave-policy` read and assign the policy
+(a new assignment closes the previous one the day before it starts), audited as
+`LEAVE_POLICY_ASSIGN`, with a modal in the admin user list. The compatibility
+schema gains the table through `CREATE TABLE IF NOT EXISTS`; v2.0 `public` owns
+it already, so no Alembic revision was needed. `monthly_leave_grants` (the v2.0
+accrual ledger) is still unused — a monthly scheduler job is a separate change.
+
+Validation: **107 DuckDB unit tests passed / 6 skipped**, **112 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **19 Playwright tests passed on
 DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 44/44
 write flows**.
 
@@ -747,6 +772,6 @@ and `pii_reveal` followed in §14.5.
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. Continue the FR-USR hardening follow-up. The archive/restore, directory
-   contract, permission-policy, enforcement-wiring and PII-reveal slices are
-   implemented; next add policy-derived leave balances, background bulk/import
-   jobs (the CSV import is still synchronous), and two-person anonymisation.
+   contract, permission-policy, enforcement-wiring, PII-reveal and
+   policy-derived-leave slices are implemented; next background bulk/import jobs
+   (the CSV import is still synchronous) and two-person anonymisation.

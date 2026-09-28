@@ -32,6 +32,7 @@ from security import (
 
 load_dotenv()
 
+import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
@@ -125,6 +126,13 @@ def get_db():
     if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
         import db_backend
         return db_backend.connect()
+    # NOTE: a process-wide shared DuckDB connection was tried and reverted. The
+    # threaded dev server interleaves `execute()` and `fetchall()` across
+    # requests, and one connection means one cursor state, so results get
+    # corrupted (`ValueError: not enough values to unpack`) under load. DuckDB
+    # also attaches a file only once per process, so a *concurrent* second
+    # connect raises "Unique file handle conflict" - which is why the browser
+    # suite runs the dev server single-threaded on this backend.
     conn = duckdb.connect(DB_FILE)
     try:
         conn.execute("PRAGMA enable_progress_bar")
@@ -630,6 +638,27 @@ def init_db():
     ''')
     if not _is_public_target_schema() and not _has_column(conn, 'leave_balance', 'reserved'):
         conn.execute("ALTER TABLE leave_balance ADD COLUMN reserved INTEGER DEFAULT 0")
+
+    # ── Effective-dated leave policy (FR-LEA-08) ────────────────────
+    # The compatibility shape. v2.0 `public` already owns this table with an
+    # identity key and the `no_overlapping_policy` exclusion constraint, so
+    # `CREATE TABLE IF NOT EXISTS` is a no-op there and the target is never
+    # reshaped at boot.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS leave_policy_assignments (
+            assignment_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            location VARCHAR,
+            grade VARCHAR,
+            accrual_rate NUMERIC(6,2),
+            carry_forward_cap INTEGER,
+            encashment_rule VARCHAR,
+            weekly_off_pattern VARCHAR,
+            effective_from DATE NOT NULL,
+            effective_to DATE,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
 
     # ── Password Reset Tokens (new) ────────────────────────────────
     conn.execute('''
@@ -2203,6 +2232,7 @@ _ROUTE_MODULES = {
     'unblock_user': 'users', 'archive_user': 'users', 'restore_user': 'users',
     'delete_user': 'users', 'get_user_permissions': 'users',
     'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
+    'get_leave_policy': 'leaves', 'update_leave_policy': 'leaves',
     'import_users_csv': 'import_users', 'import_users_page': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
@@ -6406,16 +6436,16 @@ def leaves_api():
     if ed < sd:
         sd, ed = ed, sd
 
-    balance = conn.execute(
-        "SELECT balance_id, total_days, used_days FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",
-        [emp_id, lt, datetime.now().year]
-    ).fetchone()
-    if balance:
-        requested = (ed - sd).days + 1
-        remaining = balance[1] - balance[2]
-        if requested > remaining:
-            conn.close()
-            return jsonify({'error': f'Insufficient balance. Remaining: {remaining} days'}), 400
+    # FR-LEA-06: the entitlement is derived from the employee's leave policy and
+    # the requested days are *reserved* while the request is Pending, so two
+    # overlapping-in-time requests can no longer spend the same balance. A leave
+    # type with no entitlement keeps the old "unlimited" behaviour.
+    requested = (ed - sd).days + 1
+    leave_policy.ensure_balances(conn, emp_id, sd.year)
+    remaining = leave_policy.remaining_days(conn, emp_id, lt, sd.year)
+    if remaining is not None and requested > remaining:
+        conn.close()
+        return jsonify({'error': f'Insufficient balance. Remaining: {remaining} days'}), 400
 
     if conn.execute(
         "SELECT 1 FROM leave_requests WHERE emp_id = ? AND status IN ('Pending','Approved') AND start_date <= ? AND end_date >= ?",
@@ -6429,6 +6459,8 @@ def leaves_api():
         "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')",
         [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', '')]
     )
+    if remaining is not None:
+        leave_policy.reserve(conn, emp_id, lt, requested, sd.year)
     conn.close()
     audit_log(emp_id, 'LEAVE_APPLY', f'{lt} leave {sd} to {ed}', entity='leave_requests', entity_id=leave_id)
     add_notification(session['emp_id'], 'LEAVE_APPLIED', f'Your {lt} leave ({sd} to {ed}) has been submitted.', '/leaves')
@@ -6509,10 +6541,7 @@ def approve_leave(leave_id):
         "UPDATE leave_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE leave_id = ?",
         [session['emp_id'], datetime.now(), leave_id]
     )
-    conn.execute(
-        "UPDATE leave_balance SET used_days = used_days + ? WHERE emp_id = ? AND leave_type = ? AND year = ?",
-        [days, row[0], row[1], row[2].year]
-    )
+    leave_policy.consume(conn, row[0], row[1], days, row[2].year)
     conn.close()
     audit_log(session['emp_id'], 'LEAVE_APPROVE', f'Leave {leave_id} approved', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_APPROVED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been approved.', '/leaves')
@@ -6536,6 +6565,7 @@ def reject_leave(leave_id):
         "UPDATE leave_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE leave_id = ?",
         [session['emp_id'], datetime.now(), leave_id]
     )
+    leave_policy.release(conn, row[0], row[1], (row[3] - row[2]).days + 1, row[2].year)
     conn.close()
     audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_REJECTED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been rejected.', '/leaves')
@@ -6548,18 +6578,141 @@ def reject_leave(leave_id):
 def leave_balance_api():
     """Get leave balance for current user"""
     emp_id = session['emp_id']
-    year = datetime.now().year
+    year = request.args.get('year', datetime.now().year, type=int)
     conn = get_db()
-    rows = conn.execute(
-        "SELECT leave_type, total_days, used_days FROM leave_balance WHERE emp_id = ? AND year = ?",
-        [emp_id, year]
-    ).fetchall()
-    conn.close()
-    return jsonify([{
-        'leave_type': r[0], 'total_days': r[1],
-        'used_days': r[2], 'remaining': r[1] - r[2]
-    } for r in rows]), 200
+    try:
+        # Materialise the policy-derived entitlement before answering, so a new
+        # employee and a policy change are both visible here immediately.
+        leave_policy.ensure_balances(conn, emp_id, year)
+        balances = leave_policy.balances_for(conn, emp_id, year)
+    finally:
+        conn.close()
+    return jsonify(balances), 200
 
+
+
+@app.route('/api/users/<emp_id>/leave-policy', methods=['GET'])
+@hr_or_admin_required
+def get_leave_policy(emp_id):
+    """The employee's effective leave policy and the balances it derives."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT emp_id, name, role, status FROM users WHERE UPPER(emp_id) = ?",
+            [emp_id.strip().upper()],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'User not found'}), 404
+        emp_id = row[0]
+        assignment = leave_policy.effective_assignment(conn, emp_id)
+        year = request.args.get('year', datetime.now().year, type=int)
+        derived = {
+            leave_type: leave_policy.entitlement_days(conn, emp_id, leave_type)
+            for leave_type in leave_policy.DEFAULT_ENTITLEMENTS
+        }
+        balances = leave_policy.balances_for(conn, emp_id, year)
+        history = [
+            {
+                'assignment_id': r[0], 'location': r[1], 'grade': r[2],
+                'accrual_rate': float(r[3]) if r[3] is not None else None,
+                'carry_forward_cap': r[4], 'encashment_rule': r[5],
+                'weekly_off_pattern': r[6],
+                'effective_from': r[7].isoformat() if r[7] else None,
+                'effective_to': r[8].isoformat() if r[8] else None,
+            }
+            for r in conn.execute(
+                "SELECT assignment_id, location, grade, accrual_rate, carry_forward_cap, "
+                "encashment_rule, weekly_off_pattern, effective_from, effective_to "
+                "FROM leave_policy_assignments WHERE emp_id = ? ORDER BY effective_from DESC, assignment_id DESC",
+                [emp_id],
+            ).fetchall()
+        ]
+    finally:
+        conn.close()
+    return jsonify({
+        'emp_id': emp_id,
+        'name': row[1],
+        'role': row[2],
+        'year': year,
+        'effective': assignment,
+        'history': history,
+        'entitlements': {
+            leave_type: {'days': days, 'source': source}
+            for leave_type, (days, source) in derived.items()
+        },
+        'balances': balances,
+        'defaults': dict(leave_policy.DEFAULT_ENTITLEMENTS),
+    }), 200
+
+
+@app.route('/api/users/<emp_id>/leave-policy', methods=['PUT'])
+@hr_or_admin_required
+def update_leave_policy(emp_id):
+    """Assign (or re-assign) an effective-dated leave policy for an employee.
+
+    The previous assignment is closed on the new ``effective_from`` so the
+    effective-dated lookup stays unambiguous, and the derived entitlement is
+    re-materialised immediately.
+    """
+    payload = {key: value for key, value in (request.get_json(silent=True) or {}).items()}
+    if 'assignment' in payload and isinstance(payload['assignment'], dict):
+        payload = dict(payload['assignment'])
+    try:
+        assignment = leave_policy.validate_assignment(payload)
+    except leave_policy.LeavePolicyError as exc:
+        return jsonify({'error': str(exc)}), exc.status
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT emp_id, name FROM users WHERE UPPER(emp_id) = ?", [emp_id.strip().upper()]
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'User not found'}), 404
+        emp_id = row[0]
+        before = leave_policy.effective_assignment(conn, emp_id, assignment['effective_from'])
+        previous = conn.execute(
+            "SELECT assignment_id, effective_from FROM leave_policy_assignments "
+            "WHERE emp_id = ? AND effective_to IS NULL AND effective_from < ? "
+            "ORDER BY effective_from DESC LIMIT 1",
+            [emp_id, assignment['effective_from']],
+        ).fetchone()
+        if previous:
+            # Close the open-ended row the day before the new one starts.
+            closed_on = assignment['effective_from'].toordinal() - 1
+            conn.execute(
+                "UPDATE leave_policy_assignments SET effective_to = ? WHERE assignment_id = ?",
+                [datetime.fromordinal(closed_on).date(), previous[0]],
+            )
+        assignment_id = _next_generated_id(conn, 'leave_policy_assignments', 'assignment_id')
+        conn.execute(
+            "INSERT INTO leave_policy_assignments (assignment_id, emp_id, location, grade, "
+            "accrual_rate, carry_forward_cap, encashment_rule, weekly_off_pattern, "
+            "effective_from, effective_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [assignment_id, emp_id, assignment['location'], assignment['grade'],
+             assignment['accrual_rate'], assignment['carry_forward_cap'],
+             assignment['encashment_rule'], assignment['weekly_off_pattern'],
+             assignment['effective_from'], assignment['effective_to']],
+        )
+        year = request.args.get('year', datetime.now().year, type=int)
+        balances = leave_policy.ensure_balances(conn, emp_id, year)
+        effective = leave_policy.effective_assignment(conn, emp_id)
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'],
+        'LEAVE_POLICY_ASSIGN',
+        f"Leave policy assigned to {emp_id} from {assignment['effective_from']}",
+        entity='leave_policy_assignments',
+        entity_id=emp_id,
+        before=before,
+        after={**assignment, 'assignment_id': assignment_id},
+    )
+    return jsonify({
+        'message': f'Leave policy assigned to {emp_id}',
+        'emp_id': emp_id,
+        'effective': effective,
+        'balances': balances,
+    }), 200
 
 # ══════════════════════════════════════════════════════════════════════
 #  AUDIT LOG

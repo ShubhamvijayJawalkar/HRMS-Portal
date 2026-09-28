@@ -30,7 +30,11 @@ BASE_URL = 'http://localhost:8787'
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
-    t = threading.Thread(target=lambda: app.run(host='127.0.0.1', port=8787, debug=False, use_reloader=False), daemon=True)
+    # Single-threaded on purpose: DuckDB attaches a database file once per
+    # process, so two overlapping requests would raise "Unique file handle
+    # conflict". The PostgreSQL backend has no such constraint.
+    t = threading.Thread(target=lambda: app.run(host='127.0.0.1', port=8787, debug=False,
+                                              use_reloader=False, threaded=False), daemon=True)
     t.start()
     time.sleep(2)
     yield
@@ -179,6 +183,48 @@ def test_admin_pii_reveal_is_audited(page):
     reveals = [row for row in audit['data'] if row['action'] == 'PII_REVEAL']
     assert reveals, 'the reveal was not audited'
     assert reveals[0]['entity_id'] == 'EMP002'
+
+def test_admin_assigns_a_leave_policy(page):
+    """FR-LEA-08: the policy modal changes the derived entitlement."""
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+    page.goto(BASE_URL + '/admin/users')
+    page.wait_for_timeout(1500)
+    page.fill('#searchInput', 'EMP002')
+    page.wait_for_timeout(1500)
+    page.click("button[title='Leave policy']")
+    page.wait_for_timeout(1500)
+    assert page.is_visible('#leavePolicyModal'), 'leave policy modal did not open'
+    body = page.text_content('#lpBalances')
+    assert 'Annual' in body and 'default' in body, body
+
+    page.fill('#lpAccrual', '1')
+    page.fill('#lpFrom', '2020-01-01')
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/users/EMP002/leave-policy') and r.request.method == 'PUT'
+    ) as resp:
+        page.click('#leavePolicyModal .btn-primary')
+    assert resp.value.ok, f'leave policy save failed: {resp.value.status}'
+    payload = resp.value.json()
+    annual = next(b for b in payload['balances'] if b['leave_type'] == 'Annual')
+    assert annual['total_days'] == 12, annual      # 1.0 day/month x 12
+    assert annual['source'] == 'policy'
+
+    # The employee sees the derived entitlement on their own balance endpoint.
+    page.goto(BASE_URL + '/logout')
+    page.wait_for_timeout(1000)
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP002')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+    balances = page.evaluate("fetch('/api/leave-balance').then(r => r.json())")
+    annual = next(b for b in balances if b['leave_type'] == 'Annual')
+    assert annual['total_days'] == 12 and annual['source'] == 'policy', annual
+    assert 'reserved_days' in annual
 
 def test_breaks_tab_shows_on_user_dashboard(page):
     page.goto(BASE_URL + '/login')
