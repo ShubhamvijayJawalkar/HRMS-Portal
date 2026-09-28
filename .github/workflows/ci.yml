@@ -7,7 +7,9 @@ on:
     branches: [main, master]
 
 jobs:
+  # Fast feedback on the default local/CI backend (DuckDB, compatibility schema).
   test:
+    name: duckdb
     runs-on: ubuntu-latest
 
     steps:
@@ -56,3 +58,101 @@ jobs:
       - name: Build Docker image
         run: |
           docker build -t hrms .
+
+  # The v2.0 target. Everything the adapter, the identity/boolean rewrites and
+  # the Alembic migrations touch is invisible to the DuckDB job, so PostgreSQL
+  # (both the compatibility `legacy` schema and a clean v2.0 `public` one) runs
+  # on every push as well.
+  postgres:
+    name: postgres
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hrms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d hrms"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      SECRET_KEY: ci-secret-key
+      FLASK_DEBUG: 0
+      APP_DB: postgres
+      APP_DB_SCHEMA: legacy
+      # Disposable validation database: the demo seed is what the suites expect.
+      HRMS_ALLOW_DEMO_SEED: "1"
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/hrms
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -U postgres -d hrms; then exit 0; fi
+            sleep 1
+          done
+          echo "PostgreSQL did not become ready" >&2
+          exit 1
+
+      - name: Run unit tests on the compatibility schema
+        run: python -m pytest tests/test_app.py -v
+
+      # Server-side Redis sessions are the production path, so the same suite
+      # runs once with REDIS_URL set (cookie sessions otherwise).
+      - name: Run unit tests with server-side Redis sessions
+        run: python -m pytest tests/test_app.py -v
+        env:
+          REDIS_URL: redis://localhost:6379/0
+
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium
+
+      - name: Run browser tests on PostgreSQL
+        run: python -m pytest tests/test_playwright.py -v
+
+      # A clean v2.0 database created by Alembic, then the three cutover gates:
+      # the read-only preflight, the CC-01 rule checker and the public-flip
+      # probe (every authenticated GET route + the core write flows).
+      - name: Create the v2.0 target and run the cutover gates
+        run: |
+          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE hrms_probe"
+          export PROBE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/hrms_probe
+          DATABASE_URL=$PROBE_URL python -m alembic -c migrations/alembic.ini upgrade head
+          python -m py_compile scripts/check_cc_rules.py scripts/probe_public_flip.py
+          echo "--- read-only preflight ---"
+          DATABASE_URL=$PROBE_URL python scripts/cutover_preflight.py --schema public
+          echo "--- CC-01 rule checker ---"
+          DATABASE_URL=postgresql://postgres:postgres@localhost:5432/hrms_probe \
+            python scripts/check_cc_rules.py
+          echo "--- public-flip probe ---"
+          DATABASE_URL=$PROBE_URL APP_DB=postgres APP_DB_SCHEMA=public \
+            python scripts/probe_public_flip.py
