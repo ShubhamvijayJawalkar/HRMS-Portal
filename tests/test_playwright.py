@@ -157,6 +157,29 @@ def test_admin_edits_user_permissions(page):
     assert state['effective']['tickets'] is True
 
 
+def test_admin_pii_reveal_is_audited(page):
+    """FR-USR-15: the PII reveal is a real, audited capability."""
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', 'EMP001')
+    page.fill('#password', 'pass123')
+    page.click('button[type="submit"]')
+    page.wait_for_timeout(3000)
+    page.goto(BASE_URL + '/admin/users')
+    page.wait_for_timeout(1500)
+    page.fill('#searchInput', 'EMP002')
+    page.wait_for_timeout(1500)
+    page.on('dialog', lambda dialog: dialog.accept())
+    page.click("button[title='Personal data (audited)']")
+    page.wait_for_timeout(2000)
+    assert page.is_visible('#piiModal'), 'PII modal did not open'
+    body = page.text_content('#piiBody')
+    for label in ('Date of birth', 'Address', 'Emergency contact'):
+        assert label in body, f'{label} missing from {body}'
+    audit = page.evaluate("fetch('/api/audit-log').then(r => r.json())")
+    reveals = [row for row in audit['data'] if row['action'] == 'PII_REVEAL']
+    assert reveals, 'the reveal was not audited'
+    assert reveals[0]['entity_id'] == 'EMP002'
+
 def test_breaks_tab_shows_on_user_dashboard(page):
     page.goto(BASE_URL + '/login')
     page.fill('#empId', 'EMP002')

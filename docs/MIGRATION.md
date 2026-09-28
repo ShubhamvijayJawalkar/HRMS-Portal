@@ -683,8 +683,30 @@ self-actions with `409`, and retain payroll/audit history; login rejects
   `/admin/goals` and `/admin/reviews` pages have always been HR-reachable), and
   `/admin/leaves` is now linked from the navbar.
 
-Validation: **97 DuckDB unit tests passed / 6 skipped**, **102 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **17 Playwright tests passed on
+### 14.5 Scope checks and PII reveal (implemented)
+
+- No view handler branches on the session role copy any more (a test walks
+  `app.view_functions` to keep it that way). The list endpoints that split on
+  `role == 'Admin'` now use `policy.can_view_all(actor, module)`, which is the
+  CC-11 scope half of the check: capability **and** company-wide visibility.
+  `ALL_SCOPE_ROLES` is `Admin`/`Super Admin` only, reproducing today's split
+  exactly; HR and Finance keep seeing only their own records in those lists,
+  which is a pre-existing product behaviour rather than a hardening change.
+- Because the module check runs first, a denied module narrows the scope rather
+  than the other way round: an admin who loses `goals` falls back to their own
+  records, and a Finance user who loses `payroll` can no longer read another
+  employee's payslip.
+- `/dashboard` picks its variant from `policy.sees_admin_surface()`.
+- `pii_reveal` is now enforced rather than modelled: `policy.pii_view()` allows
+  an employee their own record unconditionally and requires the capability for
+  anyone else's, `GET /api/users/<id>/pii` is the only route that returns
+  another employee's date of birth, address or emergency contact, and each
+  cross-employee reveal writes a `PII_REVEAL` audit row naming subject and
+  viewer. The admin user list only offers the action to an actor that holds the
+  capability.
+
+Validation: **102 DuckDB unit tests passed / 6 skipped**, **107 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **18 Playwright tests passed on
 DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 44/44
 write flows**.
 
@@ -716,11 +738,8 @@ rewrites for the v2.0 `BOOLEAN` column — verified by the new probe flows
 `user-permissions(put|get)` on a clean v2.0 database and by a PG-gated test that
 asserts both column shapes.
 
-`policy.can()` became the enforcement point in §14.4. Still pending: the
-~15 inline `session['role']` comparisons inside handlers (they are narrower
-than the gate in front of them, so they cannot widen access, but they do not
-honour a per-module override), and `pii_reveal`, which is modelled but not yet
-applied to any read path.
+`policy.can()` became the enforcement point in §14.4, the inline scope checks
+and `pii_reveal` followed in §14.5.
 
 ## 15. Next steps
 
@@ -728,7 +747,6 @@ applied to any read path.
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. Continue the FR-USR hardening follow-up. The archive/restore, directory
-   contract, permission-policy and policy-enforcement slices are implemented;
-   next convert the inline role checks in handlers, gate the `pii_reveal` read
-   paths (and audit the reveal), then add policy-derived leave balances,
-   background bulk/import jobs, and two-person anonymisation.
+   contract, permission-policy, enforcement-wiring and PII-reveal slices are
+   implemented; next add policy-derived leave balances, background bulk/import
+   jobs (the CSV import is still synchronous), and two-person anonymisation.

@@ -2202,7 +2202,7 @@ _ROUTE_MODULES = {
     'get_user_route': 'users', 'update_user': 'users', 'block_user': 'users',
     'unblock_user': 'users', 'archive_user': 'users', 'restore_user': 'users',
     'delete_user': 'users', 'get_user_permissions': 'users',
-    'update_user_permissions': 'users',
+    'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
     'import_users_csv': 'import_users', 'import_users_page': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
@@ -2438,11 +2438,13 @@ def inject_navigation():
 @login_required
 def get_credentials():
     """Return known user credentials for demo purposes (admin only)"""
-    if session.get('role') not in ('Admin', 'admin'):
-        return jsonify({'error': 'Admin access required'}), 403
     conn = get_db()
-    rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
-    conn.close()
+    try:
+        if not policy.can(policy.current_actor(conn), 'users', conn=conn):
+            return jsonify({'error': 'Admin access required'}), 403
+        rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
+    finally:
+        conn.close()
     result = [{'emp_id': r[0], 'name': r[1], 'role': r[2], 'department': r[3] or '-'} for r in rows]
     return jsonify(result), 200
 
@@ -2560,8 +2562,14 @@ def logout():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    if session.get('role') in ('Admin', 'Finance') or session.get('department') == 'HR':
-        return render_template('admin_dashboard.html')
+    conn = get_db()
+    try:
+        # The admin variant is a presentation choice; it follows the policy
+        # ("administers something") instead of a hard-coded role list.
+        if policy.sees_admin_surface(policy.current_actor(conn), conn=conn):
+            return render_template('admin_dashboard.html')
+    finally:
+        conn.close()
     return render_template('user_dashboard.html')
 
 
@@ -2601,6 +2609,14 @@ def profile_api():
         u = get_user(emp_id)
         if not u:
             return jsonify({'error': 'Not found'}), 404
+        # Own record: `pii_view` always allows it, so this documents the rule
+        # rather than changing it. Another employee's PII is /api/users/<id>/pii.
+        conn = get_db()
+        try:
+            if not policy.pii_view(policy.current_actor(conn), emp_id, conn=conn):
+                return jsonify({'error': 'Forbidden'}), 403
+        finally:
+            conn.close()
         return jsonify({
             'emp_id': u[0], 'name': u[1], 'email': u[2],
             'role': u[3], 'department': u[5],
@@ -2956,7 +2972,7 @@ def regularization_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'regularization', conn=conn):
             rows = conn.execute(
                 "SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at FROM regularization_requests ORDER BY created_at DESC"
             ).fetchall()
@@ -5507,13 +5523,22 @@ def payroll_items(rid):
     return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'gross': float(r[3]), 'deductions': float(r[4]), 'net': float(r[5]), 'pf': float(r[6]), 'esi': float(r[7]), 'pt': float(r[8]), 'payslip_generated': bool(r[9])} for r in rows]), 200
 
 
+def _may_read_payslip(conn, emp_id):
+    """Own payslip, or the payroll capability (CC-11 scope, not a role list)."""
+    actor = policy.current_actor(conn)
+    if actor.get('emp_id') == emp_id:
+        return True
+    return policy.can(actor, 'payroll', resource={'emp_id': emp_id}, conn=conn)
+
+
 @app.route('/api/v1/payslip/<int:run_id>/<emp_id>')
 @app.route('/api/payslip/<int:run_id>/<emp_id>')
 @login_required
 def get_payslip(run_id, emp_id):
-    if session.get('role') not in ('Admin', 'Finance') and session['emp_id'] != emp_id:
-        return jsonify({'error': 'Forbidden'}), 403
     conn = get_db()
+    if not _may_read_payslip(conn, emp_id):
+        conn.close()
+        return jsonify({'error': 'Forbidden'}), 403
     row = conn.execute(
         "SELECT p.item_id, r.month, r.year, p.emp_id, u.name, u.department, u.designation, p.gross_salary, p.deductions_total, p.net_salary, p.pf, p.esi, p.pt FROM payroll_items p JOIN payroll_runs r ON p.run_id = r.run_id JOIN users u ON p.emp_id = u.emp_id WHERE p.run_id = ? AND p.emp_id = ?",
         [run_id, emp_id]
@@ -5571,7 +5596,7 @@ def goals_page():
 def goals_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'goals', conn=conn):
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id ORDER BY g.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT g.goal_id, g.emp_id, u.name, g.title, g.description, g.target_date, g.weight, g.rating, g.status, g.created_at FROM goals g JOIN users u ON g.emp_id = u.emp_id WHERE g.emp_id = ? ORDER BY g.created_at DESC", [session['emp_id']]).fetchall()
@@ -5660,7 +5685,7 @@ def submit_review(rid):
 def feedback_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'performance', conn=conn):
             rows = conn.execute("SELECT f.feedback_id, f.emp_id, u.name, f.reviewer_id, rev.name, f.category, f.rating, f.comment, f.submitted_at FROM feedback_360 f JOIN users u ON f.emp_id = u.emp_id JOIN users rev ON f.reviewer_id = rev.emp_id ORDER BY f.submitted_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT f.feedback_id, f.emp_id, u.name, f.reviewer_id, rev.name, f.category, f.rating, f.comment, f.submitted_at FROM feedback_360 f JOIN users u ON f.emp_id = u.emp_id JOIN users rev ON f.reviewer_id = rev.emp_id WHERE f.emp_id = ? ORDER BY f.submitted_at DESC", [session['emp_id']]).fetchall()
@@ -5709,7 +5734,7 @@ def expense_categories():
 def expenses_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'expenses', conn=conn):
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id ORDER BY c.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.emp_id = ? ORDER BY c.created_at DESC", [session['emp_id']]).fetchall()
@@ -5762,7 +5787,7 @@ def tickets_page():
 def tickets_api():
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'tickets', conn=conn):
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.created_at DESC").fetchall()
         else:
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.created_at DESC", [session['emp_id']]).fetchall()
@@ -5790,7 +5815,8 @@ def ticket_detail(tid):
     if not row:
         conn.close()
         return jsonify({'error': 'Not found'}), 404
-    if session.get('role') != 'Admin' and session['emp_id'] != row[1]:
+    actor = policy.current_actor(conn)
+    if not policy.can_view_all(actor, 'tickets', conn=conn) and actor.get('emp_id') != row[1]:
         conn.close()
         return jsonify({'error': 'Forbidden'}), 403
     comments = conn.execute("SELECT c.comment_id, c.emp_id, u.name, c.comment, c.created_at FROM ticket_comments c JOIN users u ON c.emp_id = u.emp_id WHERE c.ticket_id = ? ORDER BY c.created_at", [tid]).fetchall()
@@ -6185,9 +6211,10 @@ def generate_payslip_pdf(run_id, emp_id):
 @app.route('/api/payroll-runs/<int:rid>/payslip-pdf/<emp_id>')
 @login_required
 def payslip_pdf(rid, emp_id):
-    if session.get('role') not in ('Admin', 'Finance') and session['emp_id'] != emp_id:
-        return jsonify({'error': 'Forbidden'}), 403
     conn = get_db()
+    if not _may_read_payslip(conn, emp_id):
+        conn.close()
+        return jsonify({'error': 'Forbidden'}), 403
     run = conn.execute("SELECT status FROM payroll_runs WHERE run_id = ?", [rid]).fetchone()
     conn.close()
     if not run:
@@ -6326,7 +6353,7 @@ def leaves_api():
         status_filter = request.args.get('status')
         month_filter = request.args.get('month', type=int)
         year_filter = request.args.get('year', type=int)
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'leaves', conn=conn):
             query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
                        l.reason, l.status, l.approved_by, l.created_at
                        FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id"""
@@ -6867,7 +6894,7 @@ def break_approvals_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
         conn = get_db()
-        if session.get('role') == 'Admin':
+        if policy.can_view_all(policy.current_actor(conn), 'breaks', conn=conn):
             rows = conn.execute(
                 "SELECT a.approval_id, a.emp_id, u.name, a.break_type, a.break_date, a.reason, a.status, a.approved_by, a.created_at FROM break_approvals a JOIN users u ON a.emp_id = u.emp_id ORDER BY a.created_at DESC"
             ).fetchall()
@@ -7498,7 +7525,17 @@ def _paged_user_args():
 @app.route('/admin/users')
 @admin_required
 def admin_users():
-    return render_template('admin_users.html')
+    # The PII action is only rendered for an actor that can actually use it.
+    conn = get_db()
+    try:
+        can_reveal_pii = policy.can(policy.current_actor(conn), 'pii_reveal', conn=conn)
+    finally:
+        conn.close()
+    return render_template(
+        'admin_users.html',
+        my_emp_id=session['emp_id'],
+        can_reveal_pii=can_reveal_pii,
+    )
 
 
 @app.route('/api/users', methods=['GET'])
@@ -7973,6 +8010,56 @@ def update_user_permissions(emp_id):
         'changes': changes,
     }), 200
 
+
+
+@app.route('/api/users/<emp_id>/pii', methods=['GET'])
+@hr_or_admin_required
+def get_user_pii(emp_id):
+    """Audited PII reveal for one employee (FR-USR-15, ``pii_reveal``).
+
+    The directory never returns personal fields. This is the only route that
+    does, it requires the ``pii_reveal`` capability for *another* employee, and
+    every cross-employee reveal is written to the audit log. An employee's own
+    record needs no capability and is not logged (that is what
+    ``/api/profile`` serves).
+    """
+    conn = get_db()
+    try:
+        target, error = _permissions_target(conn, emp_id)
+        if error:
+            return error
+        actor = policy.current_actor(conn)
+        own_record = actor.get('emp_id') == target['emp_id']
+        if not policy.pii_view(actor, target['emp_id'], conn=conn):
+            return jsonify({'error': 'PII reveal not permitted'}), 403
+        row = conn.execute(
+            "SELECT name, date_of_birth, address, emergency_contact_name, emergency_contact_phone "
+            "FROM users WHERE emp_id = ?",
+            [target['emp_id']],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'User not found'}), 404
+    payload = {
+        'emp_id': target['emp_id'],
+        'name': row[0],
+        'date_of_birth': row[1].isoformat() if row[1] else None,
+        'address': row[2],
+        'emergency_contact_name': row[3],
+        'emergency_contact_phone': row[4],
+    }
+    if own_record:
+        return jsonify(payload), 200
+    audit_log(
+        session['emp_id'],
+        'PII_REVEAL',
+        f"Revealed personal data of {target['emp_id']} to {actor['emp_id']}",
+        entity='users',
+        entity_id=target['emp_id'],
+        after={'fields': sorted(policy.PII_FIELDS)},
+    )
+    return jsonify(payload), 200
 
 # ══════════════════════════════════════════════════════════════════════
 #  REPORTS

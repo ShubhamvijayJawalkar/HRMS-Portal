@@ -40,6 +40,12 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR-15 scope + PII: no handler branches on the session role copy any "
+     "more (test-enforced), the company-wide list split became policy.can_view_all (CC-11 scope), "
+     "the dashboard variant follows sees_admin_surface(), and pii_reveal is now enforced and "
+     "audited: GET /api/users/<id>/pii is the only cross-employee personal-data read and every "
+     "such reveal writes a PII_REVEAL audit row. DuckDB 102 passed / 6 skipped; PostgreSQL 107 "
+     "passed / 1 skipped; Playwright 18 passed; probe 94/94 GET + 44/44 write."),
     ("2026-09-28", "FR-USR-15 enforcement wiring: the four role gates now narrow with "
      "policy.can() (the role/department check stays the outer gate, so an empty override table is a "
      "no-op), every gated view is mapped to a module, and the navbar is derived from the same "
@@ -121,16 +127,17 @@ TASKS = [
     ("Follow-up", "FR-USR directory contract (bounded pagination, sorting, validation)", "per_page capped at 200, allow-listed sorting, EMP/email/role/department validation, case-insensitive uniqueness, partial PUT with role-change audit, CSV import under the same contract", DONE),
     ("Follow-up", "FR-USR-09 permission policy (policy.py matrix + permissions API/UI)", "27-module role matrix, deny-beats-allow overrides, full-replace PUT with audit diff, anti-lockout guard, admin permissions modal", DONE),
     ("Follow-up", "FR-USR-15 policy enforcement wiring (decorators + navbar)", "Role gates narrowed by policy.can(); navbar derived from the same gate/module tags; department grant modelled; nav/API drift tests", DONE),
-    ("Follow-up", "FR-USR inline role checks, pii_reveal read paths, policy leave balances, bulk import jobs, anonymisation", "Next backend slices after the enforcement wiring", PENDING),
+    ("Follow-up", "FR-USR-15 inline scope checks + audited pii_reveal", "No handler branches on the session role copy; can_view_all is the CC-11 scope half; PII reveal route audited per cross-employee read", DONE),
+    ("Follow-up", "FR-USR policy leave balances, background bulk import jobs, anonymisation", "Next backend slices after the PII reveal", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "97 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "102 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "102 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "17 passed"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "17 passed"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "102 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "107 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "107 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "DuckDB", "18 passed"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "18 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "94/94 GET + 44/44 write flows; lifecycle + permission paths included"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0003, identity/sequence rules, required tables, and delta report generated"),

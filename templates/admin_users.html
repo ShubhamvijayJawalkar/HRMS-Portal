@@ -258,6 +258,23 @@
 </div>
 
 
+
+<!-- PII Reveal Modal -->
+<div class="modal fade" id="piiModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title"><i class="bi bi-eye me-2"></i>Personal data <span id="piiUserLabel" class="text-muted fs-6"></span></h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <div class="alert alert-warning py-2 fs-6"><i class="bi bi-shield-exclamation me-1"></i>This reveal is recorded in the audit log with your user ID.</div>
+                <dl class="row mb-0 fs-6" id="piiBody"></dl>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" style="border-radius:var(--button-radius);font-size:12px;padding:7px 14px;font-weight:600;" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Permissions Modal -->
 <div class="modal fade" id="permissionsModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -276,6 +293,8 @@
 </div>
 
 <script>
+const myEmpId = {{ my_emp_id|tojson }};
+const canRevealPii = {{ can_reveal_pii|tojson }};
 let currentPage = 1;
 let totalUsers = 0;
 const PER_PAGE = 20;
@@ -376,7 +395,8 @@ function loadUsers(page) {
                 : `<button class="btn ${u.status==='Active'?'btn-danger':'btn-success'} btn-sm" onclick="toggleStatus('${u.emp_id}','${u.status}')">${u.status==='Active'?'Block':'Unblock'}</button>`;
             const archiveAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-danger btn-sm" onclick="archiveUser('${u.emp_id}','${esc(u.name)}')" title="Archive"><i class="bi bi-archive"></i></button>`;
             const permAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-secondary btn-sm" onclick="openPermissions('${u.emp_id}')" title="Permissions"><i class="bi bi-shield-lock"></i></button>`;
-            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${accessAction}${archiveAction}</div>`;
+            const piiAction = u.emp_id === myEmpId || !canRevealPii ? '' : `<button class="btn btn-outline-warning btn-sm" onclick="revealPii('${u.emp_id}','${esc(u.name)}')" title="Personal data (audited)"><i class="bi bi-eye"></i></button>`;
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -495,6 +515,22 @@ function showMsg(text, type) {
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
 
 document.addEventListener('DOMContentLoaded', () => loadUsers(1));
+async function revealPii(id, name) {
+    if (!confirm(`Reveal the personal data of "${name}" (${id})? This is recorded in the audit log.`)) return;
+    const r = await fetch(`/api/users/${id}/pii`);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Failed', 'error'); return; }
+    document.getElementById('piiUserLabel').textContent = `— ${d.emp_id} (${d.name})`;
+    const rows = [
+        ['Date of birth', d.date_of_birth || '—'],
+        ['Address', d.address || '—'],
+        ['Emergency contact', d.emergency_contact_name || '—'],
+        ['Emergency phone', d.emergency_contact_phone || '—']
+    ];
+    document.getElementById('piiBody').innerHTML = rows.map(([k, v]) =>
+        `<dt class="col-sm-5 text-muted">${esc(k)}</dt><dd class="col-sm-7">${esc(v)}</dd>`).join('');
+    new bootstrap.Modal(document.getElementById('piiModal')).show();
+}
 let permEmpId = null;
 let permDefaults = {};
 

@@ -1246,6 +1246,218 @@ def test_department_grant_keeps_hr_department_access(client):
         _cleanup_user_contract_rows('EMP932')
 
 
+# ── FR-USR-15 scope + PII reveal ───────────────────────────────────────────
+
+def test_no_handler_authorizes_on_the_session_role_copy():
+    """Authorization must read the policy, not `session['role']`."""
+    import inspect
+
+    import app as app_module
+
+    offenders = []
+    for endpoint, view in app_module.app.view_functions.items():
+        source = inspect.getsource(view)
+        # `session['role'] = ...` (login priming) is not an authorization
+        # decision; a *read* of the session role copy is.
+        for line in source.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("session['role'] ="):
+                continue
+            if "session.get('role')" in stripped or "session['role']" in stripped:
+                offenders.append(endpoint)
+                break
+    assert not offenders, f'handlers still branch on the session role copy: {sorted(offenders)}'
+
+
+def test_company_wide_scope_is_a_policy_decision(client):
+    """CC-11 scope: the list endpoints split on can_view_all, not on a role list."""
+    import policy
+
+    _set_admin_session(client, 99884)
+    try:
+        _create_policy_user(client, 'EMP940', role='Finance')
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO goals (goal_id, emp_id, title, target_date, weight, status, created_at) "
+            "VALUES (-700010, 'EMP002', 'Admin list', '2030-01-01', 100, 'Active', ?)",
+            [datetime.now()],
+        )
+        conn.execute(
+            "INSERT INTO goals (goal_id, emp_id, title, target_date, weight, status, created_at) "
+            "VALUES (-700011, 'EMP940', 'Finance list', '2030-01-01', 100, 'Active', ?)",
+            [datetime.now()],
+        )
+        conn.close()
+
+        # Admin keeps the company-wide list.
+        rows = client.get('/api/goals').get_json()
+        assert {'EMP002', 'EMP940'} <= {r['emp_id'] for r in rows}
+
+        # Finance (the list owner in this fixture) is scoped to its own rows,
+        # exactly as before this slice.
+        _login_as(client, 'EMP940', 'Finance', 99883)
+        assert policy.can_view_all({'emp_id': 'EMP940', 'role': 'Finance'}, 'goals') is False
+        assert policy.can_view_all({'emp_id': 'EMP001', 'role': 'Admin'}, 'goals') is True
+        rows = client.get('/api/goals').get_json()
+        assert {r['emp_id'] for r in rows} == {'EMP940'}
+
+        # An explicit deny on `goals` takes the company-wide list away from an
+        # Admin: the module check runs before the scope check, so they fall
+        # back to their own records instead of the whole company.
+        _set_admin_session(client, 99882)
+        _create_policy_user(client, 'EMP944', role='Admin')
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO goals (goal_id, emp_id, title, target_date, weight, status, created_at) "
+            "VALUES (-700012, 'EMP944', 'Narrowed list', '2030-01-01', 100, 'Active', ?)",
+            [datetime.now()],
+        )
+        conn.close()
+        _set_admin_session(client, 99882)
+        assert client.put(
+            '/api/users/EMP944/permissions', json={'modules': {'goals': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP944', 'Admin', 99881)
+        rows = client.get('/api/goals').get_json()
+        assert {r['emp_id'] for r in rows} == {'EMP944'}
+    finally:
+        _clear_permission_rows('EMP944', 'EMP940')
+        conn = get_db()
+        conn.execute("DELETE FROM goals WHERE emp_id IN ('EMP940', 'EMP944')")
+        conn.close()
+        _cleanup_user_contract_rows('EMP944')
+        conn = get_db()
+        conn.execute("DELETE FROM goals WHERE goal_id IN (-700010, -700011, -700012)")
+        conn.close()
+        _cleanup_user_contract_rows('EMP940')
+
+
+def test_payslip_access_follows_the_payroll_module(client):
+    """Own payslip always; someone else's needs the payroll capability."""
+    _set_admin_session(client, 99887)
+    try:
+        _create_policy_user(client, 'EMP941', role='Finance')
+        _login_as(client, 'EMP941', 'Finance', 99886)
+        assert client.get('/api/payslip/1/EMP941').status_code in (200, 404)
+        assert client.get('/api/payslip/1/EMP002').status_code in (200, 404)
+        # An Employee is limited to their own record. The role has to change in
+        # the database: the policy reads the live row, not the session copy.
+        conn = get_db()
+        conn.execute("UPDATE users SET role = 'Employee' WHERE emp_id = 'EMP941'")
+        conn.close()
+        _login_as(client, 'EMP941', 'Employee', 99885)
+        assert client.get('/api/payslip/1/EMP941').status_code in (200, 404)
+        assert client.get('/api/payslip/1/EMP002').status_code == 403
+        conn = get_db()
+        conn.execute("UPDATE users SET role = 'Finance' WHERE emp_id = 'EMP941'")
+        conn.close()
+        # Denying payroll to the Finance user removes the cross-employee read.
+        _set_admin_session(client, 99884)
+        assert client.put(
+            '/api/users/EMP941/permissions', json={'modules': {'payroll': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP941', 'Finance', 99883)
+        assert client.get('/api/payslip/1/EMP941').status_code in (200, 404)
+        assert client.get('/api/payslip/1/EMP002').status_code == 403
+    finally:
+        _clear_permission_rows('EMP941')
+        _cleanup_user_contract_rows('EMP941')
+
+
+def test_pii_reveal_requires_the_module_and_is_audited(client):
+    """FR-USR-15: cross-employee PII needs `pii_reveal` and leaves an audit row."""
+    import policy
+
+    _set_admin_session(client, 99882)
+    try:
+        _create_policy_user(client, 'EMP942', role='HR')
+        conn = get_db()
+        conn.execute(
+            "UPDATE users SET address = '1 Test Street', emergency_contact_name = 'Next Of Kin', "
+            "emergency_contact_phone = '+91-0000000000' WHERE emp_id = 'EMP942'"
+        )
+        conn.close()
+
+        # Admin holds pii_reveal: allowed, and audited.
+        assert client.get('/api/users/EMP942/pii').status_code == 200
+        payload = client.get('/api/users/EMP942/pii').get_json()
+        assert payload['address'] == '1 Test Street'
+        assert payload['emergency_contact_phone'] == '+91-0000000000'
+        conn = get_db()
+        reveals = conn.execute(
+            "SELECT entity_id, details FROM audit_log WHERE action = 'PII_REVEAL' "
+            "AND entity_id = 'EMP942'"
+        ).fetchall()
+        conn.close()
+        assert len(reveals) == 2, reveals
+        assert 'EMP942' in reveals[0][1] and 'EMP001' in reveals[0][1]
+
+        # The directory itself never carries the personal fields.
+        directory = client.get('/api/users/EMP942').get_json()
+        assert 'address' not in directory and 'emergency_contact_phone' not in directory
+
+        # HR holds pii_reveal by role: allowed.
+        _login_as(client, 'EMP942', 'HR', 99881)
+        assert client.get('/api/users/EMP001/pii').status_code == 200
+
+        # A plain Employee is refused by the module, even though the HR gate
+        # admits an HR-department user of any role.
+        conn = get_db()
+        conn.execute("UPDATE users SET role = 'Employee' WHERE emp_id = 'EMP942'")
+        conn.close()
+        _login_as(client, 'EMP942', 'Employee', 99880)
+        assert client.get('/api/users/EMP001/pii').status_code == 403
+        conn = get_db()
+        conn.execute("UPDATE users SET role = 'HR' WHERE emp_id = 'EMP942'")
+        conn.close()
+
+        # Denying pii_reveal removes it, and the self record stays readable.
+        _set_admin_session(client, 99879)
+        assert client.put(
+            '/api/users/EMP942/permissions', json={'modules': {'pii_reveal': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP942', 'HR', 99878)
+        # The reveal route is module-gated, so a denied pii_reveal blocks it
+        # outright — the employee's own personal data keeps flowing through
+        # /api/profile, which never needs the capability.
+        assert client.get('/api/users/EMP001/pii').status_code == 403
+        assert client.get('/api/users/EMP942/pii').status_code == 403
+        profile = client.get('/api/profile').get_json()
+        assert profile['address'] == '1 Test Street'
+        # Own record is not logged as a reveal.
+        conn = get_db()
+        own_reveals = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'PII_REVEAL' AND entity_id = 'EMP942'"
+        ).fetchone()[0]
+        conn.close()
+        assert own_reveals == 2
+        assert policy.pii_view({'emp_id': 'EMP942', 'role': 'Employee'}, 'EMP942') is True
+    finally:
+        conn = get_db()
+        conn.execute("DELETE FROM audit_log WHERE entity_id = 'EMP942' AND action = 'PII_REVEAL'")
+        conn.close()
+        _clear_permission_rows('EMP942')
+        _cleanup_user_contract_rows('EMP942')
+
+
+def test_pii_admin_page_hides_the_reveal_without_the_module(client):
+    _set_admin_session(client, 99877)
+    try:
+        _create_policy_user(client, 'EMP943', role='Admin')
+        _login_as(client, 'EMP943', 'Admin', 99876)
+        assert 'canRevealPii = true' in client.get('/admin/users').get_data(as_text=True)
+        _set_admin_session(client, 99875)
+        assert client.put(
+            '/api/users/EMP943/permissions', json={'modules': {'pii_reveal': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP943', 'Admin', 99874)
+        page = client.get('/admin/users').get_data(as_text=True)
+        assert 'canRevealPii = false' in page
+    finally:
+        _clear_permission_rows('EMP943')
+        _cleanup_user_contract_rows('EMP943')
+
+
 @pytest.mark.skipif(
     os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
     reason='the boolean adapter snoop needs PostgreSQL and both schemas',

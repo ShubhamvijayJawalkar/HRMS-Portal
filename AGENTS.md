@@ -10,8 +10,8 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 97 on DuckDB, 102 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 17 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 102 on DuckDB, 107 on PostgreSQL)
+python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 18 tests)
 ```
 
 ### Running the suite against PostgreSQL (Phase 2)
@@ -28,9 +28,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (97 on DuckDB, 102 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (102 on DuckDB, 107 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
-- `tests/test_playwright.py` — Playwright browser tests (17 tests)
+- `tests/test_playwright.py` — Playwright browser tests (18 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
@@ -308,9 +308,8 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: the inline `session['role']` checks inside handlers,
-  `pii_reveal` read paths, policy-derived leave balances, background bulk/import
-  jobs, and two-person anonymisation.
+- Remaining follow-up work: policy-derived leave balances, background
+  bulk/import jobs, and two-person anonymisation.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -387,11 +386,47 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   navbar link while untouched modules keep working. DuckDB is 97 passed /
   6 skipped, PostgreSQL 102 passed / 1 skipped (also with Redis), Playwright
   17/17 on both backends, probe 94/94 GET + 44/44 write.
-- Still open: the ~15 inline `session['role']` checks inside handlers remain
-  string comparisons. They are *narrower* than the gate in front of them, so
-  they cannot widen access — they just do not honour a per-module override
-  inside the handler. That is the next slice, together with gating the
-  `pii_reveal` read paths.
+- The inline scope checks and the `pii_reveal` read paths landed in the next
+  slice (below).
+
+## FR-USR-15 inline scope checks + PII reveal
+- **Zero** `session.get('role')` / `session['role']` reads remain in any view
+  handler. The 12 authorization decision points that were string comparisons
+  now call the policy: `/api/credentials`, the `/dashboard` variant choice, and
+  the "company-wide list vs own records" split in `/api/regularization`,
+  `/api/goals`, `/api/feedback-360`, `/api/expenses`, `/api/tickets`,
+  `/api/tickets/<id>`, `/api/leaves` and `/api/break-approvals`, plus the
+  own-or-payroll check in `/api/payslip/<run>/<emp>` and
+  `/api/payroll-runs/<id>/payslip-pdf/<emp>` (`_may_read_payslip`).
+- `policy.can_view_all(actor, module)` is the CC-11 scope half: capability
+  **and** company-wide visibility. `ALL_SCOPE_ROLES` is `Admin`/`Super Admin`
+  only, which reproduces today's `role == 'Admin'` split exactly. HR and Finance
+  are deliberately *not* added — the admin pages they can open today still show
+  them their own records only, and widening that is a product decision, not a
+  hardening step (noted in the code).
+- Consequence worth knowing: because the module check runs before the scope
+  check, an admin with `goals` denied falls back to their own records instead of
+  the company list, and the finance payslip read disappears with a `payroll`
+  deny.
+- `policy.sees_admin_surface()` picks the admin dashboard variant from the
+  matrix ("administers something") instead of `role in (Admin, Finance) or
+  department == 'HR'`; all three still get the admin dashboard, employees and
+  team leaders still get the self-service one.
+- **PII is now a real control.** `policy.pii_view(actor, target)` allows own
+  records unconditionally and requires `pii_reveal` for anyone else's;
+  `policy.PII_FIELDS` is the single list of personal columns.
+  `GET /api/users/<id>/pii` (`hr_or_admin_required`, module `pii_reveal`) is the
+  only route that returns another employee's date of birth, address or emergency
+  contact, and **every cross-employee reveal writes a `PII_REVEAL` audit row**
+  naming the subject and the viewer. The directory payload itself still carries
+  none of those fields, and `/api/profile` (own record) goes through the same
+  helper so the rule is stated once. The admin user list shows the reveal action
+  only when the actor actually holds the capability.
+- A test walks `app.view_functions` and fails if any handler branches on the
+  session role copy, so the drift cannot come back.
+- 5 new unit tests + 1 new Playwright test. DuckDB is 102 passed / 6 skipped;
+  PostgreSQL 107 passed / 1 skipped (also with Redis); Playwright 18/18 on both
+  backends; probe 94/94 GET + 44/44 write.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

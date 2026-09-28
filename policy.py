@@ -334,6 +334,70 @@ def nav_entries(actor, *, conn=None) -> list[dict]:
             visible.append(entry)
     return visible
 
+# ── CC-11 scope ───────────────────────────────────────────────────────────
+# A capability is not a scope. ``can(actor, module)`` answers "may this role
+# touch the module at all"; ``can_view_all`` answers "does it see the whole
+# company or only its own records". The self-service list endpoints have always
+# split on ``role == 'Admin'``, so the company-wide scope is granted to the
+# operations roles only. HR and Finance are deliberately *not* in this set:
+# widening what they can list is a product decision, not a hardening step, so
+# it is left exactly as it is today.
+ALL_SCOPE_ROLES = frozenset({'Admin', 'Super Admin'})
+
+# Modules that mean "administers something" — used to pick the admin dashboard
+# variant, which today is ``role in (Admin, Finance) or department == 'HR'``.
+ADMIN_SURFACE_MODULES = (
+    'users', 'import_users',
+    'candidates', 'jobs', 'offers',
+    'payroll', 'salary_structures',
+    'holidays', 'audit', 'reports', 'analytics',
+    'shift_admin', 'policy_admin',
+)
+
+
+def can_view_all(actor, module, *, conn=None) -> bool:
+    """May ``actor`` list every record in ``module`` (not just their own)?"""
+    if not isinstance(actor, dict):
+        return False
+    if str(actor.get('role') or '') not in ALL_SCOPE_ROLES:
+        return False
+    return can(actor, module, conn=conn)
+
+
+def sees_admin_surface(actor, *, conn=None) -> bool:
+    """Does this actor administer anything (chooses the dashboard variant)?"""
+    if not isinstance(actor, dict) or not actor.get('emp_id'):
+        return False
+    return any(can(actor, module, conn=conn) for module in ADMIN_SURFACE_MODULES)
+
+
+def pii_view(actor, target_emp_id, *, conn=None) -> bool:
+    """May ``actor`` see the personal fields (DOB, address, emergency contact) of ``target_emp_id``?
+
+    Own record: always allowed, whatever the role matrix says. Someone else's
+    record: requires the ``pii_reveal`` capability, which an override can deny
+    per user. Callers that expose another employee's PII must also write a
+    ``PII_REVEAL`` audit row — see ``_pii_audit_fields``.
+    """
+    if not isinstance(actor, dict) or not actor.get('emp_id'):
+        return False
+    if actor.get('emp_id') == target_emp_id:
+        return True
+    return can(actor, 'pii_reveal', resource={'emp_id': target_emp_id}, conn=conn)
+
+
+# Personal fields the v2.0 schema marks as PII (db/postgres_schema.sql users).
+PII_FIELDS = (
+    'date_of_birth', 'address', 'emergency_contact_name', 'emergency_contact_phone',
+)
+
+
+def redact_pii(row_pii: dict, allowed: bool) -> dict:
+    """Drop the PII keys from a projection unless the actor may see them."""
+    if allowed:
+        return dict(row_pii)
+    return {key: value for key, value in row_pii.items() if key not in PII_FIELDS}
+
 
 def validate_module_map(modules) -> dict[str, bool]:
     """Validate a ``{module: allow}`` override payload (CC-12: no unknown keys)."""
