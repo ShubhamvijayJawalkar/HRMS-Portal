@@ -79,7 +79,7 @@ _ROLE_MATRIX: dict[str, dict[str, bool]] = {
         'expenses': True,
         'onboarding': True, 'offboarding': True,
         'audit': True, 'reports': True, 'analytics': True,
-        'tickets': True, 'assets': True, 'performance': False, 'goals': False,
+        'tickets': True, 'assets': True, 'performance': True, 'goals': True,
         'documents': True,
         'shift_admin': False, 'policy_admin': False, 'pii_reveal': True,
     },
@@ -133,6 +133,61 @@ ROLE_DEFAULTS: dict[str, dict[str, bool]] = {
 
 # An unknown role is not an error to guess around: it denies everything.
 NO_PERMISSIONS: dict[str, bool] = {module: False for module in PERMISSION_MODULES}
+
+
+# ── Department dimension (FR-USR-15) ──────────────────────────────────────
+# `hr_or_admin_required` has always admitted an HR-*department* user of any
+# role, not just the HR role. A flat role→bool matrix cannot express that, so
+# the department grant is modelled here instead of being silently dropped (which
+# would lock HR-department staff out of the pages they can reach today).
+# `pii_reveal` is deliberately absent: department membership alone must not
+# confer PII access, and no read path is gated by it yet.
+DEPARTMENT_GRANTS: dict[str, frozenset] = {
+    'HR': frozenset({
+        'candidates', 'jobs', 'offers',
+        'leaves', 'regularization', 'breaks', 'expenses',
+        'onboarding', 'offboarding',
+        'tickets', 'assets', 'documents', 'goals', 'performance',
+        'audit', 'reports', 'analytics', 'import_users',
+    }),
+}
+
+# ── Navigation (FR-USR-15) ────────────────────────────────────────────────
+# One spec for the navbar, so the navigation and the API can no longer drift.
+# ``module`` is the permission a *page route* requires; ``always`` marks
+# self-service pages that are gated by login alone (no module). ``children``
+# renders the Modules dropdown, which disappears when it has no visible child.
+NAV_ENTRIES: tuple[dict, ...] = (
+    {'href': '/dashboard', 'label': 'Dashboard', 'icon': 'speedometer2', 'always': True},
+    {'href': '/admin/users', 'label': 'Users', 'icon': 'people-fill', 'module': 'users'},
+    {'href': '/admin/holidays', 'label': 'Holidays', 'icon': 'calendar-event', 'module': 'holidays'},
+    {
+        'href': '#', 'label': 'Modules', 'icon': 'grid-3x3-gap-fill', 'group': 'modules',
+        'children': (
+            {'href': '/admin/assets', 'label': 'Assets', 'icon': 'laptop', 'module': 'assets'},
+            {'href': '/admin/jobs', 'label': 'Jobs', 'icon': 'briefcase', 'module': 'jobs'},
+            {'href': '/admin/candidates', 'label': 'Candidates', 'icon': 'person-lines-fill', 'module': 'candidates'},
+            {'href': '/admin/payroll', 'label': 'Payroll', 'icon': 'cash-stack', 'module': 'payroll'},
+            {'href': '/admin/salary-structures', 'label': 'Salary', 'icon': 'wallet', 'module': 'salary_structures'},
+            {'href': '/admin/documents', 'label': 'Documents', 'icon': 'file-earmark-text', 'module': 'documents'},
+            {'divider': True},
+            {'href': '/admin/goals', 'label': 'Goals', 'icon': 'bullseye', 'module': 'goals'},
+            {'href': '/admin/reviews', 'label': 'Reviews', 'icon': 'star', 'module': 'performance'},
+            {'href': '/admin/expenses', 'label': 'Expenses', 'icon': 'receipt', 'module': 'expenses'},
+            {'href': '/admin/tickets', 'label': 'Tickets', 'icon': 'ticket', 'module': 'tickets'},
+            {'href': '/admin/leaves', 'label': 'Leave Requests', 'icon': 'calendar-x', 'module': 'leaves'},
+            {'href': '/admin/analytics', 'label': 'Analytics', 'icon': 'graph-up', 'module': 'analytics'},
+            {'href': '/admin/audit', 'label': 'Audit', 'icon': 'journal-text', 'module': 'audit'},
+            {'href': '/admin/reports', 'label': 'Reports', 'icon': 'file-spreadsheet', 'module': 'reports'},
+            {'href': '/admin/import-users', 'label': 'Import', 'icon': 'upload', 'module': 'import_users'},
+        ),
+    },
+    {'href': '/leaves', 'label': 'Leaves', 'icon': 'calendar-check', 'always': True},
+    {'href': '/regularization', 'label': 'Regularization', 'icon': 'pencil-square', 'always': True},
+    {'href': '/onboarding', 'label': 'Onboarding', 'icon': 'rocket-takeoff', 'always': True},
+    {'href': '/offboarding', 'label': 'Offboarding', 'icon': 'box-arrow-right', 'always': True},
+    {'href': '/profile', 'label': 'Profile', 'icon': 'person-fill-gear', 'always': True},
+)
 
 
 class PolicyError(ValueError):
@@ -209,6 +264,17 @@ def current_actor(conn=None) -> dict:
     return actor_from_row(row)
 
 
+def department_grant(actor, module) -> bool:
+    """Does the actor's department grant ``module`` regardless of role?
+
+    Kept separate from :func:`role_defaults` so the department dimension stays
+    visible in review instead of being folded into the role table.
+    """
+    if not isinstance(actor, dict) or module not in PERMISSION_MODULES:
+        return False
+    return module in DEPARTMENT_GRANTS.get(str(actor.get('department') or '').strip(), frozenset())
+
+
 def can(actor, module, resource=None, *, conn=None) -> bool:
     """CC-11 capability check: may ``actor`` use ``module`` on ``resource``?
 
@@ -222,6 +288,8 @@ def can(actor, module, resource=None, *, conn=None) -> bool:
         return False
     if module not in PERMISSION_MODULES:
         return False
+    if department_grant(actor, module):
+        return True
     own_conn = conn is None
     if own_conn:
         from app import get_db  # lazy: no circular import at module load
@@ -239,6 +307,32 @@ def can(actor, module, resource=None, *, conn=None) -> bool:
     if module == 'pii_reveal' and isinstance(resource, dict):
         return resource.get('emp_id') == actor.get('emp_id')
     return False
+
+
+def nav_entries(actor, *, conn=None) -> list[dict]:
+    """Navbar items visible to ``actor`` (FR-USR-15: nav == API).
+
+    Self-service pages (``always``) are visible to any signed-in user; module
+    pages are visible when the actor can use that module. A Modules dropdown
+    with no visible child is dropped entirely.
+    """
+    visible: list[dict] = []
+    for entry in NAV_ENTRIES:
+        if entry.get('always'):
+            visible.append(entry)
+            continue
+        if entry.get('group') == 'modules':
+            children = [
+                child for child in entry.get('children', ())
+                if child.get('divider') or can(actor, child['module'], conn=conn)
+            ]
+            if not children:
+                continue
+            visible.append({**entry, 'children': children})
+            continue
+        if can(actor, entry['module'], conn=conn):
+            visible.append(entry)
+    return visible
 
 
 def validate_module_map(modules) -> dict[str, bool]:

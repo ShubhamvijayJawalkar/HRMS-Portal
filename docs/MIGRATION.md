@@ -663,7 +663,27 @@ self-actions with `409`, and retain payroll/audit history; login rejects
   `uq_users_email_ci` in `0001_baseline`; DuckDB/`legacy` rely on the API
   pre-check.
 
-Validation: **90 DuckDB unit tests passed / 6 skipped**, **95 PostgreSQL unit
+### 14.4 Policy enforcement wiring (implemented)
+
+`policy.can()` is now the enforcement point for the role gates and the navbar:
+
+- The four gates share one body. The role/department check remains the outer
+  gate, unchanged, and `policy.can(actor, module)` is an additional *narrowing*
+  check, so a user with no override rows behaves exactly as before — the matrix
+  can revoke access, never grant it.
+- `app._ROUTE_MODULES` maps every gated view to a module; the gates stamp
+  `__hrms_gate__`/`__hrms_module__` on the view and `navigation_for(actor)`
+  rebuilds the navbar from `policy.NAV_ENTRIES` with that same predicate, so a
+  nav link exists only when the linked route would admit the user.
+- `policy.DEPARTMENT_GRANTS` models the department dimension that
+  `hr_or_admin_required` has always had (an HR-department user of any role),
+  which a flat role table would otherwise have removed. `users`, the payroll
+  modules and `pii_reveal` are excluded from it.
+- Corrections made while wiring: HR holds `goals` and `performance` (the
+  `/admin/goals` and `/admin/reviews` pages have always been HR-reachable), and
+  `/admin/leaves` is now linked from the navbar.
+
+Validation: **97 DuckDB unit tests passed / 6 skipped**, **102 PostgreSQL unit
 tests passed / 1 skipped** (also with Redis), **17 Playwright tests passed on
 DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 44/44
 write flows**.
@@ -696,10 +716,11 @@ rewrites for the v2.0 `BOOLEAN` column — verified by the new probe flows
 `user-permissions(put|get)` on a clean v2.0 database and by a PG-gated test that
 asserts both column shapes.
 
-Still pending (deliberately separate commit): the decorators, the remaining
-inline role checks, and `templates/_navbar.html` keep their own comparisons, so
-`policy.can()` is not yet the enforcement point, and `pii_reveal` is modelled
-but not yet applied to any read path.
+`policy.can()` became the enforcement point in §14.4. Still pending: the
+~15 inline `session['role']` comparisons inside handlers (they are narrower
+than the gate in front of them, so they cannot widen access, but they do not
+honour a per-module override), and `pii_reveal`, which is modelled but not yet
+applied to any read path.
 
 ## 15. Next steps
 
@@ -707,7 +728,7 @@ but not yet applied to any read path.
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. Continue the FR-USR hardening follow-up. The archive/restore, directory
-   contract, and permission-policy (API + matrix) slices are implemented; next
-   wire `policy.can()` into the decorators, the inline role checks, and
-   `_navbar.html` (which still duplicates the matrix), then add policy-derived
-   leave balances, background bulk/import jobs, and two-person anonymisation.
+   contract, permission-policy and policy-enforcement slices are implemented;
+   next convert the inline role checks in handlers, gate the `pii_reveal` read
+   paths (and audit the reveal), then add policy-derived leave balances,
+   background bulk/import jobs, and two-person anonymisation.

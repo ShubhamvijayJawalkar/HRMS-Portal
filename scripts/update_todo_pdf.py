@@ -40,6 +40,13 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR-15 enforcement wiring: the four role gates now narrow with "
+     "policy.can() (the role/department check stays the outer gate, so an empty override table is a "
+     "no-op), every gated view is mapped to a module, and the navbar is derived from the same "
+     "gate/module tags so a link exists only when the route would admit the user. The HR-department "
+     "grant is modelled explicitly. Drift removed (Finance no longer sees 403ing links, Super Admin "
+     "sees the admin links) and /admin/leaves is now reachable. DuckDB 97 passed / 6 skipped; "
+     "PostgreSQL 102 passed / 1 skipped; Playwright 17 passed; probe 94/94 GET + 44/44 write."),
     ("2026-09-28", "FR-USR-09 permission policy implemented: policy.py owns the 27-module role matrix "
      "with deny-beats-allow per-user overrides, GET/PUT /api/users/<id>/permissions does a full "
      "replace with an audit diff and an anti-lockout guard, and the admin user list gained a "
@@ -113,15 +120,15 @@ TASKS = [
     ("Follow-up", "FR-USR archive/restore and session revocation", "Hard delete replaced with retained archive/restore; admin UI and cross-backend tests updated", DONE),
     ("Follow-up", "FR-USR directory contract (bounded pagination, sorting, validation)", "per_page capped at 200, allow-listed sorting, EMP/email/role/department validation, case-insensitive uniqueness, partial PUT with role-change audit, CSV import under the same contract", DONE),
     ("Follow-up", "FR-USR-09 permission policy (policy.py matrix + permissions API/UI)", "27-module role matrix, deny-beats-allow overrides, full-replace PUT with audit diff, anti-lockout guard, admin permissions modal", DONE),
-    ("Follow-up", "FR-USR policy enforcement wiring (decorators, inline role checks, navbar)", "policy.can() is not yet the enforcement point; the navbar and decorators still compare role strings", PENDING),
-    ("Follow-up", "FR-USR policy leave balances, bulk import jobs, anonymisation", "Next backend slices after the policy wiring", PENDING),
+    ("Follow-up", "FR-USR-15 policy enforcement wiring (decorators + navbar)", "Role gates narrowed by policy.can(); navbar derived from the same gate/module tags; department grant modelled; nav/API drift tests", DONE),
+    ("Follow-up", "FR-USR inline role checks, pii_reveal read paths, policy leave balances, bulk import jobs, anonymisation", "Next backend slices after the enforcement wiring", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "90 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "95 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "95 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "97 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "102 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "102 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "17 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "17 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),

@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 90 on DuckDB, 95 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 97 on DuckDB, 102 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 17 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (90 on DuckDB, 95 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (97 on DuckDB, 102 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (17 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -308,9 +308,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- Remaining follow-up work: wiring `policy.can()` into the decorators and the
-  navbar, policy-derived leave balances, background bulk/import jobs, and
-  two-person anonymisation.
+- Remaining follow-up work: the inline `session['role']` checks inside handlers,
+  `pii_reveal` read paths, policy-derived leave balances, background bulk/import
+  jobs, and two-person anonymisation.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -345,15 +345,53 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - Deliberate widenings in the matrix (they become real when the decorators are
   wired): Team Leader may use leaves/regularization/goals/performance/documents
   and approve their own team's items; HR may administer holidays/expenses.
-- 9 new unit tests + 1 PG-gated adapter test, and 1 new Playwright test.
-  DuckDB suite is 90 passed / 6 skipped; PostgreSQL is 95 passed / 1 skipped
-  (also with Redis); Playwright is 17/17 on both backends. The public-flip probe
-  gained `user-permissions(put|get)` write flows: **94/94 GET + 44/44 write**.
-- **Not done yet (next slice):** the decorators (`admin_required`,
-  `hr_or_admin_required`, `finance_or_admin_required`, `department_required`),
-  the ~15 inline role checks, and `templates/_navbar.html` still use their own
-  role comparisons, so `can()` is not yet the enforcement point. `pii_reveal` is
-  modelled but no read path is gated by it yet — do not claim that control.
+- 9 new unit tests + 1 PG-gated adapter test, and 1 new Playwright test (totals
+  below). The public-flip probe gained `user-permissions(put|get)` write flows:
+  **94/94 GET + 44/44 write**.
+- The enforcement wiring landed in the next slice (see below); `pii_reveal` is
+  still modelled but no read path is gated by it yet — do not claim that
+  control.
+
+## FR-USR-15 enforcement wiring (decorators + navbar)
+- The four role gates now run a single shared body (`_gated`): the **role /
+  department check stays the outer gate exactly as before**, and
+  `policy.can(actor, module)` is an extra *narrowing* check. An empty override
+  table is therefore a no-op — the matrix can revoke access but never grant it,
+  which is why this could land without a flag day.
+- Each gated view is mapped to a module in `app._ROUTE_MODULES` (87 entries,
+  covering all 60 gated views). Admin-only operations endpoints with no SRS
+  module of their own (dashboard stats, outbox monitor, break monitoring,
+  notification mail, the directory) sit under the `users` umbrella;
+  `_DEFAULT_GATED_MODULE` makes an unmapped view fail the tests.
+- The gates stamp `__hrms_gate__` and `__hrms_module__` on the view, and
+  `navigation_for(actor)` rebuilds the navbar from `policy.NAV_ENTRIES` using
+  that **same** predicate, injected into every template by a context processor.
+  A nav link therefore exists only when the linked route would admit the user.
+- The department dimension is modelled explicitly
+  (`policy.DEPARTMENT_GRANTS`): `hr_or_admin_required` has always admitted an
+  HR-*department* user of any role, so a flat role table would have locked them
+  out. `pii_reveal`, `users` and the payroll modules are deliberately excluded
+  from the department grant.
+- Two matrix corrections found while wiring: HR now holds `goals` and
+  `performance` (the `hr_or_admin_required` pages `/admin/goals` and
+  `/admin/reviews` have always been reachable by HR), and `/admin/leaves` is now
+  linked from the navbar (it was a gated page nobody could navigate to).
+- Drift the wiring removed: a Finance user no longer sees Assets/Analytics/
+  Reports in the navbar (they 403'd), a plain Employee no longer gets an
+  empty-shell Modules dropdown, and `Super Admin` now sees the admin links that
+  were hard-coded to `role == 'Admin'`.
+- Five new tests: every gated view declares a known module; every nav link
+  matches the gate of the route it points at; every gated page is reachable from
+  the navbar; **no role that passes a gate today is narrowed by its own
+  defaults**; and an explicit override deny removes both the route and the
+  navbar link while untouched modules keep working. DuckDB is 97 passed /
+  6 skipped, PostgreSQL 102 passed / 1 skipped (also with Redis), Playwright
+  17/17 on both backends, probe 94/94 GET + 44/44 write.
+- Still open: the ~15 inline `session['role']` checks inside handlers remain
+  string comparisons. They are *narrower* than the gate in front of them, so
+  they cannot widen access — they just do not honour a per-module override
+  inside the handler. That is the next slice, together with gating the
+  `pii_reveal` read paths.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

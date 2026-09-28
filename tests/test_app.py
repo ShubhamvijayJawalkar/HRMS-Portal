@@ -988,7 +988,7 @@ def test_put_permissions_refuses_to_lock_out_the_last_admin(client):
         conn = get_db()
         conn.execute(
             "INSERT INTO user_permissions (perm_id, emp_id, module, allow, created_at, updated_at) "
-            "VALUES (?, 'EMP001', 'users', 0, ?, ?)",
+            "VALUES (?, 'EMP001', 'import_users', 0, ?, ?)",
             [-700001, datetime.now(), datetime.now()],
         )
         conn.close()
@@ -1050,6 +1050,200 @@ def test_permission_policy_rejects_blocked_and_archived_targets(client):
     finally:
         _clear_permission_rows('EMP928')
         _cleanup_user_contract_rows('EMP928')
+
+
+# ── FR-USR-15 enforcement wiring (decorators + navbar) ────────────────────
+
+def _navbar_links(html):
+    """Label/href pairs inside the rendered navbar only (not page content)."""
+    import re
+
+    match = re.search(r'<nav class="navbar.*?</nav>', html, re.S)
+    if not match:
+        return []
+    return re.findall(
+        r'<a class="(?:nav-link|dropdown-item)[^"]*" href="([^"]*)"[^>]*>(.*?)</a>',
+        match.group(0), re.S,
+    )
+
+
+def _gated_views():
+    """Every view whose access is gated by a role/policy check."""
+    import app as app_module
+
+    gated = []
+    for rule in app_module.app.url_map.iter_rules():
+        view = app_module.app.view_functions[rule.endpoint]
+        gate = getattr(view, '__hrms_gate__', 'login')
+        if gate != 'login':
+            gated.append((rule, view, gate, getattr(view, '__hrms_module__', None)))
+    return gated
+
+
+def test_every_gated_view_declares_a_known_module():
+    """A new gated route must be mapped to a module, or it inherits the umbrella."""
+    import app as app_module
+    import policy
+
+    for rule, _view, _gate, module in _gated_views():
+        assert module in policy.PERMISSION_MODULES, f'{rule.rule} -> {module!r}'
+    # Nothing may be silently unmapped: the fallback is the admin umbrella.
+    assert app_module._DEFAULT_GATED_MODULE == 'users'
+    unmapped = sorted({view.__name__ for _r, view, _g, m in _gated_views() if m is None})
+    assert not unmapped, unmapped
+
+
+def test_navigation_matches_the_gate_of_every_linked_route():
+    """FR-USR-15: a nav link exists only when the linked route lets you in."""
+    import app as app_module
+    import policy
+
+    endpoints = app_module._page_rules()
+    for entry in policy.NAV_ENTRIES:
+        targets = entry.get('children') or (entry,)
+        for target in targets:
+            if target.get('divider') or target.get('always'):
+                continue
+            endpoint = endpoints.get(target['href'])
+            assert endpoint, f'nav href has no page route: {target["href"]}'
+            view = app_module.app.view_functions[endpoint]
+            assert getattr(view, '__hrms_module__', None) == target['module'], (
+                f'{target["href"]} is gated by {getattr(view, "__hrms_module__", None)!r} '
+                f'but the navbar declares {target["module"]!r}'
+            )
+
+
+def test_every_gated_page_is_reachable_from_the_navbar():
+    """A module-gated page with no nav entry is a page nobody can find."""
+    import policy
+
+    nav_hrefs = set()
+    for entry in policy.NAV_ENTRIES:
+        nav_hrefs.add(entry['href'])
+        for child in entry.get('children') or ():
+            if not child.get('divider'):
+                nav_hrefs.add(child['href'])
+    missing = sorted({
+        rule.rule for rule, _view, _gate, _module in _gated_views()
+        if not rule.rule.startswith('/api') and rule.rule not in nav_hrefs
+    })
+    assert not missing, f'gated pages missing from the navbar: {missing}'
+
+
+def test_role_defaults_do_not_narrow_any_role_that_passes_the_gate():
+    """With no override rows, the matrix must not lock anyone out of today."""
+    import app as app_module
+    import policy
+
+    conn = get_db()
+    try:
+        for role in policy.ROLE_DEFAULTS:
+            actor = {'emp_id': f'PROBE-{role}', 'role': role, 'department': 'MIS'}
+            actor_hr = {'emp_id': f'PROBE-{role}', 'role': role, 'department': 'HR'}
+            for rule, _view, gate, module in _gated_views():
+                if rule.rule.startswith('/api') or not module:
+                    continue
+                for candidate in (actor, actor_hr):
+                    if not app_module._gate_passes(candidate, gate):
+                        continue  # the gate denies this actor today too
+                    assert policy.can(candidate, module, conn=conn), (
+                        f'role {role} (department {candidate["department"]}) passes {gate} '
+                        f'for {rule.rule} but the matrix denies {module}'
+                    )
+    finally:
+        conn.close()
+
+
+def test_permission_override_deny_removes_route_and_navbar_access(client):
+    """The point of the wiring: an explicit deny actually removes access."""
+    _set_admin_session(client, 99899)
+    try:
+        _create_policy_user(client, 'EMP930', role='HR')
+        _login_as(client, 'EMP930', 'HR', 99896)
+        # Baseline: an HR user reaches the tickets module and sees the link.
+        assert client.get('/admin/tickets').status_code == 200
+        nav_before = _navbar_links(client.get('/dashboard').get_data(as_text=True))
+        assert '/admin/tickets' in [href for href, _label in nav_before], nav_before
+
+        _set_admin_session(client, 99897)
+        denied = client.put('/api/users/EMP930/permissions', json={'modules': {'tickets': False}})
+        assert denied.status_code == 200, denied.get_json()
+
+        _login_as(client, 'EMP930', 'HR', 99898)
+        # Same role, same department: only the override changed.
+        assert client.get('/admin/tickets').status_code == 403
+        # The self-service list is not module-gated, only its admin queue is.
+        assert client.get('/api/tickets').status_code == 200
+        # Untouched modules keep working.
+        assert client.get('/api/candidates').status_code == 200
+        nav_after = _navbar_links(client.get('/dashboard').get_data(as_text=True))
+        assert '/admin/tickets' not in [href for href, _label in nav_after], nav_after
+        assert '/admin/candidates' in [href for href, _label in nav_after], nav_after
+
+        # A grant row lifts a role-default deny for the same user.
+        _set_admin_session(client, 99899)
+        assert client.put(
+            '/api/users/EMP930/permissions', json={'modules': {'payroll': True}}
+        ).status_code == 200
+        _login_as(client, 'EMP930', 'HR', 99896)
+        # payroll is still admin/finance-gated: the matrix can only narrow.
+        assert client.get('/admin/payroll').status_code == 403
+    finally:
+        _clear_permission_rows('EMP930')
+        _cleanup_user_contract_rows('EMP930')
+
+
+def test_admin_operations_endpoints_follow_the_directory_permission(client):
+    """`users` is the umbrella for admin operations with no module of their own."""
+    import policy
+
+    _set_admin_session(client, 99894)
+    try:
+        _create_policy_user(client, 'EMP931', role='Admin')
+        _login_as(client, 'EMP931', 'Admin', 99895)
+        assert client.get('/api/dashboard-stats').status_code == 200
+        _set_admin_session(client, 99893)
+        assert client.put(
+            '/api/users/EMP931/permissions', json={'modules': {'users': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP931', 'Admin', 99896)
+        # admin_required redirects a non-JSON GET away, exactly as for a
+        # non-admin today; the JSON caller gets an explicit 403.
+        assert client.get('/api/users').status_code == 302
+        assert client.get('/api/users', json={}).status_code == 403
+        assert client.post('/api/users', json={
+            'emp_id': 'EMP933', 'name': 'Nope', 'email': 'nope@company.com',
+            'department': 'MIS', 'role': 'Employee', 'password': 'x',
+        }).status_code == 403
+        assert client.get('/admin/users').status_code == 302
+        assert client.get('/api/dashboard-stats').status_code == 200  # reports module
+        assert policy.can({'emp_id': 'EMP931', 'role': 'Admin'}, 'users') is False
+    finally:
+        _clear_permission_rows('EMP931')
+        _cleanup_user_contract_rows('EMP931')
+
+
+def test_department_grant_keeps_hr_department_access(client):
+    """An HR-department user of any role keeps the modules they can reach today."""
+    import policy
+
+    _set_admin_session(client, 99892)
+    try:
+        _create_policy_user(client, 'EMP932', role='Employee')
+        conn = get_db()
+        conn.execute("UPDATE users SET department = 'HR' WHERE emp_id = 'EMP932'")
+        conn.close()
+        _login_as(client, 'EMP932', 'Employee', 99891)
+        assert client.get('/api/candidates').status_code == 200
+        assert client.get('/api/audit-log').status_code in (302, 403)  # admin-only gate
+        nav = [href for href, _label in _navbar_links(client.get('/dashboard').get_data(as_text=True))]
+        assert '/admin/candidates' in nav, nav
+        # The department grant must not leak PII or the directory.
+        assert policy.department_grant({'emp_id': 'EMP932', 'role': 'Employee', 'department': 'HR'}, 'pii_reveal') is False
+        assert policy.department_grant({'emp_id': 'EMP932', 'role': 'Employee', 'department': 'HR'}, 'users') is False
+    finally:
+        _clear_permission_rows('EMP932')
+        _cleanup_user_contract_rows('EMP932')
 
 
 @pytest.mark.skipif(

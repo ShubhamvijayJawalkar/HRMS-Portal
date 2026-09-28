@@ -2174,18 +2174,110 @@ def get_user(emp_id):
 #  DECORATORS
 # ══════════════════════════════════════════════════════════════════════
 
-def _session_user_active():
+def _session_user_active(conn=None):
     emp_id = session.get('emp_id')
     if not emp_id:
         return False
-    conn = get_db()
+    own_conn = conn is None
+    conn = conn or get_db()
     try:
         row = conn.execute(
             "SELECT status, allow_login FROM users WHERE emp_id = ?", [emp_id]
         ).fetchone()
         return bool(row and row[0] in ('Active', 'Onboarding') and row[1])
     finally:
-        conn.close()
+        if own_conn:
+            conn.close()
+
+
+# ── Role/permission gates (the role check is the outer gate; policy.can() can
+#    only narrow it further with an explicit per-user deny) ─────────────────
+# Module per gated view. The admin-only operations endpoints that have no SRS
+# module of their own (dashboard stats, outbox monitor, break monitoring,
+# notification mail, the directory itself) fall under `users`, the umbrella for
+# "admin operations". `tests/test_app.py` fails if a gated view is missing here.
+_ROUTE_MODULES = {
+    # Directory
+    'admin_users': 'users', 'get_users': 'users', 'add_user': 'users',
+    'get_user_route': 'users', 'update_user': 'users', 'block_user': 'users',
+    'unblock_user': 'users', 'archive_user': 'users', 'restore_user': 'users',
+    'delete_user': 'users', 'get_user_permissions': 'users',
+    'update_user_permissions': 'users',
+    'import_users_csv': 'import_users', 'import_users_page': 'import_users',
+    # Attendance / time off
+    'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
+    'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
+    'admin_leaves_page': 'leaves', 'export_leaves': 'leaves',
+    'approve_leave': 'leaves', 'reject_leave': 'leaves',
+    'live_monitoring': 'breaks', 'get_break_summary': 'breaks',
+    'get_disposed_breaks': 'breaks', 'admin_breaks': 'breaks',
+    'admin_dispose_break': 'breaks', 'approve_break': 'breaks', 'reject_break': 'breaks',
+    # ATS
+    'admin_jobs': 'jobs', 'jobs_api': 'jobs', 'close_job': 'jobs',
+    'job_detail': 'jobs', 'recruitment_pipeline': 'jobs',
+    'admin_candidates': 'candidates', 'candidates_api': 'candidates',
+    'candidate_detail': 'candidates', 'update_candidate_status': 'candidates',
+    'interviews_api': 'candidates', 'interview_feedback': 'candidates',
+    'offers_api': 'offers', 'accept_offer': 'offers', 'reject_offer': 'offers',
+    # Lifecycle
+    'review_onboarding_document': 'onboarding',
+    'exit_interviews_api': 'offboarding',
+    'revoke_offboarding_workflow_access': 'offboarding',
+    'admin_revoke_offboarding_access': 'offboarding',
+    # Payroll
+    'admin_payroll': 'payroll', 'payroll_runs_api': 'payroll', 'submit_payroll': 'payroll',
+    'finalize_payroll': 'payroll', 'payroll_items': 'payroll',
+    'bank_file_export': 'payroll', 'tds_report': 'payroll',
+    'approve_payroll': 'payroll_approve',
+    'admin_salary': 'salary_structures', 'salary_api': 'salary_structures',
+    # Workplace
+    'admin_goals': 'goals', 'rate_goal': 'goals',
+    'admin_reviews': 'performance', 'reviews_api': 'performance',
+    'admin_expenses': 'expenses', 'update_expense_status': 'expenses',
+    'admin_tickets': 'tickets', 'assign_ticket': 'tickets',
+    'admin_assets': 'assets', 'assets_api': 'assets', 'return_asset': 'assets',
+    'admin_documents': 'documents',
+    # Assurance
+    'admin_analytics': 'analytics', 'analytics_headcount': 'analytics',
+    'analytics_leave_trends': 'analytics', 'analytics_attrition': 'analytics',
+    'analytics_expense_summary': 'analytics', 'analytics_performance': 'analytics',
+    'audit_page': 'audit', 'get_audit_log': 'audit',
+    'admin_reports': 'reports', 'get_reports': 'reports', 'export_report': 'reports',
+    'export_report_pdf': 'reports', 'get_department_summary': 'reports',
+    'admin_outbox_list': 'audit', 'admin_outbox_dispatch': 'audit',
+    'get_dashboard_stats': 'reports',
+    'send_notification_email': 'users',
+}
+
+# Module used when a gated view has no explicit entry above. The directory is
+# the umbrella for admin operations, so denying it removes the whole surface.
+_DEFAULT_GATED_MODULE = 'users'
+
+
+def _gate_passes(actor, gate, departments=()):
+    """Role/department half of a gate (unchanged semantics per gate)."""
+    role = str(actor.get('role') or '')
+    department = actor.get('department')
+    if gate == 'admin':
+        return role in policy.ADMIN_ROLES
+    if gate == 'hr_or_admin':
+        return role in policy.ADMIN_ROLES or role == 'HR' or department == 'HR'
+    if gate == 'finance_or_admin':
+        return role in policy.ADMIN_ROLES or role == 'Finance'
+    if gate == 'department':
+        return role in policy.ADMIN_ROLES or department in departments
+    return True
+
+
+def _gate_module(f):
+    return _ROUTE_MODULES.get(f.__name__, _DEFAULT_GATED_MODULE)
+
+
+def _tag_gate(decorated, gate, module):
+    """Record the gate on the view so the navbar can reuse it verbatim."""
+    decorated.__hrms_gate__ = gate
+    decorated.__hrms_module__ = module
+    return decorated
 
 
 def login_required(f):
@@ -2197,90 +2289,146 @@ def login_required(f):
                 return jsonify({'error': 'Authentication required'}), 401
             return redirect(url_for('login'))
         return f(*args, **kwargs)
-    return decorated
+    return _tag_gate(decorated, 'login', None)
+
+
+def _gated(f, gate, denial, module, departments=()):
+    """Shared body of every role gate.
+
+    The role/department check stays the outer gate, exactly as before;
+    ``policy.can(actor, module)`` is an additional *narrowing* check, so a user
+    with no override rows behaves identically to this commit's parent while an
+    explicit deny removes access. The gate and module are tagged onto the view
+    so ``navigation_for()`` can reuse the identical predicate for the navbar.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'emp_id' not in session or not _session_user_active():
+            session.clear()
+            if request.is_json:
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('login'))
+        conn = get_db()
+        try:
+            actor = policy.current_actor(conn)
+            if not _gate_passes(actor, gate, departments) or not policy.can(actor, module, conn=conn):
+                return denial()
+        finally:
+            conn.close()
+        return f(*args, **kwargs)
+    return _tag_gate(decorated, gate, module)
+
+
+def _forbidden_json(message):
+    return jsonify({'error': message}), 403
 
 
 def admin_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'emp_id' not in session or not _session_user_active():
-            session.clear()
-            if request.is_json:
-                return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login'))
-        emp_id = session['emp_id']
-        conn = get_db()
-        row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-        conn.close()
-        if not row or row[0] not in ('Admin', 'Super Admin'):
-            if request.is_json:
-                return jsonify({'error': 'Forbidden'}), 403
-            return redirect(url_for('dashboard'))
-        return f(*args, **kwargs)
-    return decorated
+    def denial():
+        if request.is_json:
+            return jsonify({'error': 'Forbidden'}), 403
+        return redirect(url_for('dashboard'))
+    return _gated(f, 'admin', denial, _gate_module(f))
 
 
 def hr_or_admin_required(f):
-    """Require Admin role OR HR department"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'emp_id' not in session or not _session_user_active():
-            session.clear()
-            if request.is_json:
-                return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login'))
-        emp_id = session['emp_id']
-        conn = get_db()
-        row = conn.execute("SELECT role, department FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-        conn.close()
-        if not row:
-            return jsonify({'error': 'Forbidden'}), 403
-        if row[0] in ('Admin', 'Super Admin', 'HR') or row[1] == 'HR':
-            return f(*args, **kwargs)
-        return jsonify({'error': 'Forbidden - HR access required'}), 403
-    return decorated
+    return _gated(
+        f, 'hr_or_admin', lambda: _forbidden_json('Forbidden - HR access required'),
+        _gate_module(f),
+    )
 
 
 def finance_or_admin_required(f):
-    """Require the v2.0 Finance role or an Admin operations role."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'emp_id' not in session or not _session_user_active():
-            session.clear()
-            if request.is_json:
-                return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login'))
-        emp_id = session['emp_id']
-        conn = get_db()
-        row = conn.execute("SELECT role FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-        conn.close()
-        if not row or str(row[0]).lower() not in ('finance', 'admin', 'super admin'):
-            return jsonify({'error': 'Forbidden - Finance access required'}), 403
-        return f(*args, **kwargs)
-    return decorated
+    return _gated(
+        f, 'finance_or_admin', lambda: _forbidden_json('Forbidden - Finance access required'),
+        _gate_module(f),
+    )
 
 
 def department_required(*depts):
     """Require specific department(s) or Admin role"""
     def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            if 'emp_id' not in session or not _session_user_active():
-                if request.is_json:
-                    return jsonify({'error': 'Authentication required'}), 401
-                return redirect(url_for('login'))
-            emp_id = session['emp_id']
-            conn = get_db()
-            row = conn.execute("SELECT role, department FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-            conn.close()
-            if not row:
-                return jsonify({'error': 'Forbidden'}), 403
-            if row[0] in ('Admin', 'Super Admin') or row[1] in depts:
-                return f(*args, **kwargs)
-            return jsonify({'error': 'Forbidden - insufficient department access'}), 403
-        return decorated
+        return _gated(
+            f, 'department', lambda: _forbidden_json('Forbidden - insufficient department access'),
+            _gate_module(f), departments=depts,
+        )
     return decorator
 
+
+
+def _page_rules():
+    """Map a page href to its Flask endpoint (first non-API GET rule wins)."""
+    cache = getattr(app, '_hrms_page_endpoints', None)
+    if cache is None:
+        cache = {}
+        for rule in app.url_map.iter_rules():
+            if rule.rule.startswith('/api/') or 'GET' not in (rule.methods or set()):
+                continue
+            cache.setdefault(rule.rule, rule.endpoint)
+        app._hrms_page_endpoints = cache
+    return cache
+
+
+def navigation_for(actor, conn=None) -> list[dict]:
+    """Navbar entries for ``actor``, filtered by the *routes' own* gate.
+
+    The navigation is derived from ``policy.NAV_ENTRIES`` and the gate/module
+    tags the decorators stamped on each view, so a link is shown exactly when
+    the linked route would let the actor through (FR-USR-15).
+    """
+    own_conn = conn is None
+    conn = conn or get_db()
+    try:
+        endpoints = _page_rules()
+
+        def permitted(href):
+            endpoint = endpoints.get(href)
+            if endpoint is None:
+                # A nav entry with no matching page route: trust the spec.
+                return True
+            view = app.view_functions[endpoint]
+            gate = getattr(view, '__hrms_gate__', 'login')
+            module = getattr(view, '__hrms_module__', None)
+            if gate == 'login' or not module:
+                return True
+            return _gate_passes(actor, gate) and policy.can(actor, module, conn=conn)
+
+        entries = []
+        for entry in policy.NAV_ENTRIES:
+            if entry.get('always'):
+                entries.append(entry)
+                continue
+            if entry.get('group') == 'modules':
+                children = [
+                    child for child in entry.get('children', ())
+                    if child.get('divider') or permitted(child['href'])
+                ]
+                if not any(child.get('href') for child in children):
+                    continue
+                entries.append({**entry, 'children': children})
+                continue
+            if permitted(entry['href']):
+                entries.append(entry)
+        return entries
+    finally:
+        if own_conn:
+            conn.close()
+
+
+@app.context_processor
+def inject_navigation():
+    """Give every template the same policy-filtered navbar (FR-USR-15)."""
+    if 'emp_id' not in session:
+        return {'nav_entries': ()}
+    conn = get_db()
+    try:
+        actor = policy.current_actor(conn)
+        return {'nav_entries': navigation_for(actor, conn=conn)}
+    except Exception:
+        logger.warning('navigation_for failed; rendering an empty navbar', exc_info=True)
+        return {'nav_entries': ()}
+    finally:
+        conn.close()
 
 # ══════════════════════════════════════════════════════════════════════
 #  AUTH ROUTES
