@@ -150,8 +150,16 @@ jobs:
       # probe (every authenticated GET route + the core write flows).
       - name: Create the v2.0 target and run the cutover gates
         run: |
-          psql -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE DATABASE hrms_probe"
+          # psycopg rather than the psql client: the service container
+          # authenticates with scram, so a client would need the password in the
+          # environment, and the driver is already a dependency of the app.
+          python - <<'PY'
+          import psycopg
+          dsn = "postgresql://postgres:postgres@localhost:5432/postgres"
+          with psycopg.connect(dsn, autocommit=True) as conn:
+              conn.execute("DROP DATABASE IF EXISTS hrms_probe")
+              conn.execute("CREATE DATABASE hrms_probe")
+          PY
           export PROBE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/hrms_probe
           DATABASE_URL=$PROBE_URL python -m alembic -c migrations/alembic.ini upgrade head
           python -m py_compile scripts/check_cc_rules.py scripts/probe_public_flip.py
