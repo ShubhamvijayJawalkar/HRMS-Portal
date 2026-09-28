@@ -656,6 +656,131 @@ def test_active_users_endpoint_filters_inactive_employees(client):
 
 
 
+def _set_admin_session(client, session_id):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['department'] = 'MIS'
+        sess['session_id'] = session_id
+
+
+def _cleanup_user_contract_rows(*emp_ids):
+    if not emp_ids:
+        return
+    placeholders = ','.join('?' for _ in emp_ids)
+    conn = get_db()
+    try:
+        conn.execute(
+            f"DELETE FROM audit_log WHERE entity = 'users' AND entity_id IN ({placeholders})",
+            list(emp_ids),
+        )
+        for table in ('user_sessions', 'shift_assignments', 'user_permissions', 'password_reset_tokens'):
+            try:
+                conn.execute(f"DELETE FROM {table} WHERE emp_id IN ({placeholders})", list(emp_ids))
+            except Exception:
+                pass
+        conn.execute(f"DELETE FROM users WHERE emp_id IN ({placeholders})", list(emp_ids))
+    finally:
+        conn.close()
+
+
+def test_user_list_pagination_and_sort_validation(client):
+    _set_admin_session(client, 99881)
+    assert client.get('/api/users?page=0').status_code == 400
+    assert client.get('/api/users?per_page=201').status_code == 400
+    assert client.get('/api/users?sort_by=password').status_code == 400
+    assert client.get('/api/users?sort_dir=sideways').status_code == 400
+    response = client.get('/api/users?per_page=2&sort_by=emp_id&sort_dir=asc')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['per_page'] == 2
+    assert payload['sort_by'] == 'emp_id' and payload['sort_dir'] == 'asc'
+    assert [row['emp_id'] for row in payload['data']] == sorted(row['emp_id'] for row in payload['data'])
+
+
+def test_user_create_validation_and_email_uniqueness(client):
+    _set_admin_session(client, 99882)
+    base = {
+        'name': 'Directory Validation',
+        'department': 'MIS',
+        'role': 'Employee',
+        'password': 'validation-pass-123',
+    }
+    assert client.post('/api/users', json={**base, 'emp_id': 'X1', 'email': 'x1@company.com'}).status_code == 400
+    assert client.post('/api/users', json={**base, 'emp_id': 'EMP905', 'email': 'x@company.com', 'role': 'Owner'}).status_code == 400
+    assert client.post('/api/users', json={**base, 'emp_id': 'EMP905', 'email': 'x@company.com', 'department': 'Unknown'}).status_code == 400
+
+    try:
+        created = client.post('/api/users', json={**base, 'emp_id': 'emp905', 'email': 'Unique.Dir@company.com'})
+        assert created.status_code == 201, created.get_json()
+        duplicate = client.post('/api/users', json={**base, 'emp_id': 'EMP906', 'email': 'unique.dir@company.com'})
+        assert duplicate.status_code == 409
+    finally:
+        _cleanup_user_contract_rows('EMP905', 'EMP906')
+
+
+def test_user_partial_update_preserves_fields_and_audits_role(client):
+    _set_admin_session(client, 99883)
+    try:
+        created = client.post('/api/users', json={
+            'emp_id': 'EMP907', 'name': 'Partial Update',
+            'email': 'emp907@company.com', 'department': 'Support',
+            'role': 'Employee', 'password': 'partial-pass-123',
+        })
+        assert created.status_code == 201, created.get_json()
+
+        updated = client.put('/api/users/EMP907', json={'name': 'Partial Updated'})
+        assert updated.status_code == 200, updated.get_json()
+        detail = client.get('/api/users/EMP907').get_json()
+        assert detail['name'] == 'Partial Updated'
+        assert detail['email'] == 'emp907@company.com'
+        assert detail['role'] == 'Employee' and detail['department'] == 'Support'
+        assert client.put('/api/users/EMP907', json={'unknown': True}).status_code == 400
+        assert client.put('/api/users/EMP907', json={'role': 'Finance'}).status_code == 200
+
+        conn = get_db()
+        audit = conn.execute(
+            'SELECT "before", "after" FROM audit_log WHERE action = \'USER_UPDATE\' '
+            'AND entity_id = \'EMP907\' ORDER BY created_at DESC LIMIT 1'
+        ).fetchone()
+        conn.close()
+        assert json.loads(audit[0])['role'] == 'Employee'
+        assert json.loads(audit[1])['role'] == 'Finance'
+    finally:
+        _cleanup_user_contract_rows('EMP907')
+
+
+def test_user_import_rejects_rows_that_break_the_directory_contract(client):
+    _set_admin_session(client, 99884)
+    csv_body = (
+        'emp_id,name,email,role,department\n'
+        'EMP908,Import Valid,emp908@company.com,Employee,MIS\n'
+        'BAD1,Bad Id,bad1@company.com,Employee,MIS\n'
+        'EMP909,Duplicate Email,emp908@company.com,Employee,MIS\n'
+        'EMP910,Bad Role,emp910@company.com,Owner,MIS\n'
+    )
+    try:
+        response = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
+            content_type='multipart/form-data',
+        )
+        assert response.status_code == 201, response.get_json()
+        payload = response.get_json()
+        assert payload['imported'] == 1
+        assert payload['skipped'] == 3
+        messages = ' | '.join(payload['errors'])
+        assert 'row 3' in messages and 'emp_id' in messages          # BAD1
+        assert 'row 4' in messages and 'emp908@company.com' in messages  # duplicate email
+        assert 'row 5' in messages and 'role must be one of' in messages   # Owner
+        assert client.get('/api/users/EMP908').status_code == 200
+        assert client.get('/api/users/BAD1').status_code == 404
+        assert client.get('/api/users/EMP910').status_code == 404
+    finally:
+        _cleanup_user_contract_rows('EMP908', 'EMP909', 'EMP910', 'BAD1')
+
+
 def test_user_archive_restore_preserves_records_and_revokes_sessions(client):
     emp_id = f"ARC{datetime.now().strftime('%H%M%S%f')}"
     now = datetime.now()
@@ -972,18 +1097,18 @@ def test_audit_log_entity_before_after_written(client):
         sess['role'] = 'Admin'
         sess['session_id'] = 99011
     client.post('/api/users', json={
-        'emp_id': 'XQ8', 'name': 'Audit Subject', 'email': 'xq8@company.com',
+        'emp_id': 'EMP902', 'name': 'Audit Subject', 'email': 'emp902@company.com',
         'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
     })
     conn = get_db()
     row = conn.execute(
         'SELECT entity, entity_id, "after" FROM audit_log '
-        "WHERE action = 'USER_CREATE' AND entity_id = 'XQ8' ORDER BY created_at DESC LIMIT 1"
+        "WHERE action = 'USER_CREATE' AND entity_id = 'EMP902' ORDER BY created_at DESC LIMIT 1"
     ).fetchone()
     conn.close()
     assert row is not None, 'no USER_CREATE audit row'
     assert row[0] == 'users'
-    assert row[1] == 'XQ8'
+    assert row[1] == 'EMP902'
     after = json.loads(row[2])
     assert after['role'] == 'Employee'
     assert after['department'] == 'MIS'
@@ -1496,26 +1621,26 @@ def test_user_create_roundtrips_shift(client):
         sess['role'] = 'Admin'
         sess['session_id'] = 99020
     resp = client.post('/api/users', json={
-        'emp_id': 'SHF1', 'name': 'Shift Tester', 'email': 'shf1@company.com',
+        'emp_id': 'EMP903', 'name': 'Shift Tester', 'email': 'emp903@company.com',
         'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
         'shift_start': '09:00', 'shift_end': '18:00', 'weekly_off_pattern': 'Sun,Mon',
     })
     assert resp.status_code == 201, resp.get_json()
-    assert get_shift('SHF1') == ('09:00', '18:00')
-    detail = client.get('/api/users/SHF1').get_json()
+    assert get_shift('EMP903') == ('09:00', '18:00')
+    detail = client.get('/api/users/EMP903').get_json()
     assert detail['shift_start'] == '09:00'
     assert detail['shift_end'] == '18:00'
     assert detail['weekly_off_pattern'] == 'Sun,Mon'
-    listed = client.get('/api/users?search=shf1').get_json()['data']
-    assert any(u['emp_id'] == 'SHF1' and u['shift_start'] == '09:00' and u['weekly_off_pattern'] == 'Sun,Mon' for u in listed)
-    resp = client.put('/api/users/SHF1', json={
-        'name': 'Shift Tester', 'email': 'shf1@company.com', 'role': 'Employee',
+    listed = client.get('/api/users?search=EMP903').get_json()['data']
+    assert any(u['emp_id'] == 'EMP903' and u['shift_start'] == '09:00' and u['weekly_off_pattern'] == 'Sun,Mon' for u in listed)
+    resp = client.put('/api/users/EMP903', json={
+        'name': 'Shift Tester', 'email': 'emp903@company.com', 'role': 'Employee',
         'department': 'MIS', 'status': 'Active',
         'shift_start': '22:00', 'shift_end': '06:00', 'weekly_off_pattern': 'Tue',
     })
     assert resp.status_code == 200, resp.get_json()
-    assert get_shift('SHF1') == ('22:00', '06:00')
-    assert client.get('/api/users/SHF1').get_json()['weekly_off_pattern'] == 'Tue'
+    assert get_shift('EMP903') == ('22:00', '06:00')
+    assert client.get('/api/users/EMP903').get_json()['weekly_off_pattern'] == 'Tue'
 
 
 def test_shift_24x7_roundtrip(client):
@@ -1567,21 +1692,21 @@ def test_shift_assignments_branch_executes_on_duckdb(client):
             sess['role'] = 'Admin'
             sess['session_id'] = 99022
         resp = client.post('/api/users', json={
-            'emp_id': 'SHF2', 'name': 'Shift Two', 'email': 'shf2@company.com',
+            'emp_id': 'EMP904', 'name': 'Shift Two', 'email': 'emp904@company.com',
             'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
             'shift_start': '13:00', 'shift_end': '22:00',
         })
         assert resp.status_code == 201, resp.get_json()
-        detail = client.get('/api/users/SHF2').get_json()
+        detail = client.get('/api/users/EMP904').get_json()
         assert detail['shift_start'] == '13:00' and detail['shift_end'] == '22:00'
-        listed = client.get('/api/users?search=shf2').get_json()['data']
-        assert any(u['emp_id'] == 'SHF2' and u['shift_start'] == '13:00' for u in listed)
-        resp = client.put('/api/users/SHF2', json={
-            'name': 'Shift Two', 'email': 'shf2@company.com', 'role': 'Employee',
+        listed = client.get('/api/users?search=EMP904').get_json()['data']
+        assert any(u['emp_id'] == 'EMP904' and u['shift_start'] == '13:00' for u in listed)
+        resp = client.put('/api/users/EMP904', json={
+            'name': 'Shift Two', 'email': 'emp904@company.com', 'role': 'Employee',
             'department': 'MIS', 'status': 'Active', 'shift_start': '08:00', 'shift_end': '17:00',
         })
         assert resp.status_code == 200, resp.get_json()
-        assert get_shift('SHF2') == ('08:00', '17:00')
+        assert get_shift('EMP904') == ('08:00', '17:00')
     finally:
         _SHIFT_MODEL_CACHE.clear()
         conn = get_db()

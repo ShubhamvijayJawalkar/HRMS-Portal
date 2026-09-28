@@ -5,8 +5,8 @@ DuckDB → PostgreSQL)**, **Phase 2 (service-layer cutover: the existing app
 runs on PostgreSQL)**, **Phase 3 (cross-cutting rules)**, and the completed
 **Phase 4 capabilities (FR-JOB-01 attendance, FR-PAY-06 payroll, and corrected
 FR-ATS/FR-ONB/FR-OFF lifecycle flows)** of the SRS v2.0 migration plan (§14).
-Final cutover and DuckDB decommission remain tracked in §14 and the living
-TO DO list.
+Final cutover and DuckDB decommission remain tracked in §15 and the living
+TO DO list; the post-migration FR-USR hardening slices are in §14.
 
 > The schema is now **frozen**. Any change to the DuckDB v1.0 schema must be
 > reviewed against this migration before it lands. Add changes here if you
@@ -629,13 +629,52 @@ confirmed every identity sequence remained ahead of `MAX(id)`.
    writable live database. Roll back by restoring the previous image and
    `APP_DB_SCHEMA=legacy`; do not delete the fallback during this phase.
 
-## 14. Next steps
+## 14. FR-USR employee-management hardening (follow-up slices)
+
+These slices are independent of the migration phases and are delivered as small,
+reversible changes.
+
+### 14.1 Archive/restore instead of hard deletion (implemented)
+
+`DELETE /api/users/<id>` no longer removes statutory records. Archiving and
+blocking close active database sessions, revoke Redis sessions, reject
+self-actions with `409`, and retain payroll/audit history; login rejects
+`Archived`. The admin UI exposes Archive/Restore and an Archived status filter.
+
+### 14.2 Directory contract (implemented)
+
+- `GET /api/users` parses `page`/`per_page` as integers, rejects `page < 1`
+  and `per_page` outside `1..200`, and sorts through an allow-list
+  (`sort_by`/`sort_dir`); invalid input is a `400`, not a silent default.
+  Callers that needed a full dropdown now ask for `per_page=200` in ID order.
+- `POST`/`PUT /api/users` share one validator: `EMP\d{3,}` employee IDs,
+  RFC-plausible emails, role/department/status allow-lists, unknown fields
+  rejected, IDs upper-cased and emails lower-cased, case-insensitive
+  uniqueness on both employee ID and email (`409`).
+- `PUT` is a real partial update (it reads, validates the merged row, and
+  writes only supplied columns). Archived users cannot be edited and blocked
+  users cannot be unblocked through `PUT` (`409`) — the block/unblock and
+  archive/restore actions remain the only status-transition path — and role
+  changes are audited with a before/after diff.
+- The CSV import validates every row through the same contract and reports
+  `imported`/`skipped`/`errors` with spreadsheet row numbers, so a bulk load
+  cannot bypass the directory rules.
+- No schema change was required: the v2.0 target already creates
+  `uq_users_email_ci` in `0001_baseline`; DuckDB/`legacy` rely on the API
+  pre-check.
+
+Validation: **81 DuckDB unit tests passed / 5 skipped**, **85 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **16 Playwright tests passed on
+DuckDB and PostgreSQL**, and the public-flip probe remains **94/94 GET + 42/42
+write flows**.
+
+## 15. Next steps
 
 1. Complete the Phase 5 maintenance-window final delta sync and traffic
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
-3. Continue the FR-USR hardening follow-up. The archive/restore and session
-   revocation slice is implemented; next add permission-policy evaluation,
-   bounded pagination/validation, policy-derived leave balances, bulk/import
-   jobs, and two-person anonymisation without coupling them to the lifecycle
-   milestone.
+3. Continue the FR-USR hardening follow-up. The archive/restore and directory
+   contract slices are implemented; next add permission-policy evaluation
+   (`user_permissions` is DDL-only today; the navbar and the API duplicate
+   role checks), policy-derived leave balances, background bulk/import jobs, and
+   two-person anonymisation.

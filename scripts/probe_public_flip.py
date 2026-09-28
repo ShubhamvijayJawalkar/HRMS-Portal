@@ -509,7 +509,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return out
     out["login-EMP003"] = ("OK", "status=200")
 
-    uniq = f"TEST{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+    # FR-USR-01: employee IDs are ``EMP`` + >=3 digits (app.py ``_EMP_ID_RE``).
+    uniq = f"EMP{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
 
     def create_user():
         return _post(cl_a, tok_a, "/api/users",

@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 77 on DuckDB, 81 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 81 on DuckDB, 85 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~2 min, 16 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (77 on DuckDB, 81 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (81 on DuckDB, 85 on PostgreSQL; the
   5 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (16 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -259,9 +259,58 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - The admin UI now exposes Archive/Restore actions and an Archived status
   filter; the legacy `DELETE /api/users/<id>` route is archive-compatible and
   never hard-deletes statutory data.
-- Remaining follow-up work: permission-policy evaluation, bounded pagination
-  and validation, policy-derived leave balances, bulk/import jobs, and
-  two-person anonymisation.
+
+### FR-USR directory contract (pagination + validation)
+- `GET /api/users` now parses `page`/`per_page` as integers, rejects
+  `page < 1` and `per_page` outside `1..200`, and sorts through an allow-list
+  (`sort_by` ∈ `emp_id|name|email|role|status|department|created_at`,
+  `sort_dir` ∈ `asc|desc`); invalid input returns 400 instead of silently
+  defaulting. The response echoes `sort_by`/`sort_dir`.
+- Frontend dropdown callers (`templates/salary.html`, `templates/goals.html`,
+  `templates/admin_documents.html`) ask for `per_page=200&sort_by=emp_id`
+  instead of the old unbounded `per_page=1000`.
+- `POST`/`PUT /api/users` validate a contract in `app.py`
+  (`_validate_user_payload`): employee IDs must match `EMP\d{3,}`, emails must
+  be RFC-plausible, role/department/status come from allow-lists
+  (`_USER_ROLES`, `_USER_DEPARTMENTS`, `_USER_STATUSES`), unknown fields are
+  rejected, and `emp_id`/`email` are normalised (upper-case ID, lower-case
+  email). Email and employee-ID uniqueness are case-insensitive (409).
+- `PUT` is a true partial update: it reads the existing row, validates the
+  merged result, and writes only the supplied columns — omitting a field no
+  longer nulls it. Editing an archived user (409) and unblocking via `PUT`
+  (409) are refused; the dedicated block/archive/restore actions stay the only
+  status-transition path. Blocking through `PUT` closes DB sessions and
+  revokes Redis sessions.
+- Role changes are audited with a real before/after diff
+  (`audit_log` `USER_UPDATE`).
+- Flag columns are still written as `int` so the v1.0 `legacy`/DuckDB INTEGER
+  columns stay byte-identical; `db_backend.py` rewrites them to booleans for
+  the v2.0 `BOOLEAN` columns.
+- 4 new unit tests (`test_user_list_pagination_and_sort_validation`,
+  `test_user_create_validation_and_email_uniqueness`,
+  `test_user_partial_update_preserves_fields_and_audits_role`,
+  `test_user_import_rejects_rows_that_break_the_directory_contract`). DuckDB
+  suite is 81 passed / 5 skipped; PostgreSQL is 85 passed / 1 skipped (also with
+  Redis); Playwright is 16/16 on both backends. The public-flip probe stays
+  green (94/94 GET + 42/42 writes).
+- The CSV import (`POST /api/users/import`) now validates every row through the
+  same contract, reports `imported`/`skipped`/`errors` (spreadsheet row
+  numbers, first 20 shown) instead of inserting silently, and
+  `templates/import_users.html` renders the skipped rows.
+- Scope note: the `EMP\d{3,}` pattern governs the API/CSV directory contract.
+  The ATS lifecycle still mints its own pre-hire IDs (`PRE<candidate_id>`,
+  `app.py` `_create_onboarding_workflow`) — converting those to `EMP###` is a
+  separate change, so a pre-hire is edited by supplying a valid department.
+- The v2.0 target already enforces case-insensitive unique email
+  (`uq_users_email_ci`, created by `0001_baseline` from
+  `db/postgres_schema.sql`), so no new Alembic revision was needed; the
+  DuckDB/`legacy` schemas rely on the API pre-check.
+- `tests/test_playwright.py` now names its DuckDB file without dots
+  (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
+  file stem with dots removed, so a dotted float-timestamp name made two
+  spellings of the same path collide with "Unique file handle conflict".
+- Remaining follow-up work: permission-policy evaluation, policy-derived leave
+  balances, bulk/import jobs, and two-person anonymisation.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

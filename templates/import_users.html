@@ -89,13 +89,17 @@ async function uploadFile(file) {
     formData.append('file', file);
     const result = document.getElementById('importResult');
     result.style.display = 'block';
+    result.style.whiteSpace = 'pre-wrap';
     result.className = 'alert alert-info';
     result.textContent = 'Uploading...';
     try {
         const r = await fetch('/api/users/import', { method: 'POST', body: formData });
         const d = await r.json();
-        result.className = r.ok ? 'alert alert-success' : 'alert alert-danger';
+        result.className = !r.ok ? 'alert alert-danger' : (d.skipped ? 'alert alert-warning' : 'alert alert-success');
         result.textContent = d.message || d.error;
+        if (d.errors && d.errors.length) {
+            result.textContent += '\nSkipped rows:\n' + d.errors.join('\n');
+        }
     } catch(e) {
         result.className = 'alert alert-danger';
         result.textContent = 'Upload failed';

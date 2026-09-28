@@ -99,7 +99,7 @@
 </div>
 <script>
 document.addEventListener('DOMContentLoaded', async () => {
-    const r = await fetch('/api/users?per_page=1000');
+    const r = await fetch('/api/users?per_page=200&sort_by=emp_id&sort_dir=asc');
     const payload = await r.json();
     const users = Array.isArray(payload) ? payload : (payload.data || []);
     const sel = document.getElementById('empSelect');

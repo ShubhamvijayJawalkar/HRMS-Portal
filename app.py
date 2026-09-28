@@ -2887,6 +2887,14 @@ def reject_regularization(rid):
 #  CSV IMPORT
 # ══════════════════════════════════════════════════════════════════════
 
+def _csv_value(row, key, default=''):
+    """Read a CSV cell as text, mapping missing/NaN cells to the default."""
+    value = row.get(key, default)
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    return str(value).strip()
+
+
 @app.route('/api/v1/users/import', methods=['POST'])
 @app.route('/api/users/import', methods=['POST'])
 @admin_required
@@ -2906,18 +2914,43 @@ def import_users_csv():
         conn = get_db()
         pwd = hash_password('pass123')
         count = 0
-        for _, row in df.iterrows():
-            eid = str(row['emp_id']).strip().upper()
-            if conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [eid]).fetchone():
+        errors = []
+        for index, row in df.iterrows():
+            # Row 1 is the header, so the spreadsheet row is index + 2.
+            label = f'row {int(index) + 2}'
+            payload = {
+                'emp_id': _csv_value(row, 'emp_id'),
+                'name': _csv_value(row, 'name'),
+                'email': _csv_value(row, 'email'),
+                'role': _csv_value(row, 'role', 'Employee') or 'Employee',
+                'department': _csv_value(row, 'department'),
+            }
+            # Imported rows obey the same directory contract as the UI/API, so a
+            # bulk load cannot bypass the employee-ID/email/role rules.
+            try:
+                normalized = _validate_user_payload(payload, creating=True)
+            except UserValidationError as exc:
+                errors.append(f'{label}: {exc}')
+                continue
+            if conn.execute("SELECT 1 FROM users WHERE UPPER(emp_id) = ?", [normalized['emp_id']]).fetchone():
+                errors.append(f"{label}: {normalized['emp_id']} already exists")
+                continue
+            if conn.execute("SELECT 1 FROM users WHERE LOWER(email) = ?", [normalized['email']]).fetchone():
+                errors.append(f"{label}: {normalized['email']} already exists")
                 continue
             conn.execute(
                 "INSERT INTO users (emp_id, name, email, password, role, department, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, 'Active', ?, ?, 1, 1)",
-                [eid, str(row.get('name', '')), str(row.get('email', '')), pwd,
-                 str(row.get('role', 'Employee')), str(row.get('department', '')),
+                [normalized['emp_id'], normalized['name'], normalized['email'], pwd,
+                 normalized['role'], normalized['department'],
                  datetime.now(), datetime.now()]
             )
             count += 1
-        return jsonify({'message': f'{count} users imported'}), 201
+        return jsonify({
+            'message': f'{count} users imported',
+            'imported': count,
+            'skipped': len(errors),
+            'errors': errors[:20],
+        }), 201
     except Exception as e:
         return jsonify({'error': str(e)}), 400
     finally:
@@ -7187,6 +7220,132 @@ def admin_outbox_dispatch():
 #  USER MANAGEMENT
 # ══════════════════════════════════════════════════════════════════════
 
+_USER_ROLES = frozenset({'Employee', 'Team Leader', 'HR', 'Finance', 'Admin', 'Super Admin'})
+_USER_STATUSES = frozenset({'Active', 'Blocked', 'Inactive', 'Onboarding', 'Pre-hire'})
+_USER_DEPARTMENTS = frozenset({
+    'MIS', 'Operations', 'Support', 'HR', 'Finance',
+    'Engineering', 'Marketing', 'Sales', 'Design',
+})
+_USER_SORT_COLUMNS = {
+    'emp_id': 'emp_id',
+    'name': 'name',
+    'email': 'email',
+    'role': 'role',
+    'status': 'status',
+    'department': 'department',
+    'created_at': 'created_at',
+}
+_USER_CREATE_FIELDS = frozenset({
+    'emp_id', 'name', 'email', 'password', 'role', 'department', 'designation',
+    'shift_start', 'shift_end', 'weekly_off_pattern', 'allow_login', 'allow_breaks',
+})
+_USER_UPDATE_FIELDS = frozenset({
+    'name', 'email', 'role', 'department', 'designation', 'status',
+    'shift_start', 'shift_end', 'weekly_off_pattern', 'allow_login', 'allow_breaks',
+})
+_EMP_ID_RE = re.compile(r'^EMP\d{3,}$')
+_EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+
+
+class UserValidationError(ValueError):
+    """A user-directory payload violates the public contract."""
+
+
+def _normalized_emp_id(value):
+    emp_id = str(value or '').strip().upper()
+    if not _EMP_ID_RE.fullmatch(emp_id):
+        raise UserValidationError('emp_id must match EMP followed by at least 3 digits')
+    return emp_id
+
+
+def _normalized_email(value):
+    email = str(value or '').strip().lower()
+    if not _EMAIL_RE.fullmatch(email):
+        raise UserValidationError('email must be a valid email address')
+    return email
+
+
+def _validated_choice(value, allowed, field):
+    normalized = str(value or '').strip()
+    if normalized not in allowed:
+        raise UserValidationError(f'{field} must be one of: {", ".join(sorted(allowed))}')
+    return normalized
+
+
+def _normalized_bool(value, field):
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ('true', 'false', '1', '0', 'yes', 'no'):
+        return value.strip().lower() in ('true', '1', 'yes')
+    raise UserValidationError(f'{field} must be true or false')
+
+
+def _validate_user_payload(data, *, creating, existing=None):
+    """Validate and normalize an FR-USR create/update payload."""
+    allowed = _USER_CREATE_FIELDS if creating else _USER_UPDATE_FIELDS
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise UserValidationError(f'unknown fields: {", ".join(unknown)}')
+    if not creating and not data:
+        raise UserValidationError('at least one field is required')
+
+    current = existing or {}
+    merged = {
+        'emp_id': current.get('emp_id'),
+        'name': current.get('name'),
+        'email': current.get('email'),
+        'role': current.get('role', 'Employee'),
+        'department': current.get('department', ''),
+        'status': current.get('status', 'Active'),
+    }
+    merged.update({key: value for key, value in data.items() if key in merged})
+    if creating:
+        merged['emp_id'] = _normalized_emp_id(merged.get('emp_id'))
+    if not str(merged.get('name') or '').strip():
+        raise UserValidationError('name is required')
+    if len(str(merged['name']).strip()) > 120:
+        raise UserValidationError('name must be 120 characters or fewer')
+    merged['name'] = str(merged['name']).strip()
+    merged['email'] = _normalized_email(merged.get('email'))
+    merged['role'] = _validated_choice(merged.get('role'), _USER_ROLES, 'role')
+    merged['department'] = _validated_choice(merged.get('department'), _USER_DEPARTMENTS, 'department')
+    if 'designation' in data:
+        designation = str(data.get('designation') or '').strip()
+        if len(designation) > 120:
+            raise UserValidationError('designation must be 120 characters or fewer')
+        merged['designation'] = designation
+    elif existing is not None:
+        merged['designation'] = existing.get('designation')
+    if not creating:
+        merged['status'] = _validated_choice(merged.get('status'), _USER_STATUSES, 'status')
+    for flag in ('allow_login', 'allow_breaks'):
+        if flag in data:
+            merged[flag] = _normalized_bool(data[flag], flag)
+        elif existing is not None:
+            merged[flag] = bool(existing.get(flag))
+    return merged
+
+
+def _paged_user_args():
+    try:
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 50))
+    except (TypeError, ValueError):
+        raise UserValidationError('page and per_page must be integers') from None
+    if page < 1:
+        raise UserValidationError('page must be at least 1')
+    if per_page < 1 or per_page > 200:
+        raise UserValidationError('per_page must be between 1 and 200')
+    sort_by = request.args.get('sort_by', 'created_at').strip().lower()
+    if sort_by not in _USER_SORT_COLUMNS:
+        raise UserValidationError(f'sort_by must be one of: {", ".join(sorted(_USER_SORT_COLUMNS))}')
+    sort_dir = request.args.get('sort_dir', 'desc').strip().lower()
+    if sort_dir not in ('asc', 'desc'):
+        raise UserValidationError('sort_dir must be asc or desc')
+    return page, per_page, sort_by, sort_dir
+
 @app.route('/admin/users')
 @admin_required
 def admin_users():
@@ -7196,9 +7355,12 @@ def admin_users():
 @app.route('/api/users', methods=['GET'])
 @admin_required
 def get_users():
-    page = request.args.get('page', 1, type=int)
-    per_page = request.args.get('per_page', 50, type=int)
+    try:
+        page, per_page, sort_by, sort_dir = _paged_user_args()
+    except UserValidationError as exc:
+        return jsonify({'error': str(exc)}), 400
     offset = (page - 1) * per_page
+    order_clause = f"ORDER BY {_USER_SORT_COLUMNS[sort_by]} {sort_dir.upper()}, emp_id ASC"
     active_only = request.args.get('active', '').lower() in ('1', 'true', 'yes', 'on')
     search = request.args.get('search', '').strip()
     role_filter = request.args.get('role', '').strip()
@@ -7228,7 +7390,7 @@ def get_users():
         # v2.0 (public): users has no shift columns — resolve per row from
         # the effective-dated shift_assignments (FR-ATT-17).
         rows = conn.execute(
-            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks FROM users{where_clause} {order_clause} LIMIT ? OFFSET ?",
             params + [per_page, offset]
         ).fetchall()
         data = []
@@ -7246,7 +7408,7 @@ def get_users():
             })
     else:
         rows = conn.execute(
-            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end, weekly_off_pattern FROM users{where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT emp_id, name, email, role, status, department, first_login, allow_login, allow_breaks, shift_start, shift_end, weekly_off_pattern FROM users{where_clause} {order_clause} LIMIT ? OFFSET ?",
             params + [per_page, offset]
         ).fetchall()
         data = [{
@@ -7262,6 +7424,7 @@ def get_users():
     conn.close()
     return jsonify({
         'total': total, 'page': page, 'per_page': per_page,
+        'sort_by': sort_by, 'sort_dir': sort_dir,
         'data': data
     }), 200
 
@@ -7271,14 +7434,18 @@ def get_users():
 @idempotent
 def add_user():
     data = request.get_json(silent=True) or {}
-    if not data.get('emp_id') or not data.get('name') or not data.get('email'):
-        return jsonify({'error': 'Missing required fields'}), 400
-    if '@' not in data.get('email', ''):
-        return jsonify({'error': 'Invalid email'}), 400
+    try:
+        normalized = _validate_user_payload(data, creating=True)
+    except UserValidationError as exc:
+        return jsonify({'error': str(exc)}), 400
+    data = {**data, **normalized}
     conn = get_db()
-    if conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [data['emp_id']]).fetchone():
+    if conn.execute("SELECT 1 FROM users WHERE UPPER(emp_id) = ?", [data['emp_id']]).fetchone():
         conn.close()
         return jsonify({'error': 'Employee ID already exists'}), 409
+    if conn.execute("SELECT 1 FROM users WHERE LOWER(email) = ?", [data['email']]).fetchone():
+        conn.close()
+        return jsonify({'error': 'Email already exists'}), 409
     pwd = data.get('password', 'pass123')
     if _shift_model():
         conn.execute(
@@ -7352,23 +7519,78 @@ def get_user_route(emp_id):
 def update_user(emp_id):
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    conn.execute(
-        "UPDATE users SET name = ?, email = ?, role = ?, department = ?, status = ?, allow_login = ?, allow_breaks = ? WHERE emp_id = ?",
-        [data.get('name'), data.get('email'), data.get('role'), data.get('department', ''),
-         data.get('status', 'Active'), int(data.get('allow_login', 1)),
-         int(data.get('allow_breaks', 1)), emp_id]
-    )
-    current_start, current_end = get_shift(emp_id, conn)
+    row = conn.execute(
+        "SELECT emp_id, name, email, role, department, status, designation, allow_login, allow_breaks "
+        "FROM users WHERE UPPER(emp_id) = ?",
+        [emp_id.strip().upper()],
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'User not found'}), 404
+    existing = dict(zip(
+        ('emp_id', 'name', 'email', 'role', 'department', 'status', 'designation',
+         'allow_login', 'allow_breaks'),
+        row,
+    ))
+    try:
+        merged = _validate_user_payload(data, creating=False, existing=existing)
+    except UserValidationError as exc:
+        conn.close()
+        return jsonify({'error': str(exc)}), 400
+    if existing['status'] == 'Archived':
+        conn.close()
+        return jsonify({'error': 'Archived users must be restored before editing'}), 409
+    if existing['status'] == 'Blocked' and merged['status'] == 'Active':
+        conn.close()
+        return jsonify({'error': 'Use the unblock action to restore a blocked user'}), 409
+    if merged['email'] != str(existing['email']).lower() and conn.execute(
+        "SELECT 1 FROM users WHERE LOWER(email) = ? AND emp_id <> ?",
+        [merged['email'], existing['emp_id']],
+    ).fetchone():
+        conn.close()
+        return jsonify({'error': 'Email already exists'}), 409
+
+    columns = []
+    values = []
+    for field in ('name', 'email', 'role', 'department', 'designation', 'status',
+                  'allow_login', 'allow_breaks'):
+        if field in data or field in ('allow_login', 'allow_breaks'):
+            columns.append(field)
+            value = merged[field]
+            # Flags stay int on the v1.0 (legacy/DuckDB) INTEGER columns; the
+            # adapter rewrites them to booleans for the v2.0 BOOLEAN columns.
+            values.append(int(value) if isinstance(value, bool) else value)
+    if columns:
+        values.append(existing['emp_id'])
+        conn.execute(
+            f"UPDATE users SET {', '.join(f'{column} = ?' for column in columns)} WHERE emp_id = ?",
+            values,
+        )
+    current_start, current_end = get_shift(existing['emp_id'], conn)
     if 'shift_start' in data or 'shift_end' in data or 'weekly_off_pattern' in data:
         set_shift(
-            emp_id,
+            existing['emp_id'],
             data.get('shift_start', current_start),
             data.get('shift_end', current_end),
             conn=conn,
             weekly_off=data.get('weekly_off_pattern'),
         )
+    should_revoke = merged['status'] in ('Blocked', 'Inactive', 'Pre-hire') and existing['status'] not in ('Blocked', 'Inactive', 'Pre-hire')
+    if should_revoke:
+        conn.execute("UPDATE users SET allow_login = 0 WHERE emp_id = ?", [existing['emp_id']])
+        _close_active_user_sessions(conn, existing['emp_id'])
     conn.close()
-    audit_log(session['emp_id'], 'USER_UPDATE', f'Updated user {emp_id}', entity='users', entity_id=emp_id)
+    if should_revoke:
+        _revoke_redis_sessions(existing['emp_id'])
+    audit_log(
+        session['emp_id'],
+        'USER_UPDATE',
+        f'Updated user {existing["emp_id"]}',
+        entity='users',
+        entity_id=existing['emp_id'],
+        before={key: existing[key] for key in ('name', 'email', 'role', 'department', 'status', 'allow_login', 'allow_breaks')},
+        after={key: merged[key] for key in ('name', 'email', 'role', 'department', 'status', 'allow_login', 'allow_breaks')},
+    )
     return jsonify({'message': 'User updated'}), 200
 
 

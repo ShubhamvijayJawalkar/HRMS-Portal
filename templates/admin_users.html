@@ -177,10 +177,10 @@
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3"><label for="email" class="form-label">Email *</label><input type="email" id="email" class="form-control" placeholder="john@company.com" required></div>
-                        <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
+                        <div class="col-md-6 mb-3"><label for="department" class="form-label">Department</label><select id="department" class="form-select" required><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
                     </div>
                     <div class="row">
-                        <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>Admin</option><option>Finance</option></select></div>
+                        <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>HR</option><option>Finance</option><option>Admin</option></select></div>
                         <div class="col-md-4 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
                         <div class="col-md-4 mb-3"><label for="designation" class="form-label">Designation</label><input type="text" id="designation" class="form-control" placeholder="e.g., Developer"></div>
                     </div>
@@ -229,7 +229,7 @@
                     </div>
                     <div class="row">
                         <div class="col-md-6 mb-3"><label class="form-label">Department</label><select id="editDepartment" class="form-select"><option value="">Select</option><option>MIS</option><option>Operations</option><option>Support</option><option>HR</option><option>Finance</option><option>Engineering</option><option>Marketing</option><option>Sales</option><option>Design</option></select></div>
-                        <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>Admin</option><option>Finance</option></select></div>
+                        <div class="col-md-6 mb-3"><label class="form-label">Role</label><select id="editRole" class="form-select" required><option>Employee</option><option>Team Leader</option><option>HR</option><option>Finance</option><option>Admin</option></select></div>
                     </div>
                     <div class="row mb-3">
                         <div class="col-md-4 mb-2"><label class="form-label">Shift Type</label><select id="editShiftType" class="form-select" onchange="toggleEditShiftTime()"><option value="">Select</option><option value="time">Fixed Time</option><option value="24x7">24 x 7</option></select></div>
@@ -246,7 +246,7 @@
                             </div>
                         </div>
                     </div>
-                    <div class="row"><div class="col-md-12 mb-3"><label class="form-label">Status</label><select id="editStatus" class="form-select" required><option>Active</option><option>Blocked</option></select></div></div>
+                    <div class="row"><div class="col-md-12 mb-3"><label class="form-label">Status</label><select id="editStatus" class="form-select"><option>Active</option><option>Blocked</option></select><div id="editStatusHint" class="form-text"></div></div></div>
                 </form>
             </div>
             <div class="modal-footer">
@@ -320,8 +320,10 @@ async function submitCreateUser() {
         shift_start: shiftStart, shift_end: shiftEnd
     };
     if (!d.emp_id || !d.name || !d.email) { showMsg('Fill required fields', 'error'); return; }
+    if (!/^EMP\d{3,}$/.test(d.emp_id)) { showMsg('Employee ID must be EMP followed by at least 3 digits (e.g. EMP003)', 'error'); return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { showMsg('Invalid email', 'error'); return; }
     if (!d.role) { showMsg('Select a role', 'error'); return; }
+    if (!d.department) { showMsg('Select a department', 'error'); return; }
     const r = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
     const res = await r.json();
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
@@ -384,6 +386,11 @@ async function openEditModal(id) {
     document.getElementById('editDepartment').value = u.department || '';
     document.getElementById('editRole').value = u.role;
     document.getElementById('editStatus').value = u.status;
+    // Status transitions belong to the Block/Unblock and Archive/Restore
+    // actions, so the edit form only shows status for Active users.
+    document.getElementById('editStatus').disabled = u.status !== 'Active';
+    document.getElementById('editStatusHint').textContent = u.status === 'Active' ? '' :
+        `${u.status} users are restored with the Block/Unblock and Archive/Restore actions.`;
     document.getElementById('editAllowLogin').checked = !!u.allow_login;
     document.getElementById('editAllowBreaks').checked = !!u.allow_breaks;
     if (u.shift_start === '24x7') {
@@ -412,11 +419,14 @@ async function saveUserChanges() {
         email: document.getElementById('editEmail').value.trim(),
         department: document.getElementById('editDepartment').value || '',
         role: document.getElementById('editRole').value,
-        status: document.getElementById('editStatus').value,
         allow_login: document.getElementById('editAllowLogin').checked ? 1 : 0,
         allow_breaks: document.getElementById('editAllowBreaks').checked ? 1 : 0,
         shift_start: editShiftStart, shift_end: editShiftEnd
     };
+    if (document.getElementById('editStatus').disabled !== true) {
+        d.status = document.getElementById('editStatus').value;
+    }
+    if (!d.department) { showMsg('Select a department', 'error'); return; }
     const r = await fetch(`/api/users/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(d) });
     const res = await r.json();
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }

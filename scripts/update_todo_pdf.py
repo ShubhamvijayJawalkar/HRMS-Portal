@@ -40,6 +40,11 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR directory contract implemented: GET /api/users caps per_page at 200 and "
+     "sorts through an allow-list (400 on invalid input), POST/PUT validate the employee ID, email, "
+     "role, department and status with case-insensitive uniqueness, PUT became a true partial update "
+     "with a before/after audit diff, and the CSV import now validates every row and reports skipped "
+     "rows. Admin UI mirrors the contract; the public probe stays green."),
     ("2026-09-25", "Phase 5 cutover rehearsal completed: frozen-source ETL accepted a missing post-v1.0 "
      "payroll_approvals table, reconciled Phase-1/Phase-2 data, applied CC-05 cleanup, stamped head, "
      "passed read-only preflight and 94/42 public probe, and kept identity sequences ahead after boot seeds and authenticated GET/write smoke. "
@@ -99,14 +104,15 @@ TASKS = [
     ("Phase 6", "Decommission DuckDB runtime", "Out of the ETL blueprint; tracked in SRS", PENDING),
     # ── Follow-up backend hardening ────────────────────────────────────────
     ("Follow-up", "FR-USR archive/restore and session revocation", "Hard delete replaced with retained archive/restore; admin UI and cross-backend tests updated", DONE),
-    ("Follow-up", "FR-USR permissions, validation, policy balances, bulk/import, anonymisation", "Next backend slice after the archive safety boundary", PENDING),
+    ("Follow-up", "FR-USR directory contract (bounded pagination, sorting, validation)", "per_page capped at 200, allow-listed sorting, EMP/email/role/department validation, case-insensitive uniqueness, partial PUT with role-change audit, CSV import under the same contract", DONE),
+    ("Follow-up", "FR-USR permissions, policy balances, bulk import jobs, anonymisation", "Next backend slice after the directory contract", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "77 passed, 5 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "81 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "81 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "81 passed, 5 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "85 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "85 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "16 passed"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "16 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms (public)", "OK - 46 identity + 4 natural keys"),
