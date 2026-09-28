@@ -782,10 +782,32 @@ scheduler), and the browser fixture now runs the DuckDB server single-threaded
 request is in flight was the original "Unique file handle conflict".
 PostgreSQL keeps a threaded server and a live scheduler.
 
-Validation: **117 DuckDB unit tests passed / 6 skipped**, **122 PostgreSQL unit
-tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
-DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 44/44 write**,
-and the CC-01 checker plus the read-only preflight both pass on that database.
+### 14.9 PII: dependents and candidates (implemented)
+
+`policy.PII_FIELDS` became a per-entity map so it can cover `dependents` and
+`candidates` the way the data dictionary classifies them, and
+`redact_pii(payload, allowed, entity)` blanks the entity's keys in place so a
+client can tell "withheld" from "not present". A candidate's `email`/`phone` are
+now withheld from `GET /api/candidates` and `GET /api/offers` unless the actor
+holds `pii_reveal`, each record carries `pii_revealed`, and a permitted read
+writes one `PII_REVEAL` audit row with the record count and the fields exposed.
+A candidate's *name* is deliberately never withheld — a recruiter has to know
+whose record they are editing — and that reasoning is recorded in the policy
+rather than left implicit. Dependents are classified but have no cross-employee
+read path today, and a test asserts that.
+
+The intermittent DuckDB "Unique file handle conflict" also reached the unit
+suite (a different test each run) because the scheduler runs in the same
+process. Job registration is now `_register_scheduler_jobs()`: the startup block
+calls it and starts the scheduler, the registration tests call it directly
+without starting anything, and the unit suite sets
+`HRMS_DISABLE_SCHEDULER=1`.
+
+Validation: **121 DuckDB unit tests passed / 6 skipped** (two consecutive runs),
+**126 PostgreSQL unit tests passed / 1 skipped** (also with Redis), **21
+Playwright tests passed on DuckDB and PostgreSQL**, the clean v2.0 probe is
+**97/97 GET + 44/44 write**, and the CC-01 checker plus the read-only preflight
+both pass on that database.
 
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
@@ -824,9 +846,9 @@ and `pii_reveal` followed in §14.5.
    switch, then record the production cutover evidence.
 2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
 3. The FR-USR follow-up is complete: archive/restore, the directory contract,
-   the permission policy and its enforcement, the audited PII reveal,
-   policy-derived leave balances, background import jobs, and two-person
-   anonymisation. The recorded open items are the trade-offs chosen in
-   `docs/ANONYMISATION.md` (keeping `emp_id` as the seven-year join key, leaving
-   free text in place), the unused `monthly_leave_grants` accrual ledger, and
-   extending `pii_reveal` to `dependents`/`candidates`.
+   the permission policy and its enforcement, the audited PII reveal (employees,
+   dependents and the ATS contact details), policy-derived leave balances,
+   background import jobs, and two-person anonymisation. The recorded open items
+   are the trade-offs chosen in `docs/ANONYMISATION.md` (keeping `emp_id` as the
+   seven-year join key, leaving free text in place) and the unused
+   `monthly_leave_grants` accrual ledger.

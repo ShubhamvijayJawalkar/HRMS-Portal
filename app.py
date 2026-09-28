@@ -4024,6 +4024,11 @@ def recruitment_pipeline():
 
 # ── Candidates ────────────────────────────────────────────────────
 
+def _reveals_candidate_pii(conn) -> bool:
+    """May the session read a candidate's contact bundle on this connection?"""
+    return policy.can(policy.current_actor(conn), 'pii_reveal', conn=conn)
+
+
 @app.route('/api/v1/candidates', methods=['GET', 'POST'])
 @app.route('/api/candidates', methods=['GET', 'POST'])
 @hr_or_admin_required
@@ -4035,8 +4040,31 @@ def candidates_api():
             rows = conn.execute("SELECT c.candidate_id, c.job_id, j.title, c.name, c.email, c.phone, c.status, c.applied_at FROM candidates c LEFT JOIN job_postings j ON c.job_id = j.job_id WHERE c.job_id = ? ORDER BY c.applied_at DESC", [job_filter]).fetchall()
         else:
             rows = conn.execute("SELECT c.candidate_id, c.job_id, j.title, c.name, c.email, c.phone, c.status, c.applied_at FROM candidates c LEFT JOIN job_postings j ON c.job_id = j.job_id ORDER BY c.applied_at DESC").fetchall()
+        # FR-USR-15: a candidate's contact bundle is the personal data of
+        # somebody who is not an employee. The name stays (an interviewer has
+        # to know who they are meeting, HR has to know whose record they are
+        # editing); the email and phone are withheld unless the actor holds
+        # `pii_reveal`, and exposing them is audited.
+        revealed = _reveals_candidate_pii(conn)
         conn.close()
-        return jsonify([{'id': r[0], 'job_id': r[1], 'job_title': r[2] or 'N/A', 'name': r[3], 'email': r[4], 'phone': r[5], 'status': r[6], 'applied_at': r[7].isoformat() if r[7] else None} for r in rows]), 200
+        records = []
+        for r in rows:
+            record = policy.redact_pii({
+                'id': r[0], 'job_id': r[1], 'job_title': r[2] or 'N/A', 'name': r[3],
+                'email': r[4], 'phone': r[5], 'status': r[6],
+                'applied_at': r[7].isoformat() if r[7] else None,
+            }, revealed, 'candidates')
+            record['pii_revealed'] = revealed
+            records.append(record)
+        if revealed and records:
+            audit_log(
+                session['emp_id'], 'PII_REVEAL',
+                f"Revealed contact details of {len(records)} candidate record(s)",
+                entity='candidates',
+                after={'records': len(records),
+                       'fields': list(policy.pii_fields_for('candidates'))},
+            )
+        return jsonify(records), 200
     data = request.get_json(silent=True) or {}
     if not data.get('name') or not data.get('email'):
         return jsonify({'error': 'name and email required'}), 400
@@ -4191,16 +4219,28 @@ def offers_api():
             "o.accepted_at, o.notes FROM offer_letters o JOIN candidates c "
             "ON o.candidate_id = c.candidate_id ORDER BY o.offer_date DESC"
         ).fetchall()
+        # Same contact bundle as the candidate list, under the same rule.
+        revealed = _reveals_candidate_pii(conn)
         conn.close()
-        return jsonify([{
-            'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3],
-            'salary': float(r[4]) if r[4] else 0,
-            'basic_pct': float(r[5]) if r[5] is not None else None,
-            'hra_pct': float(r[6]) if r[6] is not None else None,
-            'allowances_pct': float(r[7]) if r[7] is not None else None,
-            'offer_date': r[8].isoformat() if r[8] else None, 'status': r[9],
-            'accepted_at': r[10].isoformat() if r[10] else None, 'notes': r[11],
-        } for r in rows]), 200
+        records = []
+        for r in rows:
+            record = policy.redact_pii(
+                {'id': r[0], 'candidate_id': r[1], 'candidate_name': r[2], 'email': r[3]},
+                revealed, 'candidates',
+            )
+            record.update({
+                'salary': float(r[4]) if r[4] else 0,
+                'basic_pct': float(r[5]) if r[5] is not None else None,
+                'hra_pct': float(r[6]) if r[6] is not None else None,
+                'allowances_pct': float(r[7]) if r[7] is not None else None,
+                'offer_date': r[8].isoformat() if r[8] else None,
+                'status': r[9],
+                'accepted_at': r[10].isoformat() if r[10] else None,
+                'notes': r[11],
+                'pii_revealed': revealed,
+            })
+            records.append(record)
+        return jsonify(records), 200
 
     data = request.get_json(silent=True) or {}
     try:
@@ -8431,7 +8471,7 @@ def get_user_pii(emp_id):
         f"Revealed personal data of {target['emp_id']} to {actor['emp_id']}",
         entity='users',
         entity_id=target['emp_id'],
-        after={'fields': sorted(policy.PII_FIELDS)},
+        after={'fields': sorted(policy.USER_PII_FIELDS)},
     )
     return jsonify(payload), 200
 
@@ -8682,50 +8722,60 @@ def cleanup_expired_tokens():
         logger.warning("Cleanup failed: %s", e)
 
 
+def _register_scheduler_jobs(attendance_hour=2):
+    """Register every background job. Separated from ``start()`` so a test can
+    assert the wiring without a scheduler thread firing next to the assertions
+    (on DuckDB a background job opening a connection during a request is the
+    "Unique file handle conflict")."""
+    scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1, id='cleanup-tokens',
+                      replace_existing=True, coalesce=True, max_instances=1)
+    scheduler.add_job(outbox.run_dispatch, 'interval', seconds=60, id='outbox-dispatch',
+                      replace_existing=True, coalesce=True, max_instances=1)
+    # FR-USR-04: pick up one queued CSV import per tick. The claim is an atomic
+    # status transition, so running several web workers is safe.
+    scheduler.add_job(
+        run_import_dispatch, 'interval', seconds=15,
+        id='import-dispatch', replace_existing=True, coalesce=True, max_instances=1,
+    )
+    scheduler.add_job(
+        run_attendance_finalization,
+        'cron',
+        hour=attendance_hour,
+        minute=5,
+        id='attendance-finalization',
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        run_offboarding_access_revocation,
+        'cron',
+        hour=0,
+        minute=0,
+        timezone=IST,
+        id='offboarding-access-revocation',
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+
+
 # ── Start scheduler (only in master gunicorn process) ──────────────────
 if not STARTED:
     _is_gunicorn_master = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or os.getenv('GUNICORN_MASTER') == 'true'
     _is_dev = os.getenv('FLASK_DEBUG') == '1' or os.getenv('FLASK_ENV') != 'production'
     if os.getenv('HRMS_DISABLE_SCHEDULER') == '1':
         # Deterministic test runs: background jobs would otherwise race the
-        # assertions. The browser suite leaves the scheduler on.
+        # assertions. The browser suite leaves the scheduler on for PostgreSQL.
         logger.info('Scheduler disabled (HRMS_DISABLE_SCHEDULER=1)')
     elif _is_dev or _is_gunicorn_master or not os.getenv('SERVER_SOFTWARE'):
         try:
             attendance_hour = min(max(int(os.getenv('ATTENDANCE_JOB_HOUR', '2')), 0), 23)
         except (TypeError, ValueError):
             attendance_hour = 2
-        scheduler.add_job(cleanup_expired_tokens, 'interval', hours=1)
-        scheduler.add_job(outbox.run_dispatch, 'interval', seconds=60)
-        # FR-USR-04: pick up one queued CSV import per tick. The claim is an
-        # atomic status transition, so running several web workers is safe.
-        scheduler.add_job(
-            run_import_dispatch, 'interval', seconds=15,
-            id='import-dispatch', replace_existing=True, coalesce=True, max_instances=1,
-        )
-        scheduler.add_job(
-            run_attendance_finalization,
-            'cron',
-            hour=attendance_hour,
-            minute=5,
-            id='attendance-finalization',
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-            misfire_grace_time=3600,
-        )
-        scheduler.add_job(
-            run_offboarding_access_revocation,
-            'cron',
-            hour=0,
-            minute=0,
-            timezone=IST,
-            id='offboarding-access-revocation',
-            replace_existing=True,
-            coalesce=True,
-            max_instances=1,
-            misfire_grace_time=3600,
-        )
+        _register_scheduler_jobs(attendance_hour)
         scheduler.start()
         STARTED = True
         logger.info("Scheduler started")

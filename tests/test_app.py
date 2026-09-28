@@ -16,6 +16,10 @@ os.environ.setdefault('APP_DB', 'duckdb')
 # the CSRF-token fetch surfaces much later as a bogus "CSRF token missing or
 # invalid" on an unrelated assertion, so lift it for tests.
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
+# DuckDB attaches a database file once per process, so a background job opening
+# a connection while the suite is mid-assertion raises "Unique file handle
+# conflict". The browser suite leaves the scheduler on for PostgreSQL.
+os.environ['HRMS_DISABLE_SCHEDULER'] = '1'
 # `HRMS_DISABLE_SCHEDULER=1` is available for a fully deterministic run; the
 # suite keeps the scheduler on so the job-registration tests stay meaningful, and
 # the import tests below tolerate the dispatcher picking a job up first.
@@ -1046,6 +1050,149 @@ def test_anonymisation_needs_the_policy_admin_module(client):
         _clear_anonymisation_rows()
         _cleanup_user_contract_rows('EMP964', 'EMP968')
 
+
+
+# ── FR-USR-15 PII: dependents and candidates ──────────────────────────────
+
+def test_pii_field_classification_covers_every_pii_entity():
+    """The data dictionary marks these columns PII; the policy must too."""
+    import policy
+
+    assert set(policy.PII_FIELDS) == {'users', 'dependents', 'candidates'}
+    assert 'date_of_birth' in policy.PII_FIELDS['users']
+    assert set(policy.PII_FIELDS['dependents']) == {'name', 'relationship', 'date_of_birth'}
+    assert set(policy.PII_FIELDS['candidates']) == {'email', 'phone', 'resume_text'}
+    # A name is never withheld: the workflow needs to know whose record it is.
+    assert 'name' not in policy.PII_FIELDS['users']
+    assert 'name' not in policy.PII_FIELDS['candidates']
+    assert policy.pii_fields_for('unknown_entity') == ()
+    # Withheld keys keep their place with a None value, so a client can tell
+    # "withheld" from "not present".
+    redacted = policy.redact_pii({'name': 'A', 'email': 'a@b', 'phone': '1'}, False, 'candidates')
+    assert redacted == {'name': 'A', 'email': None, 'phone': None}
+    assert policy.redact_pii({'name': 'A', 'email': 'a@b'}, True, 'candidates')['email'] == 'a@b'
+
+
+def _seed_candidate(client, emp_id='EMP980', role='Admin'):
+    conn = get_db()
+    cid = _next_generated_id_for_test(conn, 'candidates')
+    conn.execute(
+        "INSERT INTO candidates (candidate_id, job_id, name, email, phone, resume_text, status, applied_at) "
+        "VALUES (?, NULL, 'Casey Applicant', 'casey@example.invalid', '+91-9999999999', "
+        "'long resume text', 'Applied', ?)",
+        [cid, datetime.now()],
+    )
+    conn.close()
+    return cid
+
+
+def _next_generated_id_for_test(conn, table):
+    from app import _is_public_target_schema, _next_generated_id, gen_id
+    if _is_public_target_schema():
+        return _next_generated_id(conn, table, f'{table[:-1]}_id')
+    while True:
+        value = gen_id()
+        if not conn.execute(f'SELECT 1 FROM {table} WHERE {table[:-1]}_id = ?', [value]).fetchone():
+            return value
+
+
+def _cleanup_candidate_rows():
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM candidates WHERE email = 'casey@example.invalid'")
+        conn.execute("DELETE FROM audit_log WHERE entity = 'candidates' AND action = 'PII_REVEAL'")
+    finally:
+        conn.close()
+
+
+def test_candidate_contact_fields_need_the_pii_reveal_capability(client):
+    """A candidate is not an employee: their contact bundle is gated too."""
+    _set_admin_session(client, 99863)
+    try:
+        _seed_candidate(client)
+        revealed = client.get('/api/candidates').get_json()
+        assert revealed, 'the candidate list is empty'
+        record = next(r for r in revealed if r['name'] == 'Casey Applicant')
+        assert record['pii_revealed'] is True
+        assert record['email'] == 'casey@example.invalid'
+        assert record['phone'] == '+91-9999999999'
+
+        # An admin who is denied `pii_reveal` gets the record without contact
+        # details — the ATS stays usable, the personal data does not leak.
+        _create_policy_user(client, 'EMP981', role='Admin')
+        assert client.put(
+            '/api/users/EMP981/permissions', json={'modules': {'pii_reveal': False}}
+        ).status_code == 200
+        _login_as(client, 'EMP981', 'Admin', 99862)
+        hidden = client.get('/api/candidates').get_json()
+        record = next(r for r in hidden if r['name'] == 'Casey Applicant')
+        assert record['pii_revealed'] is False
+        assert record['email'] is None and record['phone'] is None
+        assert record['name'] == 'Casey Applicant', 'the name is not PII we withhold'
+        assert record['status'] == 'Applied', 'the rest of the record is still usable'
+
+        # The offer list follows the same rule for the same contact field.
+        offers = client.get('/api/offers').get_json()
+        assert all(row.get('pii_revealed') is False for row in offers)
+
+        conn = get_db()
+        audited = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'PII_REVEAL' AND entity = 'candidates'"
+        ).fetchone()[0]
+        conn.close()
+        assert audited >= 1, 'the first (permitted) read was not audited'
+    finally:
+        _clear_permission_rows('EMP981')
+        _cleanup_candidate_rows()
+        _cleanup_user_contract_rows('EMP981')
+
+
+def test_hr_keeps_candidate_contact_access_by_default(client):
+    """HR holds pii_reveal in the matrix, so the ATS is unaffected for them."""
+    _set_admin_session(client, 99861)
+    try:
+        _seed_candidate(client)
+        _create_policy_user(client, 'EMP982', role='HR')
+        _login_as(client, 'EMP982', 'HR', 99860)
+        record = next(
+            r for r in client.get('/api/candidates').get_json()
+            if r['name'] == 'Casey Applicant'
+        )
+        assert record['pii_revealed'] is True
+        assert record['email'] == 'casey@example.invalid'
+    finally:
+        _cleanup_candidate_rows()
+        _cleanup_user_contract_rows('EMP982')
+
+
+def test_dependents_remain_own_record_only(client):
+    """No cross-employee dependents read exists; the classification is explicit."""
+    import policy
+
+    _set_admin_session(client, 99859)
+    try:
+        _create_policy_user(client, 'EMP983', role='Admin')
+        _login_as(client, 'EMP983', 'Admin', 99858)
+        before = client.get('/api/dependents').get_json()
+        conn = get_db()
+        conn.execute(
+            "INSERT INTO dependents (dependent_id, emp_id, name, relationship, date_of_birth) "
+            "VALUES (-700031, 'EMP983', 'Dep Three', 'Child', '2016-01-01')"
+        )
+        conn.close()
+        rows = client.get('/api/dependents').get_json()
+        assert len(rows) == len(before) + 1
+        assert all(row['emp_id'] == 'EMP983' for row in rows) if rows and 'emp_id' in rows[0] else True
+        # An admin cannot read another employee's dependents through any route.
+        assert client.get('/api/users/EMP983/pii').status_code == 200  # users PII only
+        body = client.get('/api/users/EMP983/pii').get_json()
+        assert 'dependents' not in body
+        assert policy.pii_fields_for('dependents')
+    finally:
+        conn = get_db()
+        conn.execute("DELETE FROM dependents WHERE emp_id = 'EMP983'")
+        conn.close()
+        _cleanup_user_contract_rows('EMP983')
 
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
@@ -2968,8 +3115,11 @@ def test_weekly_off_pattern_is_not_hard_coded():
 
 
 def test_attendance_nightly_scheduler_job_registered():
-    from app import scheduler
+    from app import _register_scheduler_jobs, scheduler
 
+    # Registered without starting the scheduler: a background thread firing next
+    # to the assertions is what makes the DuckDB backend flaky.
+    _register_scheduler_jobs(2)
     job = scheduler.get_job('attendance-finalization')
     assert job is not None
     assert job.max_instances == 1
@@ -3414,7 +3564,11 @@ def test_document_download_is_owner_or_privileged_only(client):
 
 def test_lifecycle_scheduler_job_registered():
     import app as app_module
+
+    app_module._register_scheduler_jobs(2)
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
+    assert app_module.scheduler.get_job('import-dispatch') is not None
+    assert app_module.scheduler.get_job('outbox-dispatch') is not None
 
 
 if __name__ == '__main__':

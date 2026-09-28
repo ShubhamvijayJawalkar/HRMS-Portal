@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 117 on DuckDB, 122 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 121 on DuckDB, 126 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,16 +28,17 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (117 on DuckDB, 122 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (121 on DuckDB, 126 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
-- The browser fixture runs the dev server **single-threaded on DuckDB and with
-  the scheduler off** (DuckDB attaches a file once per process, so an
-  overlapping request or a background job collides); PostgreSQL gets a threaded
-  server and a live scheduler
+- The **unit** suite sets `HRMS_DISABLE_SCHEDULER=1`; the **browser** fixture
+  runs single-threaded on DuckDB and keeps the scheduler off there too (DuckDB
+  attaches a file once per process, so an overlapping request *or* a background
+  job collides). PostgreSQL gets a threaded server and a live scheduler.
+  `_register_scheduler_jobs()` lets the wiring be asserted without starting it
 - `ANONYMISATION_SALT` is set for both suites (anonymisation refuses to run
   without one)
 - Each browser test logs in fresh, waits 3-5s for session to stabilize
@@ -314,10 +315,10 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (`hrms_pw_<ms>.duckdb`): DuckDB derives its in-process database name from the
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
-- **Every FR-USR item is now implemented.** The open follow-ups are the
-  recorded trade-offs above (keeping `emp_id`, leaving free text), the
-  `monthly_leave_grants` accrual ledger, and extending `pii_reveal` to
-  `dependents`/`candidates`.
+- **Every FR-USR item is now implemented**, including the `pii_reveal` coverage
+  for `dependents` and `candidates` (see the PII section below). The open
+  follow-ups are the recorded anonymisation trade-offs (keeping `emp_id`,
+  leaving free text) and the unused `monthly_leave_grants` accrual ledger.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -606,6 +607,40 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   PostgreSQL 122 passed / 1 skipped (also with Redis); Playwright 21/21 on both
   backends (DuckDB run twice for stability); the clean v2.0 probe is 97/97 GET
   + 44/44 write, and the CC-01 checker and preflight pass on it.
+
+## FR-USR-15 PII: dependents and candidates
+- `policy.PII_FIELDS` is now a **per-entity map** (`users`, `dependents`,
+  `candidates`) matching how the data dictionary classifies those columns, with
+  `redact_pii(payload, allowed, entity)` blanking the entity's keys *in place*
+  (`None`, not removed) so a client can tell "withheld" from "not present".
+- **A candidate's contact bundle is now gated.** `GET /api/candidates` and
+  `GET /api/offers` withhold a candidate's `email` and `phone` unless the actor
+  holds `pii_reveal`, set `pii_revealed` on each record, and write one
+  `PII_REVEAL` audit row per permitted read naming the entity, the record count
+  and the fields exposed. Previously any HR/Admin saw every applicant's contact
+  details with no capability check and no trail.
+- **The name is deliberately not withheld**, in any entity. A recruiter has to
+  know whose record they are editing and an interviewer has to know who they
+  are meeting; a name on its own is a far weaker identifier than a contact
+  bundle. That reasoning is recorded in the policy rather than left to be
+  rediscovered.
+- `dependents` are classified as PII but have **no cross-employee read path**:
+  `GET /api/dependents` is scoped to `session['emp_id']` and the users PII route
+  does not return them. A test asserts both, so the classification is explicit
+  and any future admin route over dependents has to ask.
+- While validating, the intermittent DuckDB "Unique file handle conflict" hit the
+  **unit** suite (a different test each run). Cause: the scheduler runs in the
+  same process, so a background job opening a connection during a test's
+  assertion collides with DuckDB's one-attach-per-file rule. The job
+  registration is now `_register_scheduler_jobs()`, the startup block calls it
+  and starts the scheduler, the two registration tests call it directly (so they
+  still prove the wiring without a thread firing), and the unit suite sets
+  `HRMS_DISABLE_SCHEDULER=1`. The browser suite keeps a live scheduler on
+  PostgreSQL. DuckDB unit suite run twice back to back: clean both times.
+- 4 new unit tests. DuckDB is 121 passed / 6 skipped (two consecutive runs);
+  PostgreSQL 126 passed / 1 skipped (also with Redis); Playwright 21/21 on both
+  backends; the clean v2.0 probe is 97/97 GET + 44/44 write, with the CC-01
+  checker and the read-only preflight green.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

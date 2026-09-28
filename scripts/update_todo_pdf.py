@@ -40,6 +40,14 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-28", "FR-USR-15 PII completion: policy.PII_FIELDS is now a per-entity map, so a "
+     "candidate's email and phone are withheld from /api/candidates and /api/offers unless the "
+     "actor holds pii_reveal, each record carries pii_revealed, and a permitted read writes one "
+     "PII_REVEAL audit row. A candidate's name is never withheld (a recruiter must know whose "
+     "record they are editing) and dependents are classified but have no cross-employee read path. "
+     "Also made the scheduler registration testable without starting a scheduler thread, which is "
+     "what made the DuckDB unit suite intermittently fail. DuckDB 121 passed / 6 skipped; "
+     "PostgreSQL 126 passed / 1 skipped; Playwright 21 passed; probe 97/97 GET + 44/44 write."),
     ("2026-09-28", "FR-USR two-person anonymisation: propose then confirm-by-a-different-approver, "
      "applied by the system, archived accounts only, with a dry-run plan, a required "
      "ANONYMISATION_SALT, dependents erased and the statutory rows kept, and the subject's own "
@@ -162,9 +170,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "117 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "122 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "122 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "121 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "126 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "126 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

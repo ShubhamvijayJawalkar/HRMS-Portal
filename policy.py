@@ -387,16 +387,40 @@ def pii_view(actor, target_emp_id, *, conn=None) -> bool:
 
 
 # Personal fields the v2.0 schema marks as PII (db/postgres_schema.sql users).
-PII_FIELDS = (
-    'date_of_birth', 'address', 'emergency_contact_name', 'emergency_contact_phone',
-)
+# The personal columns per entity, as the data dictionary classifies them
+# (SRS Appendix B). `name` is deliberately *not* in any of these: a person has to
+# be identifiable for the workflow to function (an interviewer has to know who
+# they are meeting, HR has to know whose record they are editing), and a name on
+# its own is a far weaker identifier than a contact bundle. The contact and
+# document fields are what this control actually withholds.
+PII_FIELDS = {
+    'users': (
+        'date_of_birth', 'address', 'emergency_contact_name', 'emergency_contact_phone',
+        'phone',
+    ),
+    'dependents': ('name', 'relationship', 'date_of_birth'),
+    'candidates': ('email', 'phone', 'resume_text'),
+}
+
+# Kept for the users reveal route, which reports the fields it exposed.
+USER_PII_FIELDS = PII_FIELDS['users']
 
 
-def redact_pii(row_pii: dict, allowed: bool) -> dict:
-    """Drop the PII keys from a projection unless the actor may see them."""
+def redact_pii(payload: dict, allowed: bool, entity: str = 'users') -> dict:
+    """Blank the entity's PII keys unless the actor may see them.
+
+    The keys are kept with a ``None`` value rather than removed, so a client can
+    tell "withheld" from "not present" and the response shape stays stable.
+    """
     if allowed:
-        return dict(row_pii)
-    return {key: value for key, value in row_pii.items() if key not in PII_FIELDS}
+        return dict(payload)
+    fields = PII_FIELDS.get(entity, ())
+    return {key: (value if key not in fields else None) for key, value in payload.items()}
+
+
+def pii_fields_for(entity: str) -> tuple:
+    """The PII column names for an entity (empty for an unknown one)."""
+    return PII_FIELDS.get(entity, ())
 
 
 def validate_module_map(modules) -> dict[str, bool]:
