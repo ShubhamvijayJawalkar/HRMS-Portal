@@ -181,7 +181,7 @@
                     </div>
                     <div class="row">
                         <div class="col-md-4 mb-3"><label for="role" class="form-label">Role *</label><select id="role" class="form-select" required><option value="">Select</option><option>Employee</option><option>Team Leader</option><option>HR</option><option>Finance</option><option>Admin</option></select></div>
-                        <div class="col-md-4 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Default: pass123"></div>
+                        <div class="col-md-4 mb-3"><label for="password" class="form-label">Password *</label><input type="password" id="password" class="form-control" placeholder="Leave blank to generate one (min 10 characters)" minlength="10"></div>
                         <div class="col-md-4 mb-3"><label for="designation" class="form-label">Designation</label><input type="text" id="designation" class="form-control" placeholder="e.g., Developer"></div>
                     </div>
                     <div class="row mb-3">
@@ -409,7 +409,11 @@ async function submitCreateUser() {
         department: document.getElementById('department').value || '',
         designation: document.getElementById('designation').value.trim(),
         role: document.getElementById('role').value,
-        password: document.getElementById('password').value || 'pass123',
+        // FR-AUTH-10: no default password. The field used to fall back to
+        // 'pass123', which the server now refuses because it is on the breach
+        // corpus, so the form sends an empty value and the server generates a
+        // compliant password it returns once in the response.
+        password: document.getElementById('password').value.trim() || undefined,
         allow_login: document.getElementById('allowLogin').checked ? 1 : 0,
         allow_breaks: document.getElementById('allowBreaks').checked ? 1 : 0,
         shift_start: shiftStart, shift_end: shiftEnd
@@ -423,7 +427,17 @@ async function submitCreateUser() {
     const res = await r.json();
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     bootstrap.Modal.getInstance(document.getElementById('createUserModal')).hide();
-    showMsg('User created successfully! Credentials sent to ' + d.email, 'success');
+    // FR-AUTH-10: with no password supplied the server generated one. This is
+    // the only time the plaintext exists outside the credentials email, so it is
+    // shown once here rather than being silently generated and lost.
+    if (res.generated_password) {
+        showMsg(
+            `User created. Generated password for ${d.emp_id}: ${res.generated_password} — copy it now, it is not shown again.`,
+            'success', 20000);
+    } else {
+        showMsg('User created successfully! Credentials sent to ' + d.email, 'success');
+    }
+    document.getElementById('password').value = '';
     loadUsers(1);
 }
 
@@ -565,11 +579,14 @@ async function restoreUser(id) {
 function nextPage() { if (currentPage * PER_PAGE < totalUsers) loadUsers(currentPage + 1); }
 function prevPage() { if (currentPage > 1) loadUsers(currentPage - 1); }
 
-function showMsg(text, type) {
+function showMsg(text, type, stickyMs) {
     const s = document.getElementById('successMsg'), e = document.getElementById('errorMsg');
     s.classList.remove('success'); e.classList.remove('error');
-    if (type === 'success') { s.textContent = text; s.classList.add('success'); setTimeout(() => s.classList.remove('success'), 5000); }
-    else { e.textContent = text; e.classList.add('error'); setTimeout(() => e.classList.remove('error'), 5000); }
+    // A generated password has to stay on screen long enough to be copied, so
+    // the timeout is a parameter rather than a fixed 5s.
+    const ms = stickyMs || 5000;
+    if (type === 'success') { s.textContent = text; s.classList.add('success'); setTimeout(() => s.classList.remove('success'), ms); }
+    else { e.textContent = text; e.classList.add('error'); setTimeout(() => e.classList.remove('error'), ms); }
 }
 
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }

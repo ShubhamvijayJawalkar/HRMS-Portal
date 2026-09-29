@@ -33,7 +33,14 @@ if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
 
 import pytest
 
-from app import app, check_password, gen_id, get_db, hash_password
+from app import (
+    _next_generated_id,
+    app,
+    check_password,
+    gen_id,
+    get_db,
+    hash_password,
+)
 
 
 def _attach_csrf(c):
@@ -630,26 +637,41 @@ def test_profile_api(client):
 
 
 def test_change_password(client):
+    """FR-AUTH-10: the new password must clear the policy, the current one must be right.
+
+    This test rewrites the *seeded* admin's password, so it restores it in a
+    `finally`. It did not before, and when the new policy refused the restore
+    step it left EMP001 on the intermediate password, which then broke every
+    later test that logs in as the admin — the failure surfaced in a completely
+    unrelated test.
+    """
     with client.session_transaction() as sess:
         sess['emp_id'] = 'EMP001'
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99998
-    resp = client.post('/api/change-password', json={
-        'current_password': 'pass123',
-        'new_password': 'newpass123'
-    })
-    assert resp.status_code == 200, f'Expected 200, got {resp.status_code}'
-    resp = client.post('/api/change-password', json={
-        'current_password': 'newpass123',
-        'new_password': 'pass123'
-    })
-    assert resp.status_code == 200
-    resp = client.post('/api/change-password', json={
-        'current_password': 'wrong',
-        'new_password': 'test123'
-    })
-    assert resp.status_code == 400
+    try:
+        resp = client.post('/api/change-password', json={
+            'current_password': 'pass123',
+            'new_password': 'mangrove-lantern-92',
+        })
+        assert resp.status_code == 200, f'Expected 200, got {resp.status_code}: {resp.get_json()}'
+        resp = client.post('/api/change-password', json={
+            'current_password': 'wrong',
+            'new_password': 'another-good-one-77',
+        })
+        assert resp.status_code == 400, 'a wrong current password must be refused'
+    finally:
+        # The policy refuses `pass123` outright, so the seed's demo hash is put
+        # back directly rather than through the route this test is about.
+        conn = get_db()
+        try:
+            conn.execute(
+                'UPDATE users SET password = ? WHERE emp_id = ?',
+                [hash_password('pass123'), 'EMP001'],
+            )
+        finally:
+            conn.close()
 
 
 def test_active_users_endpoint_filters_inactive_employees(client):
@@ -1569,6 +1591,208 @@ def test_generated_traceability_doc_is_up_to_date():
         assert f'| `{status}` | {count} |' in body, (
             f'the summary row for {status} does not match the data ({count})')
 
+
+
+# ── FR-AUTH-10 password policy ───────────────────────────────────────────
+
+def test_password_policy_length_is_ten_not_six():
+    """Appendix A-01 records a 6-character minimum as a NIST defect."""
+    import passwords
+
+    assert passwords.MIN_LENGTH == 10
+    # Nine characters is refused even though it is short but memorable.
+    with pytest.raises(passwords.PasswordPolicyError) as excinfo:
+        passwords.check('jadequilt')
+    assert '10 characters' in str(excinfo.value), excinfo.value
+    # Ten is the boundary and it is inclusive.
+    assert passwords.check('jadequilts') == 'jadequilts'
+    # ...and there is no composition rule: a passphrase of four words with no
+    # digit, symbol or capital is fine. Forcing those produces weaker passwords.
+    assert passwords.is_acceptable('my dog has paws')
+    assert passwords.is_acceptable('a very long passphrase with spaces')
+
+
+def test_password_policy_rejects_the_breach_corpus_offline():
+    """No network, no dependency: the bundled corpus is the floor."""
+    import passwords
+
+    for weak in ('password12', 'Password1!', 'P@ssw0rd99', 'iloveyou12',
+                 'qwertyuiop', 'dragon2024', 'Welcome2024', 'monkey123'):
+        assert passwords.is_breached_offline(weak), weak
+        assert not passwords.is_acceptable(weak), weak
+    # The seed's own demo password is on the list on purpose.
+    assert passwords.is_breached_offline('pass123')
+    assert not passwords.is_acceptable('pass123')
+    # Case and surrounding whitespace do not hide it.
+    assert passwords.is_breached_offline('  PaSsWoRd12  ')
+
+
+def test_password_policy_accepts_a_real_passphrase():
+    import passwords
+
+    for good in ('jade-marlin-quilt-77', 'mangrove-lantern-92',
+                 'Tr0ub4dor&3xx', 'villa in the woods 9',
+                 'correct horse battery staple'):
+        assert passwords.is_acceptable(good), good
+
+
+def test_password_policy_has_no_composition_or_expiry_rules():
+    """NIST SP 800-63B: length and a breach check, not character-class rules."""
+
+    # Parsed rather than grepped, so the module's own docstring — which names
+    # `must_contain_digit` precisely to say it does not exist — can neither
+    # satisfy nor trip the check.
+    import ast
+
+    import passwords
+
+    tree = ast.parse(pathlib.Path(passwords.__file__).read_text())
+    forbidden = {'must_contain_digit', 'must_contain_upper', 'must_contain_symbol',
+                 'must_contain_lower', 'force_expiry', 'expires_days', 'rotate_days'}
+    defined = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+        elif isinstance(node, ast.Assign):
+            defined.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.Name):
+            defined.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            defined.add(node.attr)
+    assert not (defined & forbidden), (
+        f'passwords.py defines {sorted(defined & forbidden)}: NIST SP 800-63B says '
+        'composition rules and expiry produce weaker passwords, not stronger ones')
+    # No time-based state either, which is how expiry would have to be expressed.
+    source = pathlib.Path(passwords.__file__).read_text()
+    assert 'timedelta' not in source and 'last_changed' not in source
+
+
+def test_password_policy_error_does_not_leak_the_breach_count():
+    """A "this appeared N times" message is a free oracle for guessing."""
+    import passwords
+
+    rejected = passwords.PasswordPolicyError()
+    assert str(rejected) == passwords.GENERIC_REJECTION
+    assert 'breach' in str(rejected).lower()
+    assert 'million' not in str(rejected).lower()
+    body = rejected.payload()
+    assert body['policy'] == 'FR-AUTH-10' and body['min_length'] == 10
+    # The only specific message is the length one, which leaks nothing.
+    try:
+        passwords.check('Sh0rt')
+    except passwords.PasswordPolicyError as exc:
+        assert '10 characters' in str(exc)
+
+
+def test_admin_cannot_create_a_user_with_a_weak_password(client):
+    """FR-USR-02 create path: the policy is enforced server-side, not in the UI."""
+    _set_admin_session(client, 99830)
+    try:
+        for weak in ('pass123', 'short', 'password1'):
+            resp = client.post('/api/users', json={
+                'emp_id': 'EMP940', 'name': 'Weak', 'email': 'weak940@company.com',
+                'department': 'MIS', 'role': 'Employee', 'password': weak,
+            })
+            assert resp.status_code == 400, (weak, resp.get_json())
+            assert resp.get_json()['policy'] == 'FR-AUTH-10', resp.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM users WHERE emp_id = 'EMP940'").fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_user_contract_rows('EMP940')
+
+
+def test_admin_created_user_with_no_password_gets_a_generated_one(client):
+    """A shared default password is worse than none: `pass123` was the default."""
+    import passwords
+
+    _set_admin_session(client, 99831)
+    try:
+        resp = client.post('/api/users', json={
+            'emp_id': 'EMP941', 'name': 'No Password', 'email': 'np941@company.com',
+            'department': 'MIS', 'role': 'Employee',
+        })
+        assert resp.status_code == 201, resp.get_json()
+        body = resp.get_json()
+        assert body['password_source'] == 'generated'
+        generated = body['generated_password']
+        assert passwords.is_acceptable(generated), generated
+        assert generated != 'pass123'
+        # It is a working password, not just a string that passed a check.
+        with app.test_client() as fresh:
+            assert fresh.post('/login', json={
+                'emp_id': 'EMP941', 'password': generated,
+            }).status_code == 200
+    finally:
+        _cleanup_user_contract_rows('EMP941')
+
+
+def test_change_password_enforces_the_policy(client):
+    _set_admin_session(client, 99832)
+    try:
+        weak = client.post('/api/change-password', json={
+            'current_password': 'pass123', 'new_password': 'password1',
+        })
+        assert weak.status_code == 400, weak.get_json()
+        assert weak.get_json()['policy'] == 'FR-AUTH-10'
+        # A wrong current password and a weak new password: the policy answer must
+        # not tell an attacker which of the two was wrong.
+        both = client.post('/api/change-password', json={
+            'current_password': 'nope', 'new_password': 'password1',
+        })
+        assert both.status_code == 400
+        assert both.get_json()['error'] == weak.get_json()['error']
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('UPDATE users SET password = ? WHERE emp_id = ?',
+                         [hash_password('pass123'), 'EMP001'])
+        finally:
+            conn.close()
+
+
+def test_reset_password_enforces_the_policy_without_burning_the_token(client):
+    """A rejected password must leave the single-use token usable."""
+    _set_admin_session(client, 99833)
+    try:
+        _create_policy_user(client, 'EMP942', role='Employee')
+        conn = get_db()
+        try:
+            token = 'reset-token-for-policy-check'
+            conn.execute(
+                'DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP942'],
+            )
+            conn.execute(
+                'INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) '
+                'VALUES (?, ?, ?, ?)',
+                [_next_generated_id(conn, 'password_reset_tokens', 'token_id'),
+                 'EMP942', token, datetime.now() + timedelta(hours=1)],
+            )
+        finally:
+            conn.close()
+        weak = client.post('/api/reset-password', json={
+            'token': token, 'new_password': 'password1',
+        })
+        assert weak.status_code == 400, weak.get_json()
+        assert weak.get_json()['policy'] == 'FR-AUTH-10'
+        # The token is still unused, so the user can simply try again.
+        good = client.post('/api/reset-password', json={
+            'token': token, 'new_password': 'jade-marlin-quilt-77',
+        })
+        assert good.status_code == 200, good.get_json()
+        with app.test_client() as fresh:
+            assert fresh.post('/login', json={
+                'emp_id': 'EMP942', 'password': 'jade-marlin-quilt-77',
+            }).status_code == 200
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP942'])
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP942')
 
 # ── FR-EXP-03: the expense claim state machine ────────────────────────────
 
@@ -3340,7 +3564,7 @@ def test_audit_log_entity_before_after_written(client):
         sess['session_id'] = 99011
     client.post('/api/users', json={
         'emp_id': 'EMP902', 'name': 'Audit Subject', 'email': 'emp902@company.com',
-        'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+        'department': 'MIS', 'role': 'Employee', 'password': 'audit-subject-pass',
     })
     conn = get_db()
     row = conn.execute(
@@ -3867,7 +4091,7 @@ def test_user_create_roundtrips_shift(client):
         sess['session_id'] = 99020
     resp = client.post('/api/users', json={
         'emp_id': 'EMP903', 'name': 'Shift Tester', 'email': 'emp903@company.com',
-        'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+        'department': 'MIS', 'role': 'Employee', 'password': 'audit-subject-pass',
         'shift_start': '09:00', 'shift_end': '18:00', 'weekly_off_pattern': 'Sun,Mon',
     })
     assert resp.status_code == 201, resp.get_json()
@@ -3938,7 +4162,7 @@ def test_shift_assignments_branch_executes_on_duckdb(client):
             sess['session_id'] = 99022
         resp = client.post('/api/users', json={
             'emp_id': 'EMP904', 'name': 'Shift Two', 'email': 'emp904@company.com',
-            'department': 'MIS', 'role': 'Employee', 'password': 'pass123',
+            'department': 'MIS', 'role': 'Employee', 'password': 'audit-subject-pass',
             'shift_start': '13:00', 'shift_end': '22:00',
         })
         assert resp.status_code == 201, resp.get_json()

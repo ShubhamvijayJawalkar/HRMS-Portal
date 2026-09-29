@@ -48,7 +48,8 @@ import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
-import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
+import outbox  # noqa: E402
+import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
@@ -2858,8 +2859,12 @@ def change_password():
     current = data.get('current_password', '')
     new_pwd = data.get('new_password', '')
 
-    if len(new_pwd) < 6:
-        return jsonify({'error': 'New password must be at least 6 characters'}), 400
+    # FR-AUTH-10: the 6-character minimum the SRS calls a defect is gone, and
+    # the breach corpus is now consulted. The current password is still checked
+    # first below, so an unauthenticated guesser learns nothing from the policy.
+    problem = _password_problem(new_pwd, 'new_password')
+    if problem:
+        return jsonify(problem[0]), problem[1]
 
     conn = get_db()
     row = conn.execute("SELECT password FROM users WHERE emp_id = ?", [emp_id]).fetchone()
@@ -2947,8 +2952,12 @@ def reset_password():
     token = data.get('token', '')
     new_pwd = data.get('new_password', '')
 
-    if len(new_pwd) < 6:
-        return jsonify({'error': 'Password must be at least 6 characters'}), 400
+    # FR-AUTH-10: checked before the token is consumed, so a rejected password
+    # can be retried with the same token instead of stranding the user and burning
+    # a single-use credential on a typo.
+    problem = _password_problem(new_pwd, 'new_password')
+    if problem:
+        return jsonify(problem[0]), problem[1]
 
     conn = get_db()
     row = conn.execute(
@@ -3883,6 +3892,40 @@ def _insert_lifecycle_notification(conn, emp_id, message, link, category):
         [_next_generated_id(conn, 'notifications', 'notification_id'), emp_id, category, category,
          message, link, datetime.now()],
     )
+
+
+def _generate_initial_password():
+    """A policy-compliant password for an admin-created user with none supplied.
+
+    Generated rather than defaulted, because a default is a shared secret: every
+    employee created without a password would otherwise have the same one, and
+    the seed's demo password is on the breach corpus by design. The plaintext is
+    returned in the response body exactly once, so the administrator can hand it
+    over; the reset flow is the better route and this exists so the create call
+    cannot fail for want of one.
+    """
+    while True:
+        candidate = (
+            secrets.token_urlsafe(9)[:4] + '-'
+            + secrets.choice(('harbour', 'meadow', 'lantern', 'quartz', 'cobalt', 'thicket'))
+            + '-' + secrets.token_urlsafe(6)[:4]
+        )
+        if passwords.is_acceptable(candidate):
+            return candidate
+
+
+def _password_problem(password, field='password'):
+    """The policy verdict for ``password``: ``None`` if acceptable, else (body, 400).
+
+    FR-AUTH-10. Every route that sets a password goes through here, so the
+    answer a user gets for "too short" is the same whether they were created by
+    an admin, changed their own, or reset via a token.
+    """
+    try:
+        passwords.check(password)
+    except passwords.PasswordPolicyError as exc:
+        return exc.payload(), 400
+    return None
 
 
 def _revoke_redis_sessions(emp_id):
@@ -8289,7 +8332,17 @@ def add_user():
     if conn.execute("SELECT 1 FROM users WHERE LOWER(email) = ?", [data['email']]).fetchone():
         conn.close()
         return jsonify({'error': 'Email already exists'}), 409
-    pwd = data.get('password', 'pass123')
+    pwd = data.get('password')
+    generated = pwd is None
+    if generated:
+        # A default is still a password, and a *shared* default is worse than
+        # none: the old `data.get('password', 'pass123')` gave every employee
+        # created without a password the same one, and `pass123` is on the breach
+        # corpus. The seed writes its own demo hash directly and never comes here.
+        pwd = _generate_initial_password()
+    problem = _password_problem(pwd, 'password')
+    if problem:  # unreachable for a generated one; a supplied password can fail
+        return jsonify(problem[0]), problem[1]
     if _shift_model():
         conn.execute(
             "INSERT INTO users (emp_id, name, email, password, role, department, designation, status, first_login, created_at, allow_login, allow_breaks) VALUES (?, ?, ?, ?, ?, ?, ?, 'Active', ?, ?, ?, ?)",
@@ -8336,7 +8389,14 @@ def add_user():
     </div>"""
     send_email(data['email'], 'Your HRMS Account Credentials', creds_body)
 
-    return jsonify({'message': 'User added', 'email_sent': True}), 201
+    body = {'message': 'User added', 'email_sent': True}
+    if generated:
+        # The admin supplied no password, so this is the only time the plaintext
+        # exists anywhere but the email above. It is returned so a deployment with
+        # no SMTP configured does not silently lock the new user out.
+        body['generated_password'] = pwd
+        body['password_source'] = 'generated'
+    return jsonify(body), 201
 
 
 @app.route('/api/users/<emp_id>', methods=['GET'])

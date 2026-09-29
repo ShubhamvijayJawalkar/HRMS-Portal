@@ -409,6 +409,12 @@ def _cleanup_lifecycle_probe_residue(pc) -> set[Path]:
     return {path for path in upload_paths if path.is_file() or path.is_symlink()}
 
 
+# A password the FR-AUTH-10 policy accepts. The probe only needs a value that
+# is not the seed's demo password, which the policy refuses because it is on the
+# breach corpus.
+PROBE_PASSWORD = "jade-marlin-quilt-77"
+
+
 def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     """Fire the core state-changing flows against ``public`` exactly as the
     legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
@@ -526,7 +532,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     def create_user():
         return _post(cl_a, tok_a, "/api/users",
                      {"emp_id": uniq, "name": "Probe Tester", "email": f"{uniq.lower()}@company.com",
-                      "department": "MIS", "role": "Employee", "password": "pass123"}).status_code
+                      "department": "MIS", "role": "Employee",
+                      "password": PROBE_PASSWORD}).status_code
     run("users(create)", create_user)
 
     # FR-USR-09: user_permissions is an identity key with a BOOLEAN flag on
@@ -658,7 +665,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         if not t:
             return 409
         return _post(cl, tok, "/api/reset-password",
-                     {"token": t, "new_password": "pass123"}).status_code
+                     {"token": t, "new_password": PROBE_PASSWORD}).status_code
     run("auth(reset-password)", reset_password_flow)
 
     # ── help-desk journey: employee creates + comments, admin resolves ─────

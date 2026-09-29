@@ -888,6 +888,39 @@ tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
 DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**, and
 the CC-01 checker plus the read-only preflight both pass on that database.
 
+### 14.12 Password policy (implemented)
+
+FR-AUTH-10 asked for a 10-character minimum, a breach-corpus check, and — as a
+deliberate omission — no complexity rules and no expiry, because NIST SP 800-63B
+says forced composition rules produce *weaker* passwords since they are
+predictable. Appendix A-01 records 6 as a defect.
+
+`passwords.py` implements exactly that. The corpus is a bundled offline list so
+the check cannot silently fail when the network is down and CI never depends on a
+third party; `HIBP_URL` optionally adds the k-anonymity range query, where only
+the first five characters of the SHA-1 prefix leave the process. The lookup is
+not a plain set membership test: leet variants (`P@ssw0rd`) are caught by
+undoing the substitution, and known-password-plus-suffix (`monkey123`,
+`password2026!`) by a prefix test with a 5-character floor and a 50% share, so
+`correct-horse-battery` passes and `passwordfortheoffice` does not. The rejection
+message is generic — a breach count would be an oracle for confirming a guess —
+and a test parses the module's AST to prove no composition or expiry rule
+creeps back in.
+
+Enforcement is at all three points a password is set (admin create, self-service
+change, token reset), and on reset it runs *before* the token is consumed so a
+typo cannot burn a single-use credential. The shared default is gone: creating a
+user without a password now generates a compliant one and returns it once, rather
+than giving every such employee `pass123`. The boot seed is exempt by
+construction — it writes the demo hash directly and never enters the policy — so
+the disposable validation databases still boot.
+
+Validation: **152 DuckDB unit tests passed / 6 skipped**, **157 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**, and
+the CC-01 checker plus the read-only preflight both pass on that database. The
+matrix is now **49 IMPLEMENTED / 43 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

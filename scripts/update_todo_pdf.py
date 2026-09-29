@@ -40,6 +40,15 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "FR-AUTH-10 password policy: a 10-character minimum (Appendix A-01 calls 6 a "
+     "defect) plus a breach-corpus check, enforced wherever a password is set, with no complexity "
+     "rules and no expiry by design per NIST SP 800-63B - a test parses the module's AST to keep "
+     "them out. The corpus is offline by default (a check that fails when the network is down does "
+     "not exist) with the HIBP k-anonymity range query behind HIBP_URL. Leet variants and "
+     "known-password-plus-suffix are caught, and the rejection message is generic so it is not an "
+     "oracle for confirming a guess. The shared default of pass123 is gone: a user created without "
+     "a password now gets a generated compliant one returned once. Matrix is now 49 IMPLEMENTED / "
+     "43 PARTIAL / 11 NOT_STARTED / 1 RETIRED."),
     ("2026-09-29", "FR-EXP-03 expense claim state machine: following the traceability matrix into "
      "expenses_api found three defects - an admin could approve a claim they had filed "
      "themselves, a claim could jump Pending to Paid with no approval, and a paid claim could be "
@@ -213,9 +222,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "143 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "148 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "148 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "152 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "157 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "157 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

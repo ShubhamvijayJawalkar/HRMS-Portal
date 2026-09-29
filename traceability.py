@@ -117,9 +117,17 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'Single-use token, invalidated after a successful reset, purged '
                    'hourly. Missing: the token is stored unhashed, and the expiry is '
                    '1 h where the SRS asks for 24 h.'),
-    'FR-AUTH-10': ('M', 'N', 'NOT_STARTED', (),
-                   'No minimum length and no breached-password check. Any password is '
-                   'accepted at creation and at reset.'),
+    'FR-AUTH-10': ('M', 'N', 'IMPLEMENTED',
+                   ('/api/users', '/api/change-password', '/api/reset-password'),
+                   'passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) '
+                   'and a breach-corpus check, enforced at every point a password is set. '
+                   'The corpus is a bundled offline list, extended optionally by the HIBP '
+                   'k-anonymity range API; leet variants and known-password-plus-suffix are '
+                   'caught too. Deliberately no complexity rules and no expiry, per NIST '
+                   'SP 800-63B, and a test parses the module to keep them out. The old shared '
+                   "default of 'pass123' is gone: a user created without a password gets a "
+                   'generated compliant one, returned once. The rejection message is generic, '
+                   'so it is not an oracle for confirming a guess.'),
     'FR-AUTH-11': ('M', 'N', 'NOT_STARTED', (),
                    'No MFA. mfa_credentials exists in the canonical schema with an '
                    'encrypted secret, but nothing reads or writes it: no enrolment, '

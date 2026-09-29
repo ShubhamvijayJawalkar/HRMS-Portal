@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 48 | 46% |
+| `IMPLEMENTED` | 49 | 47% |
 | `PARTIAL` | 43 | 41% |
-| `NOT_STARTED` | 12 | 12% |
+| `NOT_STARTED` | 11 | 11% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (48)
+### IMPLEMENTED (49)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -54,6 +54,7 @@ rather than quietly invalidating this document.
 | `FR-AUTH-06` | M | R | `/` | Redirects by session state. |
 | `FR-AUTH-07` | M | N | `/dashboard` | Admin vs self dashboard chosen by policy.sees_admin_surface(); unauthenticated gets 302 for a page and 401 for JSON. |
 | `FR-AUTH-08` | M | N | `/api/forgot-password` | Always 202 with the same message, so the endpoint cannot be used to enumerate accounts. |
+| `FR-AUTH-10` | M | N | `/api/users`<br>`/api/change-password`<br>`/api/reset-password` | passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) and a breach-corpus check, enforced at every point a password is set. The corpus is a bundled offline list, extended optionally by the HIBP k-anonymity range API; leet variants and known-password-plus-suffix are caught too. Deliberately no complexity rules and no expiry, per NIST SP 800-63B, and a test parses the module to keep them out. The old shared default of 'pass123' is gone: a user created without a password gets a generated compliant one, returned once. The rejection message is generic, so it is not an oracle for confirming a guess. |
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | Double-submit on every mutating /api request; a fetch wrapper attaches the header and native forms carry the hidden field. Asserted end to end with server-side sessions too. |
 | `FR-DOC-01` | M | R | `/api/documents` | Scoped to the owner unless HR/Admin. |
 | `FR-EXP-03` | M | C | `/api/expenses`<br>`/api/expenses/<int:eid>/status` | Strict transition table in expenses.py: Pending -> Approved/Rejected by the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only (Appendix A-11), Rejected and Paid final. Self-approval blocked, a rejection reason required, every write a conditional UPDATE with a before/after audit, and the list reports the actions the caller may actually take. Finance holds the expenses module because the SRS names it for Paid; the list stays scoped to own + reports, so that grants reach rather than company-wide visibility. |
@@ -131,13 +132,12 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (12)
+### NOT_STARTED (11)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
 | `FR-ANL-04` | M | C | `/api/analytics/attrition-risk` | The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing them needs a code change and redeploy. |
 | `FR-AUTH-03` | M | N | — | No consecutive-failure counter and no timed account lock. Only the IP rate limit stands between an attacker and a password spray. |
-| `FR-AUTH-10` | M | N | — | No minimum length and no breached-password check. Any password is accepted at creation and at reset. |
 | `FR-AUTH-11` | M | N | — | No MFA. mfa_credentials exists in the canonical schema with an encrypted secret, but nothing reads or writes it: no enrolment, no challenge, no gate. This is the largest single gap found by the traceability pass. |
 | `FR-JOB-03` | S | R | — | No quarterly job opens the next performance review cycle. |
 | `FR-JOB-05` | H | C | — | No leader election. The scheduler starts in the gunicorn master, which is the usual single-instance answer, but a multi-pod deployment would run every cron job once per pod. |

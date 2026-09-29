@@ -211,7 +211,7 @@ def test_admin_assigns_a_leave_policy(page):
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({emp_id: 'EMP904', name: 'Policy Subject',
                 email: 'emp904@company.com', department: 'MIS', role: 'Employee',
-                password: 'pass123'})
+                password: 'jade-marlin-quilt-77'})
         })
     """)
     page.goto(BASE_URL + '/admin/users')
@@ -264,7 +264,7 @@ def test_admin_assigns_a_leave_policy(page):
     page.wait_for_timeout(1000)
     page.goto(BASE_URL + '/login')
     page.fill('#empId', 'EMP904')
-    page.fill('#password', 'pass123')
+    page.fill('#password', 'jade-marlin-quilt-77')
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
     balances = page.evaluate("fetch('/api/leave-balance').then(r => r.json())")
@@ -319,10 +319,17 @@ def test_admin_import_users_runs_as_a_background_job(page):
     assert 'users.csv' in history
     assert '1 imported, 1 skipped' in history, history
 
-def _login(page, emp_id):
+# The seeded demo users keep `pass123`: the boot seed writes their hash
+# directly and never goes through the FR-AUTH-10 policy, which exists to refuse
+# it on any interactive path. Test *fixtures* created through the API get a
+# compliant password and log in with the matching one.
+FIXTURE_PASSWORD = 'jade-marlin-quilt-77'
+
+
+def _login(page, emp_id, password='pass123'):
     page.goto(BASE_URL + '/login')
     page.fill('#empId', emp_id)
-    page.fill('#password', 'pass123')
+    page.fill('#password', password)
     page.click('button[type="submit"]')
     page.wait_for_timeout(3000)
 
@@ -340,7 +347,7 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({emp_id: 'EMP902', name: 'Second Admin',
                 email: 'emp902@company.com', department: 'MIS', role: 'Admin',
-                password: 'pass123'})
+                password: 'jade-marlin-quilt-77'})
         })
     """)
     page.evaluate("""
@@ -348,7 +355,7 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
             method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({emp_id: 'EMP903', name: 'Erasure Subject',
                 email: 'emp903@company.com', department: 'MIS', role: 'Employee',
-                password: 'pass123'})
+                password: 'jade-marlin-quilt-77'})
         })
     """)
     page.goto(BASE_URL + '/admin/users')
@@ -388,7 +395,7 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
     assert refused == 409, refused
 
     # A different administrator confirms, and the system applies the erasure.
-    _login(page, 'EMP902')
+    _login(page, 'EMP902', FIXTURE_PASSWORD)
     applied = page.evaluate(
         f"fetch('/api/anonymisation/{request_id}/confirm', {{method: 'POST'}}).then(r => r.json())"
     )

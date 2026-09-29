@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 143 on DuckDB, 148 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 152 on DuckDB, 157 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (143 on DuckDB, 148 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (152 on DuckDB, 157 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -810,6 +810,55 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   CC-01 and the preflight green. Two PostgreSQL-only failures during validation
   were a test-side issue: `audit_log.entity_id` is VARCHAR on the compatibility
   schema and BIGINT on v2.0, so the assertion now casts.
+
+## FR-AUTH-10 password policy (`passwords.py`)
+- The SRS asked for three things and the *shape* of the requirement matters
+  more than the rule count: a **10-character minimum** (Appendix A-01 records 6 as
+  a defect), a **breach-corpus check**, and — as a deliberate omission —
+  **no complexity rules and no expiry**, because NIST SP 800-63B says forced
+  `Passw0rd!`-style rules produce *weaker* passwords because they are
+  predictable. The module has no `must_contain_digit` and never will, and a test
+  parses the module's AST to keep it that way.
+- **The offline corpus is the default; the network is opt-in.** A password check
+  that silently fails when the network is down does not exist, and CI must not
+  depend on a third party. ~50 common passwords ship in the module; `HIBP_URL`
+  enables the k-anonymity range query, which is privacy-preserving because only
+  the first five characters of the SHA-1 prefix ever leave the process.
+- The corpus is not a plain set lookup. `P@ssw0rd` and `Password1` are caught by
+  undoing leet substitution, and `monkey123` / `password2026!` are caught by a
+  "known password plus a suffix" test with a 5-character floor and a 50% share —
+  so `correct-horse-battery` is accepted and `passwordfortheoffice` is not, which
+  is the judgement NIST actually recommends.
+- **The rejection message is generic** (except length, which leaks nothing an
+  attacker does not know). "That password appeared 13 million times in a breach
+  corpus" is a free oracle for confirming a guess, so a test asserts the message
+  carries no count.
+- Enforced at all three points a password is *set*: admin user creation, the
+  self-service change, and the token reset. On reset the policy is checked
+  **before the token is consumed**, so a typo does not burn a single-use
+  credential — a test asserts the same token still works afterwards.
+- **The shared default is gone.** `POST /api/users` used to do
+  `data.get('password', 'pass123')`, which gave every employee created without a
+  password the same one. A user created without one now gets a generated
+  compliant password, returned once in the response so a deployment without SMTP
+  cannot lock them out, and the admin form shows it for long enough to copy. The
+  create-user field no longer says "Default: pass123".
+- The boot seed is exempt *by construction*: it writes the demo hash directly and
+  never routes through the policy, so the disposable validation databases still
+  boot. `pass123` is on the corpus deliberately — any interactive use of it is
+  refused.
+- 11 new unit tests, plus fixture updates: three user creations in the unit suite,
+  three in the browser suite and two probe write flows had used `pass123` as a
+  *new* password. The matrix moves FR-AUTH-10 to `IMPLEMENTED`
+  (**49 IMPLEMENTED / 43 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- **A test-isolation bug this surfaced, worth recording:** `test_change_password`
+  rewrote the *seeded* admin's password and restored it through the same route.
+  When the new policy refused the restore, EMP001 was left on the intermediate
+  password and every later test that logs in as the admin failed — surfacing in a
+  completely unrelated test. It now restores the hash directly in a `finally`.
+- DuckDB is 152 passed / 6 skipped; PostgreSQL 157 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + 45/45 write, with
+  CC-01 and the preflight green.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
