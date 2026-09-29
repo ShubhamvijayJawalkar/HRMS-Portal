@@ -40,6 +40,17 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "FR-LEA-08 monthly leave accrual: monthly_leave_grants was in the canonical "
+     "target and unwritten, so an accrual rate was collapsed into a flat annual ceiling at "
+     "assignment time. The rate-driven entitlement is now what the employee has earned so far "
+     "(floor(rate x months elapsed) across the months the assignment was in force), posted one "
+     "row per elapsed month by a monthly cron job, POST /api/accrual/run, or the Accrue now "
+     "button in the leave-policy modal - all three idempotent. The entitlement is derived and the "
+     "grant is the record, so a missed run cannot leave anybody with no leave; granted_by is NULL "
+     "because it is a foreign key to users(emp_id) in v2.0. entitlement_days now takes the balance "
+     "year, and a year the policy never reached keeps the published default. DuckDB 126 passed / "
+     "6 skipped; PostgreSQL 131 passed / 1 skipped; Playwright 21 passed; probe 97/97 GET + 45/45 "
+     "write."),
     ("2026-09-28", "FR-USR-15 PII completion: policy.PII_FIELDS is now a per-entity map, so a "
      "candidate's email and phone are withheld from /api/candidates and /api/offers unless the "
      "actor holds pii_reveal, each record carries pii_revealed, and a permitted read writes one "
@@ -170,9 +181,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "121 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "126 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "126 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "126 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "131 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "131 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

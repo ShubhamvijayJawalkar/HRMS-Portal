@@ -45,6 +45,7 @@ load_dotenv()
 
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
+import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import outbox  # noqa: E402  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
@@ -692,6 +693,22 @@ def init_db():
             requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             confirmed_at TIMESTAMP,
             applied_at TIMESTAMP
+        )
+    ''')
+
+    # ── Monthly leave accrual ledger (FR-LEA-08) ───────────────────
+    # The compatibility shape. v2.0 `public` owns this table with an identity
+    # key, so `CREATE TABLE IF NOT EXISTS` is a no-op there.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS monthly_leave_grants (
+            grant_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            leave_type VARCHAR NOT NULL,
+            days INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            granted_by VARCHAR,
+            granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
@@ -2298,6 +2315,7 @@ _ROUTE_MODULES = {
     'delete_user': 'users', 'get_user_permissions': 'users',
     'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
     'get_leave_policy': 'leaves', 'update_leave_policy': 'leaves',
+    'run_leave_accrual_route': 'leaves',
     'propose_anonymisation': 'policy_admin', 'anonymisation_status': 'policy_admin',
     'anonymisation_list': 'policy_admin', 'confirm_anonymisation': 'policy_admin',
     'cancel_anonymisation': 'policy_admin',
@@ -3359,6 +3377,43 @@ def run_import_job(job_id):
     if not job:
         return jsonify({'error': 'Import job not found'}), 404
     return jsonify(job), 200
+
+
+@app.route('/api/v1/accrual/run', methods=['POST'])
+@app.route('/api/accrual/run', methods=['POST'])
+@admin_required
+def run_leave_accrual_route():
+    """Accrue leave for every policy holder now (FR-LEA-08).
+
+    Idempotent per (employee, leave type, year, month), so this is the same
+    safe operation the monthly job runs — useful after a policy is assigned
+    mid-year, and safe to press twice.
+    """
+    conn = get_db()
+    try:
+        result = leave_accrual.run_accrual(conn)
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'LEAVE_ACCRUAL_RUN',
+        f"Leave accrual: {result['grants']} grant(s), {result['days']} day(s) "
+        f"across {result['employees']} employee(s)",
+        entity='monthly_leave_grants', entity_id=None,
+        after=result,
+    )
+    return jsonify(result), 200
+
+
+def run_leave_accrual():
+    """Scheduler job: credit the months that have happened (day 1, 00:30 IST)."""
+    conn = get_db()
+    try:
+        return leave_accrual.run_accrual(conn)
+    except Exception as exc:
+        logger.warning('leave accrual failed: %s', exc)
+        return None
+    finally:
+        conn.close()
 
 
 def run_import_dispatch():
@@ -8743,6 +8798,22 @@ def _register_scheduler_jobs(attendance_hour=2):
         hour=attendance_hour,
         minute=5,
         id='attendance-finalization',
+        replace_existing=True,
+        coalesce=True,
+        max_instances=1,
+        misfire_grace_time=3600,
+    )
+    # FR-LEA-08: credit the accrual for the months that have happened. The
+    # grant is idempotent per (employee, type, year, month), so a missed run is
+    # simply made up by the next one.
+    scheduler.add_job(
+        run_leave_accrual,
+        'cron',
+        day=1,
+        hour=0,
+        minute=30,
+        timezone=IST,
+        id='leave-accrual',
         replace_existing=True,
         coalesce=True,
         max_instances=1,

@@ -809,6 +809,35 @@ Playwright tests passed on DuckDB and PostgreSQL**, the clean v2.0 probe is
 **97/97 GET + 44/44 write**, and the CC-01 checker plus the read-only preflight
 both pass on that database.
 
+### 14.10 Monthly leave accrual (implemented)
+
+`monthly_leave_grants` was in the canonical target and unwritten, so an
+`accrual_rate` was collapsed into a flat annual ceiling at assignment time —
+1.5 days/month showed all 18 days in January. The rate-driven entitlement is now
+what the employee has **earned so far** (`floor(rate × months elapsed)` across the
+months the assignment was in force), so the balance grows through the year, and
+the month is posted to the ledger by a cron job (day 1, 00:30 IST),
+`POST /api/accrual/run`, or the **Accrue now** button in the leave-policy modal.
+All three are the same idempotent operation.
+
+The entitlement is *derived* from the policy while the grant is the *record*: a
+missed scheduler run cannot leave an employee with no leave, and a test asserts
+the ledger and the derived value agree so the ledger cannot quietly drift. The
+fraction in a rate like 1.5 is carried across months, so twelve credits sum to
+exactly 18. `granted_by` is NULL for a system accrual because it is a foreign key
+to `users(emp_id)` in the canonical schema; the `LEAVE_ACCRUAL_RUN` audit row
+records who triggered an on-demand run and the counters it produced.
+
+`entitlement_days()` now takes the balance `year`, and a year the policy never
+reached falls back to the published default rather than to zero — otherwise the
+derivation would rewrite historical balance rows on the next read.
+
+Validation: **126 DuckDB unit tests passed / 6 skipped**, **131 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**
+(the new `leave-accrual(monthly ledger)` flow reads the canonical table back), and
+the CC-01 checker plus the read-only preflight both pass on that database.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:
@@ -848,7 +877,8 @@ and `pii_reveal` followed in §14.5.
 3. The FR-USR follow-up is complete: archive/restore, the directory contract,
    the permission policy and its enforcement, the audited PII reveal (employees,
    dependents and the ATS contact details), policy-derived leave balances,
-   background import jobs, and two-person anonymisation. The recorded open items
-   are the trade-offs chosen in `docs/ANONYMISATION.md` (keeping `emp_id` as the
-   seven-year join key, leaving free text in place) and the unused
-   `monthly_leave_grants` accrual ledger.
+   background import jobs, and two-person anonymisation. The accrual rate now
+   earns days month by month through `monthly_leave_grants` (§14.10). The
+   recorded open items are the trade-offs chosen in `docs/ANONYMISATION.md`
+   (keeping `emp_id` as the seven-year join key, leaving free text in place) and
+   the year-end carry-forward, which the ledger now records the data for.

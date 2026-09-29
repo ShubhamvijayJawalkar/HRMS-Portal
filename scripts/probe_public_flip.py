@@ -438,6 +438,11 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM payroll_runs WHERE year >= 2099")
         pc.execute("DELETE FROM password_reset_tokens WHERE emp_id = 'EMP002'")
         pc.execute("DELETE FROM idempotency_keys WHERE key LIKE 'probe-%'")
+        # FR-LEA-08: the probe's own leave policy and accrual ledger, so a second
+        # run posts the same grants rather than skipping them as already posted.
+        pc.execute("DELETE FROM monthly_leave_grants WHERE emp_id = 'EMP002'")
+        pc.execute("DELETE FROM leave_policy_assignments WHERE emp_id = 'EMP002'")
+        pc.execute("DELETE FROM leave_balance WHERE emp_id = 'EMP002'")
         pc.execute(
             "DELETE FROM attendance_days WHERE emp_id = 'EMP002' AND attendance_date = %s",
             [attendance_date],
@@ -574,6 +579,37 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         ok = row is not None and row[0] == 'Fixed' and row[1] == '10:00' and row[2] == '19:00'
         return 200 if ok and 'shift_start' not in cols else 409
     run("shifts(assignment write)", shift_write)
+
+    # ── FR-LEA-08: monthly accrual on the v2.0 ledger ────────────────────────
+    # `monthly_leave_grants` exists in the canonical target with an identity key
+    # and `granted_by` as a foreign key to users(emp_id), so a system-driven
+    # accrual must leave it NULL rather than invent an actor id.
+    def leave_accrual():
+        rc = _put(cl_a, tok_a, "/api/users/EMP002/leave-policy",
+                  {"accrual_rate": "1.0",
+                   "effective_from": today.replace(month=1, day=1).isoformat()}).status_code
+        if rc != 200:
+            return rc
+        rc = _post(cl_a, tok_a, "/api/accrual/run", {}).status_code
+        if rc != 200:
+            return rc
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            rows = pc.execute(
+                "SELECT month, days, granted_by FROM monthly_leave_grants "
+                "WHERE emp_id = 'EMP002' AND leave_type = 'Annual' ORDER BY month",
+            ).fetchall()
+            balance = pc.execute(
+                "SELECT total_days FROM leave_balance WHERE emp_id = 'EMP002' "
+                "AND leave_type = 'Annual' AND year = %s",
+                [today.year],
+            ).fetchone()
+        expected = list(range(1, today.month + 1))
+        posted = [r[0] for r in rows]
+        derived = balance[0] if balance else None
+        ok = (posted == expected and all(r[1] > 0 and r[2] is None for r in rows)
+              and derived is not None and int(derived) == sum(r[1] for r in rows))
+        return 200 if ok else 409
+    run("leave-accrual(monthly ledger)", leave_accrual)
 
     # ── FR-JOB-01: nightly finalisation against the v2.0 identity key and
     #    effective-dated shift/weekly-off assignment ─────────────────────────

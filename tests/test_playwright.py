@@ -233,8 +233,31 @@ def test_admin_assigns_a_leave_policy(page):
     assert resp.value.ok, f'leave policy save failed: {resp.value.status}'
     payload = resp.value.json()
     annual = next(b for b in payload['balances'] if b['leave_type'] == 'Annual')
-    assert annual['total_days'] == 12, annual      # 1.0 day/month x 12
-    assert annual['source'] == 'policy'
+    # 1.0 day/month, effective from January: what the employee has *earned* so far
+    # this year, not the whole year handed over at once.
+    assert annual['total_days'] == datetime.now().month, annual
+    assert annual['source'] == 'accrual', annual
+
+    # The ledger: one row per elapsed month, posted by an on-demand run. Still an
+    # admin session, so the route is reachable; a second press must post nothing.
+    first_run = page.evaluate(
+        "() => fetch('/api/accrual/run', {method: 'POST'}).then(r => r.json())"
+    )
+    # Every elapsed month of the year is now in the ledger, whether this run
+    # posted it or an earlier one (the job is idempotent, so a second press adds
+    # nothing).
+    assert first_run['grants'] + first_run['already_posted'] >= datetime.now().month, first_run
+    second_run = page.evaluate(
+        "() => fetch('/api/accrual/run', {method: 'POST'}).then(r => r.json())"
+    )
+    assert second_run['grants'] == 0, second_run
+
+    # The same operation is one click away in the leave-policy modal.
+    page.click("button[title='Leave policy']")
+    page.wait_for_timeout(1500)
+    assert page.is_visible('#lpAccrueBtn'), 'the on-demand accrual action is missing'
+    page.click('#lpAccrueBtn')
+    page.wait_for_timeout(2000)
 
     # The employee sees the derived entitlement on their own balance endpoint.
     page.goto(BASE_URL + '/logout')
@@ -246,8 +269,10 @@ def test_admin_assigns_a_leave_policy(page):
     page.wait_for_timeout(3000)
     balances = page.evaluate("fetch('/api/leave-balance').then(r => r.json())")
     annual = next(b for b in balances if b['leave_type'] == 'Annual')
-    assert annual['total_days'] == 12 and annual['source'] == 'policy', annual
+    assert annual['total_days'] == datetime.now().month, annual
+    assert annual['source'] == 'accrual', annual
     assert 'reserved_days' in annual
+
 
 def test_admin_import_users_runs_as_a_background_job(page):
     """FR-USR-04: the upload is queued, polled, and reported as a job."""

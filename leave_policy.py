@@ -16,9 +16,11 @@ state:
 
     remaining = total_days - used_days - reserved_days
 
-* ``total_days`` is **derived** from the policy (annual accrual rate, capped by
-  the carry-forward cap) and materialised into ``leave_balance`` on read, so
-  every existing read path keeps working;
+* ``total_days`` is **derived** from the policy and materialised into
+  ``leave_balance`` on read, so every existing read path keeps working. For the
+  accrual-driven type it is what the employee has **earned so far this year**
+  (``leave_accrual.py``), capped by the carry-forward cap, so the balance grows
+  month by month instead of showing the whole year in January;
 * ``used_days`` is the approval ledger (written once, on approval);
 * ``reserved_days`` is the pending ledger, written on apply and released on
   approve/reject, which is what makes double-spending impossible.
@@ -29,7 +31,6 @@ no policy assignment resolves to the same numbers they have today.
 
 from __future__ import annotations
 
-import math
 from datetime import date, datetime
 
 # Entitlement used when the employee has no effective policy assignment. These
@@ -40,12 +41,6 @@ DEFAULT_ENTITLEMENTS = {
     'Sick': 10,
     'Annual': 20,
 }
-
-# `accrual_rate` is read as *days earned per month*, which is the only reading
-# consistent with an annual entitlement and with `monthly_leave_grants`
-# (year, month, days) in the v2.0 schema. 12 months of accrual = the annual
-# entitlement, and `carry_forward_cap` (when set) is the ceiling on it.
-MONTHS_PER_YEAR = 12
 
 # The accrual rate applies to the employee's annual (earned) leave; the other
 # types keep the published default unless a policy says otherwise.
@@ -123,12 +118,17 @@ def effective_assignment(conn, emp_id, as_of=None) -> dict | None:
     }
 
 
-def entitlement_days(conn, emp_id, leave_type, as_of=None) -> tuple[int, str]:
-    """Days entitled for ``leave_type``: ``(days, source)``.
+def entitlement_days(conn, emp_id, leave_type, as_of=None, year=None) -> tuple[int, str]:
+    """Days entitled for ``leave_type`` in ``year``: ``(days, source)``.
 
-    ``source`` is ``'policy'`` when an effective assignment decided the number and
-    ``'default'`` when the published matrix did. An unknown leave type has no
-    entitlement, which the apply path reads as "unlimited" exactly as before.
+    ``source`` is ``'accrual'`` when an effective assignment earns the days month
+    by month, ``'default'`` when the published matrix decided the number, and
+    ``'unlimited'`` for a type with no entitlement (which the apply path reads
+    exactly as before).
+
+    ``year`` matters: a balance row is per year, and for a year the policy does
+    not reach, the published default is the honest answer — a policy that starts
+    in 2026 did not change what somebody was entitled to in 2025.
     """
     fallback = DEFAULT_ENTITLEMENTS.get(leave_type)
     if fallback is None:
@@ -136,14 +136,18 @@ def entitlement_days(conn, emp_id, leave_type, as_of=None) -> tuple[int, str]:
     assignment = effective_assignment(conn, emp_id, as_of)
     if not assignment:
         return fallback, 'default'
-    rate = assignment.get('accrual_rate')
-    if leave_type not in RATE_DRIVEN_TYPES or not rate:
+    if leave_type not in RATE_DRIVEN_TYPES or not assignment.get('accrual_rate'):
         return fallback, 'default'
-    derived = int(math.floor(rate * MONTHS_PER_YEAR))
-    cap = assignment.get('carry_forward_cap')
-    if cap is not None:
-        derived = min(derived, cap)
-    return max(derived, 0), 'policy'
+
+    # An accrual-driven entitlement is what has actually been earned, not a flat
+    # annual ceiling: the balance grows month by month. Employees with no policy
+    # row never reach here, so their numbers are unchanged.
+    from leave_accrual import accrual_entitlement  # lazy: leave_accrual imports this module
+
+    accrued = accrual_entitlement(conn, emp_id, leave_type, as_of, year)
+    if accrued is None:
+        return fallback, 'default'
+    return max(int(accrued), 0), 'accrual'
 
 
 def ensure_balances(conn, emp_id, year=None, *, leave_types=None) -> list[dict]:
@@ -164,7 +168,7 @@ def ensure_balances(conn, emp_id, year=None, *, leave_types=None) -> list[dict]:
         ).fetchall()
     }
     for leave_type in types:
-        derived, source = entitlement_days(conn, emp_id, leave_type)
+        derived, source = entitlement_days(conn, emp_id, leave_type, year=year)
         row = existing.get(leave_type)
         if row is None:
             balance_id = _next_id(conn, 'leave_balance', 'balance_id')
@@ -191,7 +195,7 @@ def balances_for(conn, emp_id, year=None) -> list[dict]:
     ).fetchall()
     result = []
     for leave_type, total, used, reserved in rows:
-        _derived, source = entitlement_days(conn, emp_id, leave_type)
+        _derived, source = entitlement_days(conn, emp_id, leave_type, year=year)
         result.append({
             'leave_type': leave_type,
             'total_days': int(total or 0),
@@ -208,7 +212,7 @@ def remaining_days(conn, emp_id, leave_type, year=None) -> int | None:
     year = year or date.today().year
     if leave_type not in DEFAULT_ENTITLEMENTS:
         return None
-    derived, _source = entitlement_days(conn, emp_id, leave_type)
+    derived, _source = entitlement_days(conn, emp_id, leave_type, year=year)
     row = conn.execute(
         "SELECT total_days, used_days, reserved FROM leave_balance "
         "WHERE emp_id = ? AND leave_type = ? AND year = ?",

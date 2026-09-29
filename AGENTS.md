@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 121 on DuckDB, 126 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 126 on DuckDB, 131 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (121 on DuckDB, 126 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (126 on DuckDB, 131 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -316,9 +316,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   file stem with dots removed, so a dotted float-timestamp name made two
   spellings of the same path collide with "Unique file handle conflict".
 - **Every FR-USR item is now implemented**, including the `pii_reveal` coverage
-  for `dependents` and `candidates` (see the PII section below). The open
-  follow-ups are the recorded anonymisation trade-offs (keeping `emp_id`,
-  leaving free text) and the unused `monthly_leave_grants` accrual ledger.
+  for `dependents` and `candidates` (see the PII section below). The only
+  remaining follow-up is the recorded anonymisation trade-offs (keeping
+  `emp_id`, leaving free text), which are decisions rather than pending work.
 
 ## FR-USR-09 permission policy (`policy.py`)
 - `policy.py` owns the role → module matrix (27 modules × 6 roles) and the
@@ -472,10 +472,9 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - 5 new unit tests + 1 new Playwright test. DuckDB is 107 passed / 6 skipped;
   PostgreSQL 112 passed / 1 skipped (also with Redis); Playwright 19/19 on both
   backends; probe 94/94 GET + 44/44 write.
-- Not in this slice: `monthly_leave_grants` (the v2.0 monthly accrual ledger)
-  is still unused. Turning `accrual_rate` into monthly grant rows is a
-  scheduler job and would change how `total_days` accrues, so it is a separate
-  change.
+- The v2.0 monthly accrual ledger is no longer unused: see the FR-LEA-08
+  section below. `accrual_rate` now earns days month by month rather than
+  setting one flat annual ceiling.
 - The DuckDB browser suite is deterministic again. The intermittent
   "Unique file handle conflict" was DuckDB attaching the file twice under two
   overlapping requests: DuckDB attaches a file once per process, so the Playwright
@@ -641,6 +640,49 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   PostgreSQL 126 passed / 1 skipped (also with Redis); Playwright 21/21 on both
   backends; the clean v2.0 probe is 97/97 GET + 44/44 write, with the CC-01
   checker and the read-only preflight green.
+
+## FR-LEA-08 monthly leave accrual (`leave_accrual.py`)
+- `monthly_leave_grants` exists in the v2.0 target and nothing wrote to it, so an
+  `accrual_rate` was collapsed into a **flat annual ceiling** the moment a policy
+  was assigned: 1.5 days/month showed all 18 days in January. Now the annual
+  entitlement for the rate-driven type (Annual) is what the employee has **earned
+  so far** — `floor(rate × months elapsed)` over the months the assignment was in
+  force — so the balance grows through the year.
+- **Two design decisions, both recorded in the module rather than left implicit:**
+  - **The entitlement is derived, the grant is the record.** Days earned come from
+    the policy and today's date, *not* from the grant rows, so a missed scheduler
+    run can never leave somebody with no leave at all. The rows are the auditable
+    ledger of what was posted, when and by which run (and the natural input to a
+    year-end carry-forward later). A test asserts the two agree after a run, which
+    is what keeps the ledger honest.
+  - **The fraction is carried, never truncated.** 1.5/month credits 1 day in
+    January and 2 in February, so the twelve credits sum to exactly 18 and no day
+    is silently lost or invented.
+- `granted_by` is **NULL** for a system accrual: it is a foreign key to
+  `users(emp_id)` in the canonical schema, so inventing an actor id would be
+  rejected there. Who triggered an on-demand run is recorded in `audit_log`
+  (`LEAVE_ACCRUAL_RUN` with the counters).
+- Grants are idempotent per (employee, type, year, month), so the monthly cron job
+  (day 1, 00:30 IST), the on-demand `POST /api/accrual/run` (`@admin_required`,
+  module `leaves`) and the **Accrue now** button in the leave-policy modal are the
+  same safe operation; a retry after a crash converges instead of double-crediting.
+- `entitlement_days()` learned a `year` argument and the three read paths pass
+  theirs through. **A year the policy never reached falls back to the published
+  default**, not to zero — a policy that starts in 2026 did not change what
+  somebody was entitled to in 2025, and without this the derivation would have
+  zeroed historical balance rows on the next read.
+- Nothing changes for anyone who has not been assigned a policy: the boot seed
+  writes no `leave_policy_assignments`, so every employee still resolves to
+  Casual 12 / Sick 10 / Annual 20.
+- 5 new unit tests — the window/month arithmetic, the ledger posting and
+  agreeing with the derived balance, the cap applied to both, a past year keeping
+  the default entitlement, and the route being admin-only with the job registered
+  — and the existing derivation test rewritten for accrual semantics. The browser
+  test now asserts accrual semantics and presses the on-demand button, and the
+  public-flip probe gained a `leave-accrual(monthly ledger)` write flow that reads
+  the canonical `monthly_leave_grants` back. DuckDB is 126 passed / 6 skipped;
+  PostgreSQL 131 passed / 1 skipped (also with Redis); Playwright 21/21 on both
+  backends; probe 97/97 GET + **45/45** write.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

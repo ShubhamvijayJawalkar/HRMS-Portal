@@ -2,7 +2,7 @@ import json
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -1194,6 +1194,253 @@ def test_dependents_remain_own_record_only(client):
         conn.close()
         _cleanup_user_contract_rows('EMP983')
 
+
+
+# ── FR-LEA-08 monthly accrual ledger ──────────────────────────────────────
+
+def test_accrual_window_and_month_maths():
+    """The window is the months the assignment covered, never a month ahead."""
+    import leave_accrual
+
+    # A rate of 1.5/month carries the fraction, so the year totals exactly 18.
+    credits = [leave_accrual.month_days(1.5, m) for m in range(1, 13)]
+    assert credits == [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]
+    assert sum(credits) == 18
+    assert leave_accrual.days_earned_through(0.5, 12) == 6
+    assert leave_accrual.days_earned_through(1.0, 0) == 0
+    assert leave_accrual.month_days(1.0, 0) == 0
+    assert leave_accrual.month_days(1.0, 13) == 0
+
+    today = date(2026, 9, 29)
+    from_april = {'effective_from': date(2026, 4, 1), 'effective_to': None}
+    assert leave_accrual.accrual_window(from_april, 2026, today) == (4, 9)
+    # A year the policy never reached, and a year that has not happened.
+    assert leave_accrual.accrual_window(from_april, 2025, today) is None
+    assert leave_accrual.accrual_window(from_april, 2027, today) is None
+    # A closed window stops earning, and a completed year earns all 12 months.
+    closed = {'effective_from': date(2025, 1, 1), 'effective_to': date(2025, 4, 30)}
+    assert leave_accrual.accrual_window(closed, 2025, today) == (1, 4)
+    assert leave_accrual.accrual_window(closed, 2026, today) is None
+    whole = {'effective_from': date(2025, 6, 1), 'effective_to': None}
+    assert leave_accrual.accrual_window(whole, 2025, today) == (6, 12)
+
+
+def test_leave_policy_assignment_accrues_monthly_and_caps(client):
+    """FR-LEA-08: the entitlement is earned month by month, capped by the cap."""
+    import leave_accrual
+    import leave_policy
+
+    _set_admin_session(client, 99871)
+    try:
+        _create_policy_user(client, 'EMP950', role='Employee')
+        today = date.today()
+        year_start = date(today.year, 1, 1)
+        capped = client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '2.0', 'carry_forward_cap': 18,
+            'effective_from': year_start.isoformat(), 'grade': 'L3',
+        })
+        assert capped.status_code == 200, capped.get_json()
+        payload = capped.get_json()
+        annual = next(b for b in payload['balances'] if b['leave_type'] == 'Annual')
+        earned = leave_accrual.days_earned_through(2.0, today.month)
+        assert annual['total_days'] == min(earned, 18), annual
+        assert annual['source'] == 'accrual'
+        # The point of accrual: not the whole year handed over in January.
+        assert annual['total_days'] <= 2 * today.month
+        # The other types are untouched by an annual-leave accrual rate.
+        casual = next(b for b in payload['balances'] if b['leave_type'] == 'Casual')
+        assert casual['total_days'] == 12 and casual['source'] == 'default'
+
+        # A policy that starts mid-year only earns from the month it started:
+        # the month is the grant unit, it is not prorated by the day.
+        mid_year = date(today.year, today.month, 1)
+        assert client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '2.0', 'effective_from': mid_year.isoformat(),
+        }).status_code == 200
+        conn = get_db()
+        try:
+            assert leave_policy.entitlement_days(conn, 'EMP950', 'Annual') == (
+                leave_accrual.month_days(2.0, today.month), 'accrual',
+            )
+            # A future assignment is not in force yet, so the current one decides.
+        finally:
+            conn.close()
+        future = (today + timedelta(days=30)).isoformat()
+        client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '3.0', 'effective_from': future,
+        })
+        conn = get_db()
+        try:
+            still = leave_policy.entitlement_days(conn, 'EMP950', 'Annual')
+        finally:
+            conn.close()
+        assert still == (leave_accrual.month_days(2.0, today.month), 'accrual'), still
+
+        # Bad payloads are refused without writing.
+        assert client.put('/api/users/EMP950/leave-policy', json={'accrual_rate': '1.5'}).status_code == 400
+        assert client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '1.5', 'effective_from': '2026-01-01', 'nope': 1,
+        }).status_code == 400
+        assert client.put('/api/users/EMP950/leave-policy', json={
+            'accrual_rate': '99', 'effective_from': '2026-01-01',
+        }).status_code == 400
+    finally:
+        _cleanup_leave_rows('EMP950')
+        _cleanup_user_contract_rows('EMP950')
+
+
+def test_accrual_run_posts_the_ledger_once_and_agrees_with_the_balance(client):
+    """The monthly job and the on-demand route are the same idempotent operation."""
+    import leave_accrual
+    import leave_policy
+
+    _set_admin_session(client, 99864)
+    try:
+        _create_policy_user(client, 'EMP954', role='Employee')
+        today = date.today()
+        assert client.put('/api/users/EMP954/leave-policy', json={
+            'accrual_rate': '1.5', 'effective_from': date(today.year, 1, 1).isoformat(),
+        }).status_code == 200
+
+        first = client.post('/api/accrual/run', json={})
+        assert first.status_code == 200, first.get_json()
+        result = first.get_json()
+        assert result['grants'] == today.month, result
+        assert result['days'] == leave_accrual.days_earned_through(1.5, today.month), result
+        assert result['employees'] >= 1
+
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                'SELECT month, days, granted_by FROM monthly_leave_grants WHERE emp_id = ? '
+                'AND leave_type = ? AND year = ? ORDER BY month',
+                ['EMP954', 'Annual', today.year],
+            ).fetchall()
+            # One row per elapsed month, each a positive credit, and granted_by is
+            # NULL: it is a foreign key to users(emp_id) in v2.0 and a system
+            # accrual has no human actor (the audit row records who ran it).
+            assert [r[0] for r in rows] == list(range(1, today.month + 1)), rows
+            assert all(r[1] > 0 and r[2] is None for r in rows), rows
+            posted = leave_accrual.granted_days(conn, 'EMP954', 'Annual')
+            derived, source = leave_policy.entitlement_days(
+                conn, 'EMP954', 'Annual', year=today.year)
+            assert source == 'accrual'
+            # The ledger is the record of what was posted; the derived value is
+            # what the employee has earned. They must agree, or the ledger lies.
+            assert derived == posted == leave_accrual.days_earned_through(1.5, today.month)
+        finally:
+            conn.close()
+
+        # Pressing it again posts nothing: idempotent per (emp, type, year, month).
+        again = client.post('/api/accrual/run', json={}).get_json()
+        assert again['grants'] == 0, again
+        assert again['already_posted'] >= 1, again
+        conn = get_db()
+        try:
+            count = conn.execute(
+                'SELECT COUNT(*) FROM monthly_leave_grants WHERE emp_id = ?', ['EMP954']
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert count == today.month, count
+
+        # The run is audited with its counters.
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                'SELECT "after" FROM audit_log WHERE action = \'LEAVE_ACCRUAL_RUN\' '
+                'AND entity = \'monthly_leave_grants\' ORDER BY created_at ASC'
+            ).fetchall()
+        finally:
+            conn.close()
+        assert rows, 'the accrual run was not audited'
+        assert json.loads(rows[0][0])['grants'] >= 1
+    finally:
+        conn = get_db()
+        conn.execute('DELETE FROM monthly_leave_grants WHERE emp_id = ?', ['EMP954'])
+        conn.close()
+        _cleanup_leave_rows('EMP954')
+        _cleanup_user_contract_rows('EMP954')
+
+
+def test_accrual_caps_the_ledger_and_the_derived_value_together(client):
+    """A cap stops both the posted ledger and the balance at the same number."""
+    import leave_accrual
+    import leave_policy
+
+    _set_admin_session(client, 99860)
+    try:
+        _create_policy_user(client, 'EMP957', role='Employee')
+        today = date.today()
+        assert client.put('/api/users/EMP957/leave-policy', json={
+            'accrual_rate': '2.0', 'carry_forward_cap': 5,
+            'effective_from': date(today.year, 1, 1).isoformat(),
+        }).status_code == 200
+        conn = get_db()
+        try:
+            result = leave_accrual.run_accrual(conn, employee_ids=['EMP957'])
+            posted = leave_accrual.granted_days(conn, 'EMP957', 'Annual')
+            derived, source = leave_policy.entitlement_days(
+                conn, 'EMP957', 'Annual', year=today.year)
+        finally:
+            conn.close()
+        assert result['days'] == 5, result
+        assert posted == derived == 5, (posted, derived)
+        assert source == 'accrual'
+    finally:
+        conn = get_db()
+        conn.execute('DELETE FROM monthly_leave_grants WHERE emp_id = ?', ['EMP957'])
+        conn.close()
+        _cleanup_leave_rows('EMP957')
+        _cleanup_user_contract_rows('EMP957')
+
+
+def test_a_year_the_policy_never_reached_keeps_the_default_entitlement(client):
+    """A policy that starts this year must not zero out last year's balance."""
+    import leave_policy
+
+    _set_admin_session(client, 99865)
+    try:
+        _create_policy_user(client, 'EMP955', role='Employee')
+        last_year = date.today().year - 1
+        assert client.put('/api/users/EMP955/leave-policy', json={
+            'accrual_rate': '1.5', 'effective_from': date(date.today().year, 1, 1).isoformat(),
+        }).status_code == 200
+        conn = get_db()
+        try:
+            # Last year: the published default, not zero and not this year's accrual.
+            assert leave_policy.entitlement_days(conn, 'EMP955', 'Annual', year=last_year) == (20, 'default')
+            # This year: accrued.
+            assert leave_policy.entitlement_days(conn, 'EMP955', 'Annual')[1] == 'accrual'
+            leave_policy.ensure_balances(conn, 'EMP955', last_year)
+            row = conn.execute(
+                'SELECT total_days FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?',
+                ['EMP955', 'Annual', last_year],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None and int(row[0]) == 20, row
+    finally:
+        _cleanup_leave_rows('EMP955')
+        _cleanup_user_contract_rows('EMP955')
+
+
+def test_accrual_run_is_admin_only_and_registered_as_a_job(client):
+    _set_admin_session(client, 99863)
+    _create_policy_user(client, 'EMP956', role='Employee')
+    _login_as(client, 'EMP956', 'Employee', 99862)
+    # A JSON API call is refused with 403; a bare form-style POST is the gate's
+    # long-standing page behaviour (redirect to the dashboard).
+    assert client.post('/api/accrual/run', json={}).status_code == 403
+    assert client.post('/api/accrual/run').status_code == 302
+    _cleanup_user_contract_rows('EMP956')
+
+    import app as app_module
+
+    app_module._register_scheduler_jobs(2)
+    job = app_module.scheduler.get_job('leave-accrual')
+    assert job is not None, 'the monthly accrual job is not registered'
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):
@@ -2129,47 +2376,6 @@ def test_leave_entitlement_defaults_to_the_published_matrix(client):
         assert leave_policy.entitlement_days(conn, 'EMP001', 'Sabbatical') == (0, 'unlimited')
     finally:
         conn.close()
-
-
-def test_leave_policy_assignment_derives_and_caps_the_entitlement(client):
-    """accrual_rate x 12 is the annual entitlement, capped by carry_forward_cap."""
-    _set_admin_session(client, 99871)
-    try:
-        _create_policy_user(client, 'EMP950', role='Employee')
-        today = datetime.now().date()
-        capped = client.put('/api/users/EMP950/leave-policy', json={
-            'accrual_rate': '2.0', 'carry_forward_cap': 18,
-            'effective_from': today.isoformat(), 'grade': 'L3',
-        })
-        assert capped.status_code == 200, capped.get_json()
-        payload = capped.get_json()
-        annual = next(b for b in payload['balances'] if b['leave_type'] == 'Annual')
-        assert annual['total_days'] == 18, annual      # 2.0 x 12 = 24, capped at 18
-        assert annual['source'] == 'policy'
-
-        # A future assignment is not in force yet.
-        future = (today + __import__('datetime').timedelta(days=30)).isoformat()
-        client.put('/api/users/EMP950/leave-policy', json={
-            'accrual_rate': '3.0', 'effective_from': future,
-        })
-        conn = get_db()
-        try:
-            import leave_policy
-            assert leave_policy.entitlement_days(conn, 'EMP950', 'Annual')[0] == 18
-        finally:
-            conn.close()
-
-        # Bad payloads are refused without writing.
-        assert client.put('/api/users/EMP950/leave-policy', json={'accrual_rate': '1.5'}).status_code == 400
-        assert client.put('/api/users/EMP950/leave-policy', json={
-            'accrual_rate': '1.5', 'effective_from': '2026-01-01', 'nope': 1,
-        }).status_code == 400
-        assert client.put('/api/users/EMP950/leave-policy', json={
-            'accrual_rate': '99', 'effective_from': '2026-01-01',
-        }).status_code == 400
-    finally:
-        _cleanup_leave_rows('EMP950')
-        _cleanup_user_contract_rows('EMP950')
 
 
 def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):

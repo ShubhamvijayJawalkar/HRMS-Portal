@@ -282,7 +282,7 @@
         <div class="modal-content">
             <div class="modal-header"><h5 class="modal-title"><i class="bi bi-calendar2-week me-2"></i>Leave policy <span id="lpUserLabel" class="text-muted fs-6"></span></h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
             <div class="modal-body">
-                <p class="text-muted fs-6">The entitlement is derived from the accrual rate (days earned per month, applied to the annual leave) and capped by the carry-forward cap. Without an assignment the published defaults apply.</p>
+                <p class="text-muted fs-6">The entitlement is earned month by month from the accrual rate (1.5 days/month credits 1 day, then 2, so the balance grows through the year) and is capped by the carry-forward cap. Without an assignment the published defaults apply. The monthly job posts each month to the accrual ledger; <em>Accrue now</em> does the same on demand and is safe to press twice.</p>
                 <form id="leavePolicyForm" onsubmit="return false;">
                     <div class="row">
                         <div class="col-md-6 mb-2"><label class="form-label fs-6" for="lpAccrual">Accrual rate (days/month)</label><input type="number" step="0.25" min="0" max="31" class="form-control" id="lpAccrual" placeholder="e.g. 1.5"></div>
@@ -301,6 +301,7 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" style="border-radius:var(--button-radius);font-size:12px;padding:7px 14px;font-weight:600;" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-outline-info" id="lpAccrueBtn" onclick="runAccrualNow()" title="Post every elapsed month of the year to the accrual ledger now. Idempotent, so it is safe to press twice."><i class="bi bi-calendar2-plus me-1"></i> Accrue now</button>
                 <button type="button" class="btn btn-primary" onclick="saveLeavePolicy()"><i class="bi bi-check-lg me-1"></i> Save Policy</button>
             </div>
         </div>
@@ -632,6 +633,26 @@ async function saveLeavePolicy() {
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     bootstrap.Modal.getInstance(document.getElementById('leavePolicyModal')).hide();
     showMsg(`Leave policy saved for ${res.emp_id}`, 'success');
+}
+
+// FR-LEA-08: post every elapsed month of the year to the accrual ledger. Useful
+// after assigning a policy mid-year; idempotent per (employee, type, year,
+// month), so pressing it twice adds nothing.
+async function runAccrualNow() {
+    const btn = document.getElementById('lpAccrueBtn');
+    btn.disabled = true;
+    try {
+        const r = await fetch('/api/accrual/run', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showMsg(d.error || 'Accrual run failed', 'error'); return; }
+        const msg = d.grants
+            ? `Accrued ${d.days} day(s) in ${d.grants} grant(s) for ${d.employees} employee(s)`
+            : `Nothing to accrue: ${d.already_posted} month(s) already posted`;
+        if (lpEmpId) await openLeavePolicy(lpEmpId);
+        showMsg(msg, 'success');
+    } finally {
+        btn.disabled = false;
+    }
 }
 let anonEmpId = null;
 let anonRequestId = null;
