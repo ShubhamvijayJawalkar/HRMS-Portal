@@ -712,6 +712,42 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   named for. 10 passed on both DuckDB+Redis and PostgreSQL+Redis; all 10 skip
   cleanly with `REDIS_URL` unset.
 
+## SRS traceability matrix (`traceability.py` -> `docs/TRACEABILITY.md`)
+- **The question it answers:** "is this requirement actually done?" Until now the
+  honest answer was "I can't tell you" — the SRS names 104 requirements and the
+  code referenced about 35 of them, so coverage was asserted rather than measured.
+- The matrix is **code, not prose** (`traceability.py`), and
+  `docs/TRACEABILITY.md` is generated from it by
+  `scripts/generate_traceability.py`. Four tests keep it honest:
+  `test_traceability_covers_every_srs_requirement` (the id set must match the SRS
+  exactly), `test_traceability_routes_exist` (every route named must be in the
+  live `url_map` — a rename turns the build red), `test_traceability_verdicts_are_honest_about_routes`
+  (an `IMPLEMENTED` row with no route must explain itself) and
+  `test_traceability_partial_rows_name_what_is_missing` (a `PARTIAL` row must say
+  what is missing, from an explicit marker list).
+- Verdicts: **47 IMPLEMENTED / 44 PARTIAL / 12 NOT_STARTED / 1 RETIRED**. A
+  requirement is only `IMPLEMENTED` where the code *enforces* it and a test
+  covers it — not where a handler happens to exist. Several rows moved to
+  `PARTIAL` on that basis after reading the handler.
+- **The most important thing it found:** `mfa_credentials` is in the canonical
+  schema with an encrypted-secret column and **no code anywhere that reads or
+  writes it** — no enrolment, no challenge, no gate. FR-AUTH-11 has never been
+  implemented and the schema made it look otherwise. Same shape for
+  `approval_delegations` (FR-LEA-08a), `notification_preferences` (FR-NOT-03)
+  and `holiday_optins` (FR-HOL-03): tables with constraints, no route.
+- Two `PARTIAL` rows are security properties rather than features, and both were
+  verified by reading the handler: **FR-DOC-02** validates the file *extension*,
+  not the content, with no malware scan, so a renamed `.exe` passes; and
+  **FR-EXP-03** has no state machine and no self-approval block, so an employee
+  can approve their own expense claim.
+- Account-level auth defences are the other cluster: FR-AUTH-03 (no
+  consecutive-failure lock — only the IP rate limit stops a password spray),
+  FR-AUTH-10 (no minimum length, no breached-password check), FR-AUTH-11 (no MFA).
+  Phase 3a did the session, hashing, CSRF and rate-limit work; these are the
+  ones it did not do.
+- `docs/TRACEABILITY.md` ends with a risk-ordered shortlist of what would move the
+  numbers, so the next slice has a defensible starting point rather than a guess.
+
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
 - Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks

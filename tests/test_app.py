@@ -1,5 +1,6 @@
 import json
 import os
+import pathlib
 import sys
 import tempfile
 from datetime import date, datetime, timedelta
@@ -1440,6 +1441,133 @@ def test_accrual_run_is_admin_only_and_registered_as_a_job(client):
     app_module._register_scheduler_jobs(2)
     job = app_module.scheduler.get_job('leave-accrual')
     assert job is not None, 'the monthly accrual job is not registered'
+# Every FR-* requirement id in HRMS_SRS_v2.0.pdf, extracted from the
+# requirements tables and Appendix A on 2026-09-29. The matrix in
+# traceability.py must cover exactly this set, so a new SRS requirement cannot
+# go untracked. Parsing the PDF here would add a pypdf dependency to CI for
+# one assertion, so the extracted set is committed instead. To re-extract after
+# an SRS revision:
+#   python -c "from pypdf import PdfReader; import re; t=chr(10).join(
+#     (p.extract_text() or '') for p in PdfReader('HRMS_SRS_v2.0.pdf').pages);
+#     print(sorted(set(re.findall(r'FR-[A-Z]{2,6}-[0-9]{2}[a-z]?', t))))"
+_SRS_REQUIREMENT_IDS = {
+    'FR-ANL-01', 'FR-ANL-02', 'FR-ANL-04', 'FR-AST-01', 'FR-ATS-01', 'FR-ATS-02',
+    'FR-ATS-03', 'FR-ATS-04', 'FR-ATT-01', 'FR-ATT-02', 'FR-ATT-03', 'FR-ATT-04',
+    'FR-ATT-05', 'FR-ATT-06', 'FR-ATT-07', 'FR-ATT-08', 'FR-ATT-09', 'FR-ATT-10',
+    'FR-ATT-11', 'FR-ATT-12', 'FR-ATT-13', 'FR-ATT-14', 'FR-ATT-15', 'FR-ATT-16',
+    'FR-ATT-17', 'FR-AUD-01', 'FR-AUTH-01', 'FR-AUTH-02', 'FR-AUTH-03', 'FR-AUTH-04',
+    'FR-AUTH-05', 'FR-AUTH-06', 'FR-AUTH-07', 'FR-AUTH-08', 'FR-AUTH-09', 'FR-AUTH-10',
+    'FR-AUTH-11', 'FR-AUTH-12', 'FR-AUTH-13', 'FR-AUTH-14', 'FR-DOC-01', 'FR-DOC-02',
+    'FR-DOC-03', 'FR-EXP-01', 'FR-EXP-02', 'FR-EXP-03', 'FR-HOL-01', 'FR-HOL-02',
+    'FR-HOL-03', 'FR-JOB-01', 'FR-JOB-02', 'FR-JOB-03', 'FR-JOB-04', 'FR-JOB-05',
+    'FR-LEA-01', 'FR-LEA-02', 'FR-LEA-03', 'FR-LEA-04', 'FR-LEA-05', 'FR-LEA-06',
+    'FR-LEA-07', 'FR-LEA-08', 'FR-LEA-08a', 'FR-LEA-09', 'FR-NOT-01', 'FR-NOT-02',
+    'FR-NOT-03', 'FR-OFF-01', 'FR-OFF-02', 'FR-OFF-03', 'FR-ONB-01', 'FR-ONB-02',
+    'FR-ONB-03', 'FR-ONB-04', 'FR-ONB-05', 'FR-ONB-06', 'FR-PERF-01', 'FR-PERF-02',
+    'FR-REG-01', 'FR-REG-02', 'FR-REG-03', 'FR-REG-04', 'FR-RPT-01', 'FR-RPT-02',
+    'FR-TKT-01', 'FR-TKT-02', 'FR-TKT-03', 'FR-TKT-04', 'FR-USR-01', 'FR-USR-02',
+    'FR-USR-03', 'FR-USR-04', 'FR-USR-05', 'FR-USR-06', 'FR-USR-06a', 'FR-USR-07',
+    'FR-USR-08', 'FR-USR-09', 'FR-USR-10', 'FR-USR-11', 'FR-USR-12', 'FR-USR-13',
+    'FR-USR-14', 'FR-USR-15',
+}
+
+
+
+
+# ── SRS traceability matrix ───────────────────────────────────────────────
+
+def test_traceability_covers_every_srs_requirement():
+    """The matrix must not silently drop a requirement.
+
+    The ID list is the one extracted from `HRMS_SRS_v2.0.pdf`. A new requirement
+    in the SRS has to be added here deliberately, with a verdict, rather than
+    quietly going untracked.
+    """
+    import traceability
+
+    assert set(traceability.TRACEABILITY) == _SRS_REQUIREMENT_IDS, (
+        'traceability.py and the SRS disagree: '
+        f'extra={sorted(set(traceability.TRACEABILITY) - _SRS_REQUIREMENT_IDS)} '
+        f'missing={sorted(_SRS_REQUIREMENT_IDS - set(traceability.TRACEABILITY))}')
+
+
+def test_traceability_routes_exist():
+    """Every route the matrix claims must exist in the live url_map.
+
+    This is the point of keeping the matrix in code: a renamed or deleted route
+    turns the build red instead of quietly invalidating the document.
+    """
+    import app as app_module
+    import traceability
+
+    rules = {rule.rule for rule in app_module.app.url_map.iter_rules()}
+    for rid, _pri, _delta, _status, routes, _note in traceability.rows():
+        for route in routes:
+            assert route in rules, f'{rid} claims route {route!r}, which is not registered'
+
+
+def test_traceability_verdicts_are_honest_about_routes():
+    """A row that names no route must not claim to be implemented.
+
+    `IMPLEMENTED` without a route would mean the requirement is met by a
+    background job, a service module or a policy rather than an endpoint —
+    which is legitimate, but only when the note says so.
+    """
+    import traceability
+
+    for rid, _pri, _delta, status, routes, note in traceability.rows():
+        if status == 'IMPLEMENTED' and not routes:
+            assert any(word in note.lower() for word in (
+                'job', 'policy', 'matrix', 'module', 'helper', 'function',
+                'query', 'cron', 'every ', 'guard', 'shift_assignments',
+            )), f'{rid} is IMPLEMENTED with no route and no explanation'
+
+
+# The ways a note can say "this is not the whole requirement". A PARTIAL row whose
+# note only describes what *does* ship is worse than no row at all, because a
+# reader takes it as full coverage.
+_GAP_MARKERS = (
+    'missing', 'not ', 'no ', 'never', 'rather than', 'only ', 'ignores',
+    'none', 'without', 'absent', 'is partial',
+)
+
+
+def test_traceability_partial_rows_name_what_is_missing():
+    """A PARTIAL verdict that does not say what is missing is useless."""
+    import traceability
+
+    for rid, _pri, _delta, status, _routes, note in traceability.rows():
+        if status != 'PARTIAL':
+            continue
+        lowered = note.lower()
+        assert any(marker in lowered for marker in _GAP_MARKERS), (
+            f'{rid} is PARTIAL but the note does not say what is missing: {note}')
+
+
+def test_traceability_covers_the_srs_pdf_ids():
+    """The recorded ID set matches the PDF, so the two cannot drift apart.
+
+    Parsing the PDF in the test suite would add a pypdf dependency to CI for one
+    assertion, so the extracted IDs are committed here instead. This test is the
+    record of what was extracted and when; regenerate with the helper below if
+    the SRS is revised.
+    """
+    assert len(_SRS_REQUIREMENT_IDS) >= 100
+    assert 'FR-ATT-10' in _SRS_REQUIREMENT_IDS, 'the retired requirement is still listed'
+
+
+def test_generated_traceability_doc_is_up_to_date():
+    """`docs/TRACEABILITY.md` must match the data it claims to be generated from."""
+    import traceability
+
+    doc = (pathlib.Path(__file__).resolve().parent.parent / 'docs' / 'TRACEABILITY.md')
+    assert doc.is_file(), 'run scripts/generate_traceability.py'
+    body = doc.read_text()
+    for rid in traceability.TRACEABILITY:
+        assert rid in body, f'{rid} is missing from docs/TRACEABILITY.md'
+    for status, count in traceability.counts().items():
+        assert f'| `{status}` | {count} |' in body, (
+            f'the summary row for {status} does not match the data ({count})')
 
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 

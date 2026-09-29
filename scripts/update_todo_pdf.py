@@ -40,6 +40,16 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "SRS traceability matrix: traceability.py maps all 104 SRS requirements to the "
+     "routes that implement them, and docs/TRACEABILITY.md is generated from it. Four tests keep it "
+     "honest - the id set must match the SRS, every route named must exist in the live url_map, an "
+     "IMPLEMENTED row with no route must explain itself, and a PARTIAL row must name its gap. "
+     "Verdicts: 47 IMPLEMENTED, 44 PARTIAL, 12 NOT_STARTED, 1 RETIRED. The largest gap found is "
+     "FR-AUTH-11 MFA: mfa_credentials exists in the canonical schema with an encrypted secret and no "
+     "code reads or writes it. Same shape for approval_delegations, notification_preferences and "
+     "holiday_optins. Two security PARTIALs verified by reading the handlers: FR-DOC-02 validates "
+     "the file extension rather than the content (no malware scan, a renamed .exe passes), and "
+     "FR-EXP-03 has no self-approval block so an employee can approve their own claim."),
     ("2026-09-29", "Server-side session coverage: CI re-ran the whole unit suite with REDIS_URL "
      "set, but no test in the suite referred to the session store, so the step passed identically "
      "whether the backend was Redis or the app had silently fallen back to signed cookies - which "
