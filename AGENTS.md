@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 126 on DuckDB, 131 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 143 on DuckDB, 148 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (126 on DuckDB, 131 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (143 on DuckDB, 148 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -745,8 +745,71 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   FR-AUTH-10 (no minimum length, no breached-password check), FR-AUTH-11 (no MFA).
   Phase 3a did the session, hashing, CSRF and rate-limit work; these are the
   ones it did not do.
-- `docs/TRACEABILITY.md` ends with a risk-ordered shortlist of what would move the
-  numbers, so the next slice has a defensible starting point rather than a guess.
+- **It immediately paid for itself.** Following it into `expenses_api` found
+  three defects (an admin could approve their own claim, a claim could jump
+  `Pending -> Paid`, a paid claim could be moved back to `Pending`) plus the CC-10
+  impersonation hole on the create route. See the FR-EXP-03 section.
+- **And it caught the matrix being wrong about itself.** This slice claimed
+  FR-DOC-02 "validates the extension, not the content — a renamed .exe passes".
+  It does not: `upload_document` reads the first bytes and requires the magic
+  number for the claimed extension, and rejects the EICAR signature. Verified by
+  uploading an ELF binary named `.png` and a `MZ` executable named `.pdf`. The
+  matrix, its generator and FR-USR-12/FR-ONB-04 are corrected. A traceability
+  document is only worth having if it is corrected when the code turns out to
+  disagree with it.
+
+## FR-EXP-03 expense claim state machine (`expenses.py`)
+- **Three real defects, found by following the traceability matrix rather than
+  the code.** The v1.0 route accepted any of the four statuses from any state,
+  so an admin could approve a claim they had filed themselves, a claim could jump
+  `Pending -> Paid` with no approval at all, and a second write could move a
+  paid claim back to `Pending`. Appendix A-11 of the SRS records the v1.0
+  deviation ("Paid currently bypasses manager check"); this is the fix.
+- `expenses.py` owns `TRANSITIONS` (`Pending -> Approved|Rejected`,
+  `Approved -> Paid`, Rejected/Paid terminal) and decides the move, so the
+  browser, the API and any future caller get the same answer. There is no
+  catch-all branch: an edge that is not in the table is a 409.
+- Four rules, all enforced in the module rather than the route: **self-approval
+  is blocked** (`actor != claim owner`, which the SRS states and nothing
+  enforced); **authority is per-target**, so `Paid` is Finance/Admin only while
+  `Approved`/`Rejected` are the owner's manager or HR/Admin; **a rejection needs
+  a reason**, stored in a new `rejection_reason` column; and **every write is a
+  conditional `UPDATE ... WHERE status = <the state it was decided on>`**, so two
+  approvers racing give one winner and one 409 with the still-open transitions
+  attached, never a silent overwrite.
+- **The gate was the other half of the bug.** `admin_required` excluded the claim
+  owner's manager *and* Finance, so `Approved -> Paid` was unreachable by the
+  role the SRS names for it. `expense_actor_required` admits the owner's manager,
+  HR, Finance and Admin, and then the module still applies (an explicit override
+  can still deny).
+- **Finance now holds the `expenses` module**, because the SRS names Finance as
+  the only role that may mark a claim Paid. This is a deliberate widening of the
+  matrix, recorded here: it grants *reach*, not visibility — the list stays
+  scoped to own + reports + states the caller could actually act on, so Finance
+  can find an Approved claim to pay without seeing the company's claims.
+- **A fourth hole closed on the way: CC-10.** `POST /api/expenses` took `emp_id`
+  from the request body, so any authenticated user could file a claim in a
+  colleague's name — and, with no self-approval block, approve it themselves. A
+  body override is now a 400, the category must exist, and the amount must be a
+  positive number. The claim write also gained an explicit column list, the
+  v2.0 lesson: a bare `VALUES` mis-targeted once `paid_at` and
+  `rejection_reason` existed.
+- 11 new unit tests. The matrix moves FR-EXP-03 to `IMPLEMENTED`
+  (**48 IMPLEMENTED / 43 PARTIAL / 12 NOT_STARTED / 1 RETIRED**) and records the
+  CC-10 closure under FR-EXP-02.
+- **A correction to the matrix itself.** The previous slice claimed FR-DOC-02
+  "validates the extension, not the content — a renamed .exe passes". That was
+  wrong: `upload_document` already reads the first bytes and requires the magic
+  number for the claimed extension, and rejects the EICAR signature. I verified it
+  by uploading an ELF binary named `.png` and a `MZ` executable named `.pdf` —
+  both refused. The genuine remaining gaps are a per-category size cap (one global
+  50 MB applies) and a real scanner rather than the EICAR marker. FR-USR-12 and
+  FR-ONB-04 are corrected with it.
+- DuckDB is 143 passed / 6 skipped; PostgreSQL 148 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + 45/45 write, with
+  CC-01 and the preflight green. Two PostgreSQL-only failures during validation
+  were a test-side issue: `audit_log.entity_id` is VARCHAR on the compatibility
+  schema and BIGINT on v2.0, so the assertion now casts.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

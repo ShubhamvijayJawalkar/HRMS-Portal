@@ -72,8 +72,9 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'scoped by emp_id as well.'),
     'FR-USR-12': ('L', 'C', 'PARTIAL', ('/api/upload',),
                   'Employee uploads go through the same route as admin uploads, so '
-                  'one validation pipeline exists. But it validates the *extension*, '
-                  'not the sniffed MIME type, and there is no malware scan (FR-DOC-02).'),
+                  'one validation pipeline exists, and it does sniff the content. It '
+                  'inherits the FR-DOC-02 gaps: no per-category size cap and no real '
+                  'scanner.'),
     'FR-USR-13': ('M', 'C', 'PARTIAL', ('/api/profile',),
                   'Profile read/write is self-scoped and routed through the PII '
                   'helper. The field allow-list is not a declared strict subset: an '
@@ -310,12 +311,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'Six seeded categories and a read endpoint. No CRUD, so the set is '
                   'configurable only by editing rows.'),
     'FR-EXP-02': ('M', 'C', 'PARTIAL', ('/api/expenses',),
-                  'emp_id always from the session, so the v1.0 impersonation hole is '
-                  'closed. The category must exist, but there is no receipt validation.'),
-    'FR-EXP-03': ('M', 'C', 'PARTIAL', ('/api/expenses/<int:eid>/status',),
-                  'The four statuses are accepted. There is no state machine (any status '
-                  'may follow any other), no self-approval block, and no owner/manager '
-                  'check, so an employee can approve their own claim.'),
+                  'emp_id is taken from the session and a body override is rejected with '
+                  'a 400, closing the v1.0 impersonation hole; the category must exist '
+                  'and the amount must be positive. Missing: receipt validation on upload.'),
+    'FR-EXP-03': ('M', 'C', 'IMPLEMENTED', ('/api/expenses', '/api/expenses/<int:eid>/status',),
+                  'Strict transition table in expenses.py: Pending -> Approved/Rejected by '
+                  "the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only "
+                  '(Appendix A-11), Rejected and Paid final. Self-approval blocked, a '
+                  'rejection reason required, every write a conditional UPDATE with a '
+                  'before/after audit, and the list reports the actions the caller may '
+                  'actually take. Finance holds the expenses module because the SRS names '
+                  'it for Paid; the list stays scoped to own + reports, so that grants reach '
+                  'rather than company-wide visibility.'),
 
     # ── FR-TKT: tickets ─────────────────────────────────────────────────
     'FR-TKT-01': ('M', 'C', 'PARTIAL', ('/api/tickets',),

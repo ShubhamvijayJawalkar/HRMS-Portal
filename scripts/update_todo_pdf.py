@@ -40,6 +40,19 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "FR-EXP-03 expense claim state machine: following the traceability matrix into "
+     "expenses_api found three defects - an admin could approve a claim they had filed "
+     "themselves, a claim could jump Pending to Paid with no approval, and a paid claim could be "
+     "moved back to Pending - plus the CC-10 impersonation hole where emp_id came from the "
+     "request body. expenses.py owns a strict transition table, blocks self-approval, gives Paid "
+     "to Finance/Admin only (Appendix A-11), requires a rejection reason, and writes every "
+     "transition as a conditional UPDATE with a before/after audit. The gate was the other half: "
+     "admin_required excluded both the claim owner's manager and Finance, making Approved to Paid "
+     "unreachable by the role the SRS names, so a new expense_actor_required gate admits manager, "
+     "HR, Finance and Admin, and Finance now holds the expenses module. The matrix also corrected "
+     "itself: the previous claim that FR-DOC-02 validated the file extension rather than the "
+     "content was wrong - the upload route does sniff the magic number and reject EICAR. Matrix is "
+     "now 48 IMPLEMENTED / 43 PARTIAL / 12 NOT_STARTED / 1 RETIRED."),
     ("2026-09-29", "SRS traceability matrix: traceability.py maps all 104 SRS requirements to the "
      "routes that implement them, and docs/TRACEABILITY.md is generated from it. Four tests keep it "
      "honest - the id set must match the SRS, every route named must exist in the live url_map, an "
@@ -200,9 +213,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "126 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "131 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "131 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "143 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "148 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "148 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

@@ -89,7 +89,12 @@ _ROLE_MATRIX: dict[str, dict[str, bool]] = {
         'payroll': True, 'salary_structures': True, 'payroll_rates': True,
         'payroll_approve': True,
         'leaves': False, 'regularization': False, 'breaks': False, 'holidays': False,
-        'expenses': False,
+        # FR-EXP-03 names Finance as the only role that may mark a claim Paid
+        # ("Approved -> Paid by Finance only"). Without the module the paying
+        # role could not reach the route at all, so the requirement was
+        # unreachable as written. The list stays scoped to own + reports
+        # (CC-11), so this grants reach, not company-wide visibility.
+        'expenses': True,
         'onboarding': False, 'offboarding': False,
         'audit': False, 'reports': True, 'analytics': True,
         'tickets': False, 'assets': False, 'performance': False, 'goals': False,

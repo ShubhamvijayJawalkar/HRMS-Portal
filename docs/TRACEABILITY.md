@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 47 | 45% |
-| `PARTIAL` | 44 | 42% |
+| `IMPLEMENTED` | 48 | 46% |
+| `PARTIAL` | 43 | 41% |
 | `NOT_STARTED` | 12 | 12% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (47)
+### IMPLEMENTED (48)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -56,6 +56,7 @@ rather than quietly invalidating this document.
 | `FR-AUTH-08` | M | N | `/api/forgot-password` | Always 202 with the same message, so the endpoint cannot be used to enumerate accounts. |
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | Double-submit on every mutating /api request; a fetch wrapper attaches the header and native forms carry the hidden field. Asserted end to end with server-side sessions too. |
 | `FR-DOC-01` | M | R | `/api/documents` | Scoped to the owner unless HR/Admin. |
+| `FR-EXP-03` | M | C | `/api/expenses`<br>`/api/expenses/<int:eid>/status` | Strict transition table in expenses.py: Pending -> Approved/Rejected by the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only (Appendix A-11), Rejected and Paid final. Self-approval blocked, a rejection reason required, every write a conditional UPDATE with a before/after audit, and the list reports the actions the caller may actually take. Finance holds the expenses module because the SRS names it for Paid; the list stays scoped to own + reports, so that grants reach rather than company-wide visibility. |
 | `FR-JOB-01` | H | C | — | Nightly finalisation classifies every active employee in the required priority order, groups per shift date so night shifts finalize correctly, replaces the target date transactionally, and recomputes on regularization approval. |
 | `FR-JOB-04` | H | C | `/api/admin/offboarding/revoke` | The nightly job closes sessions, clears permissions, disables login and marks the employee Inactive on their last working day. |
 | `FR-LEA-04` | H | C | `/api/leaves/<int:leave_id>/approve` | Not the applicant, conditional update, used_days incremented and the reservation consumed. |
@@ -82,7 +83,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (44)
+### PARTIAL (43)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -103,8 +104,7 @@ rather than quietly invalidating this document.
 | `FR-DOC-02` | H | C | `/api/upload` | Multipart upload, a size cap and an extension allow-list. The MIME type is taken from the filename extension rather than sniffed from the content, and there is no malware scan. A renamed .exe passes. |
 | `FR-DOC-03` | M | C | `/api/documents/<int:did>/download`<br>`/api/documents/<int:did>` | Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is closed). The download is a direct file response, not a presigned URL, and it is not audited. |
 | `FR-EXP-01` | M | R | `/api/expense-categories` | Six seeded categories and a read endpoint. No CRUD, so the set is configurable only by editing rows. |
-| `FR-EXP-02` | M | C | `/api/expenses` | emp_id always from the session, so the v1.0 impersonation hole is closed. The category must exist, but there is no receipt validation. |
-| `FR-EXP-03` | M | C | `/api/expenses/<int:eid>/status` | The four statuses are accepted. There is no state machine (any status may follow any other), no self-approval block, and no owner/manager check, so an employee can approve their own claim. |
+| `FR-EXP-02` | M | C | `/api/expenses` | emp_id is taken from the session and a body override is rejected with a 400, closing the v1.0 impersonation hole; the category must exist and the amount must be positive. Missing: receipt validation on upload. |
 | `FR-HOL-01` | M | C | `/api/holidays` | National/Optional types, per-location applicability and search. The location field is stored but not filtered on. |
 | `FR-HOL-02` | H | C | `/api/holidays`<br>`/api/holidays/<int:hid>` | CRUD for HR/Admin with a duplicate (name, date) check. The check is in the handler, not a unique constraint, so it races under concurrency. No year-to-year copy, so Feb-29 handling is absent. |
 | `FR-HOL-03` | H | C | — | holiday_optins exists in the canonical schema with a unique index. No route writes an opt-in and there is no HR approval queue, so Optional holidays cannot actually be opted into. |
@@ -127,7 +127,7 @@ rather than quietly invalidating this document.
 | `FR-USR-02` | M | C | `/api/users` | emp_id/email/role/department validated, case-insensitive email uniqueness, default status Active + allow_login. Missing: the welcome email with a 24 h single-use reset token, and balances seeded from the grade/location policy rather than the default matrix (leave_policy derives on read instead). |
 | `FR-USR-08` | L | R | `/api/users/<emp_id>` | Missing the meta endpoint, the async CSV export and the last-50 sessions history. The list endpoint carries the pagination meta. |
 | `FR-USR-10` | H | C | `/api/users/import`<br>`/api/users/import/<int:job_id>` | CSV via pandas as a background job (202 + job id), per-row validation, {imported, skipped, errors, job_id}. The progress endpoint is /api/users/import/<job_id>, not the /api/imports/... path the SRS names, and errors are capped at 20 rather than 50. |
-| `FR-USR-12` | L | C | `/api/upload` | Employee uploads go through the same route as admin uploads, so one validation pipeline exists. But it validates the *extension*, not the sniffed MIME type, and there is no malware scan (FR-DOC-02). |
+| `FR-USR-12` | L | C | `/api/upload` | Employee uploads go through the same route as admin uploads, so one validation pipeline exists, and it does sniff the content. It inherits the FR-DOC-02 gaps: no per-category size cap and no real scanner. |
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 

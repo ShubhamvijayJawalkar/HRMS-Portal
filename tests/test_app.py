@@ -1569,6 +1569,372 @@ def test_generated_traceability_doc_is_up_to_date():
         assert f'| `{status}` | {count} |' in body, (
             f'the summary row for {status} does not match the data ({count})')
 
+
+# ── FR-EXP-03: the expense claim state machine ────────────────────────────
+
+def test_expense_transition_table_is_strict():
+    """The table is the rule; anything outside it must be refused."""
+    import expenses
+
+    assert expenses.TRANSITIONS['Pending'] == frozenset({'Approved', 'Rejected'})
+    assert expenses.TRANSITIONS['Approved'] == frozenset({'Paid'})
+    # Rejected and Paid are final, so there is no path back out of them.
+    assert expenses.TERMINAL_STATUSES == frozenset({'Rejected', 'Paid'})
+    assert expenses.ACTIVE_STATUSES == frozenset({'Pending', 'Approved'})
+    assert expenses.ALL_STATUSES == frozenset({'Pending', 'Approved', 'Rejected', 'Paid'})
+    # No target appears in a source that does not list it: the graph is exactly
+    # three edges, so `Pending -> Paid` is unreachable by construction.
+    edges = {(src, dst) for src, targets in expenses.TRANSITIONS.items() for dst in targets}
+    assert edges == {('Pending', 'Approved'), ('Pending', 'Rejected'), ('Approved', 'Paid')}
+
+
+def _seed_expense_users(client, manager='EMP001'):
+    """A manager, a Finance user and a claimant, wired with a reporting line."""
+    _create_policy_user(client, 'EMP960', role='Employee')
+    _create_policy_user(client, 'EMP961', role='Finance')
+    conn = get_db()
+    try:
+        # EMP960 reports to the seeded admin, and the Finance user is a peer:
+        # neither manages the other, so each is refused the other's transition.
+        conn.execute("UPDATE users SET manager_emp_id = ? WHERE emp_id = 'EMP960'", [manager])
+    finally:
+        conn.close()
+    return 'EMP960', 'EMP961'
+
+
+def _file_claim(client, amount='120.50', **overrides):
+    body = {'cat_id': 1, 'amount': amount, 'description': 'taxi to client site'}
+    body.update(overrides)
+    response = client.post('/api/expenses', json=body)
+    assert response.status_code == 201, response.get_json()
+    return response.get_json()['id']
+
+
+def _claim_row(claim_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT emp_id, status, amount, approved_by FROM expense_claims WHERE claim_id = ?',
+            [claim_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_expense_rows(*emp_ids):
+    conn = get_db()
+    try:
+        for emp_id in emp_ids:
+            conn.execute('DELETE FROM expense_claims WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM notifications WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?', [emp_id])
+            conn.execute('DELETE FROM users WHERE emp_id = ?', [emp_id])
+    finally:
+        conn.close()
+
+
+def test_expense_claim_cannot_be_filed_for_someone_else(client):
+    """CC-10: emp_id comes from the session. v1.0 accepted a body override."""
+    _set_admin_session(client, 99840)
+    try:
+        _create_policy_user(client, 'EMP962', role='Employee')
+        _login_as(client, 'EMP962', 'Employee', 99839)
+        forged = client.post('/api/expenses', json={
+            'emp_id': 'EMP001', 'cat_id': 1, 'amount': '5000', 'description': 'not mine',
+        })
+        assert forged.status_code == 400, forged.get_json()
+        assert 'yourself' in str(forged.get_json()).lower(), forged.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM expense_claims WHERE description = 'not mine'"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+        # Omitting it is fine, and an identical value is not an error either.
+        assert _file_claim(client) is not None
+    finally:
+        _cleanup_expense_rows('EMP962')
+
+
+def test_expense_claim_must_name_a_real_category_and_positive_amount(client):
+    _set_admin_session(client, 99841)
+    try:
+        _create_policy_user(client, 'EMP963', role='Employee')
+        _login_as(client, 'EMP963', 'Employee', 99840)
+        assert client.post('/api/expenses', json={
+            'cat_id': 99999, 'amount': '10', 'description': 'bad category',
+        }).status_code == 400
+        assert client.post('/api/expenses', json={
+            'cat_id': 1, 'amount': '-5', 'description': 'negative',
+        }).status_code == 400
+        assert client.post('/api/expenses', json={
+            'cat_id': 1, 'amount': 'not a number',
+        }).status_code == 400
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM expense_claims WHERE emp_id = ?', ['EMP963']
+            ).fetchone()[0] == 0, 'a rejected claim must not be written'
+        finally:
+            conn.close()
+    finally:
+        _cleanup_expense_rows('EMP963')
+
+
+def test_nobody_may_approve_their_own_expense_claim(client):
+    """The v1.0 hole: any admin could approve a claim they had filed."""
+    _set_admin_session(client, 99842)
+    try:
+        _seed_expense_users(client)
+        # The admin files their own claim...
+        own = _file_claim(client, amount='999.00')
+        assert _claim_row(own)[0] == 'EMP001'
+        for target in ('Approved', 'Rejected', 'Paid'):
+            refused = client.put(f'/api/expenses/{own}/status', json={
+                'status': target, 'reason': 'because',
+            })
+            assert refused.status_code == 403, (target, refused.get_json())
+            assert 'own expense claim' in str(refused.get_json()).lower(), refused.get_json()
+        assert _claim_row(own)[1] == 'Pending', 'a self-approved claim moved'
+
+        # ...and so does an employee, who cannot even reach the route.
+        _login_as(client, 'EMP960', 'Employee', 99841)
+        claimant = _file_claim(client)
+        assert client.put(f'/api/expenses/{claimant}/status', json={'status': 'Approved'}).status_code in (302, 403)
+        assert _claim_row(claimant)[1] == 'Pending'
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_expense_claim_cannot_jump_pending_to_paid(client):
+    """`Paid` is only reachable from `Approved` (Appendix A-11)."""
+    _set_admin_session(client, 99843)
+    try:
+        _seed_expense_users(client)
+        _login_as(client, 'EMP960', 'Employee', 99842)
+        claim = _file_claim(client)
+        _login_as(client, 'EMP001', 'Admin', 99841)
+
+        jumped = client.put(f'/api/expenses/{claim}/status', json={'status': 'Paid'})
+        assert jumped.status_code == 409, jumped.get_json()
+        assert 'pending to paid' in str(jumped.get_json()).lower(), jumped.get_json()
+        assert _claim_row(claim)[1] == 'Pending'
+
+        # Admin is an accepted payer when there is no Finance user, so the
+        # Approved -> Paid edge is legitimately open to them; the point of the
+        # test is that it is only reachable *through* Approved.
+        assert client.put(f'/api/expenses/{claim}/status', json={'status': 'Approved'}).status_code == 200
+        assert _claim_row(claim)[1] == 'Approved'
+        assert client.put(f'/api/expenses/{claim}/status', json={'status': 'Paid'}).status_code == 200
+        assert _claim_row(claim)[1] == 'Paid'
+
+        # A Team Leader has neither the paying nor the approving capability, so
+        # the edge stays closed for them even from a legal state.
+        _create_policy_user(client, 'EMP966', role='Team Leader')
+        _login_as(client, 'EMP966', 'Team Leader', 99842)
+        assert client.put(f'/api/expenses/{claim}/status', json={'status': 'Paid'}).status_code == 403
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_rejecting_an_expense_claim_requires_a_reason(client):
+    """'Rejected' with nothing to act on is not useful to the claimant."""
+    _set_admin_session(client, 99844)
+    try:
+        _seed_expense_users(client)
+        _login_as(client, 'EMP960', 'Employee', 99843)
+        claim = _file_claim(client)
+        _login_as(client, 'EMP001', 'Admin', 99842)
+
+        blank = client.put(f'/api/expenses/{claim}/status', json={'status': 'Rejected'})
+        assert blank.status_code == 400, blank.get_json()
+        assert 'reason' in str(blank.get_json()).lower(), blank.get_json()
+        whitespace = client.put(f'/api/expenses/{claim}/status', json={
+            'status': 'Rejected', 'reason': '   ',
+        })
+        assert whitespace.status_code == 400, whitespace.get_json()
+        assert _claim_row(claim)[1] == 'Pending'
+
+        with_reason = client.put(f'/api/expenses/{claim}/status', json={
+            'status': 'Rejected', 'reason': 'no itemised receipt',
+        })
+        assert with_reason.status_code == 200, with_reason.get_json()
+        assert _claim_row(claim)[1] == 'Rejected'
+        conn = get_db()
+        try:
+            stored = conn.execute(
+                'SELECT rejection_reason FROM expense_claims WHERE claim_id = ?', [claim]
+            ).fetchone()
+        finally:
+            conn.close()
+        assert stored[0] == 'no itemised receipt', stored
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_a_rejected_or_paid_claim_is_final(client):
+    _set_admin_session(client, 99845)
+    try:
+        _seed_expense_users(client)
+        _login_as(client, 'EMP960', 'Employee', 99844)
+        claim = _file_claim(client)
+        _login_as(client, 'EMP001', 'Admin', 99843)
+        client.put(f'/api/expenses/{claim}/status', json={'status': 'Rejected', 'reason': 'no receipt'})
+
+        for target in ('Pending', 'Approved', 'Paid'):
+            revived = client.put(f'/api/expenses/{claim}/status', json={
+                'status': target, 'reason': 'changed my mind',
+            })
+            assert revived.status_code == 409, (target, revived.get_json())
+            assert 'final' in str(revived.get_json()).lower(), revived.get_json()
+        assert _claim_row(claim)[1] == 'Rejected'
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_an_unrelated_employee_cannot_review_a_claim(client):
+    """Authority is the reporting line, not 'anybody who can reach the route'."""
+    import expenses
+
+    _set_admin_session(client, 99846)
+    try:
+        _seed_expense_users(client)
+        # A third employee who manages nobody at all.
+        _create_policy_user(client, 'EMP964', role='Team Leader')
+        _login_as(client, 'EMP960', 'Employee', 99845)
+        claim = _file_claim(client)
+
+        _login_as(client, 'EMP964', 'Team Leader', 99844)
+        refused = client.put(f'/api/expenses/{claim}/status', json={'status': 'Approved'})
+        assert refused.status_code in (302, 403), refused.status_code
+        assert _claim_row(claim)[1] == 'Pending'
+
+        # The pure function, so the rule is asserted directly as well.
+        actor = ('EMP964', 'Team Leader', 'MIS', None)
+        claim_row = ('EMP960', 'Pending', 100)
+        assert expenses.permitted_targets(actor, claim_row) == []
+        with pytest.raises(expenses.ExpenseTransitionError) as excinfo:
+            expenses.check_transition(actor, claim_row, 'Approved')
+        assert excinfo.value.status == 403
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961', 'EMP964')
+
+
+def test_finance_may_pay_and_records_when(client):
+    """`Approved -> Paid by Finance only`, and the payment is timestamped."""
+    _set_admin_session(client, 99847)
+    try:
+        _seed_expense_users(client)
+        _login_as(client, 'EMP960', 'Employee', 99846)
+        claim = _file_claim(client)
+        _login_as(client, 'EMP001', 'Admin', 99845)
+        assert client.put(f'/api/expenses/{claim}/status', json={'status': 'Approved'}).status_code == 200
+
+        _login_as(client, 'EMP961', 'Finance', 99844)
+        # Finance needs to be able to *find* the claim, not just act on it.
+        listed = {r['id']: r for r in client.get('/api/expenses').get_json()}
+        assert claim in listed, 'Finance cannot see an Approved claim to pay'
+        assert listed[claim]['allowed_actions'] == ['Paid']
+
+        paid = client.put(f'/api/expenses/{claim}/status', json={'status': 'Paid'})
+        assert paid.status_code == 200, paid.get_json()
+        row = _claim_row(claim)
+        assert row[1] == 'Paid' and row[3] == 'EMP961', row
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT paid_at FROM expense_claims WHERE claim_id = ?', [claim]
+            ).fetchone()[0] is not None, 'Paid must record when it was paid'
+        finally:
+            conn.close()
+
+        # Every transition is audited with the before/after pair.
+        conn = get_db()
+        try:
+            # CAST because audit_log.entity_id is VARCHAR on the compatibility
+            # schema and BIGINT on v2.0; comparing either side to an int fails
+            # on one of them.
+            actions = [
+                r[0] for r in conn.execute(
+                    "SELECT action FROM audit_log WHERE entity = 'expense_claims' "
+                    "AND CAST(entity_id AS VARCHAR) = ? ORDER BY created_at",
+                    [str(claim)],
+                ).fetchall()
+            ]
+        finally:
+            conn.close()
+        assert actions == ['EXPENSE_CLAIM', 'EXPENSE_APPROVED', 'EXPENSE_PAID'], actions
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_a_second_concurrent_approval_is_refused_not_applied(client):
+    """The write is `UPDATE ... WHERE status = <the state it was decided on>`.
+
+    Two approvers who both read `Pending` produce one winner and one 409, never a
+    silent overwrite. The observable consequence is that a repeat of the same
+    decision is refused, so that is what is asserted.
+    """
+    _set_admin_session(client, 99848)
+    try:
+        _seed_expense_users(client)
+        _login_as(client, 'EMP960', 'Employee', 99847)
+        claim = _file_claim(client)
+        _login_as(client, 'EMP001', 'Admin', 99846)
+
+        first = client.put(f'/api/expenses/{claim}/status', json={'status': 'Approved'})
+        assert first.status_code == 200, first.get_json()
+        second = client.put(f'/api/expenses/{claim}/status', json={'status': 'Approved'})
+        assert second.status_code == 409, second.get_json()
+        assert 'approved to approved' in str(second.get_json()).lower(), second.get_json()
+        assert _claim_row(claim)[1] == 'Approved'
+
+        # The 409 reports the transitions that *are* still open, so a client can
+        # recover without guessing.
+        assert second.get_json()['allowed'] == ['Paid'], second.get_json()
+
+        conn = get_db()
+        try:
+            approved = conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE entity = 'expense_claims' "
+                "AND CAST(entity_id AS VARCHAR) = ? AND action = 'EXPENSE_APPROVED'",
+                [str(claim)],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert approved == 1, 'the refused approval was audited as if it happened'
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961')
+
+
+def test_expense_list_scopes_to_what_the_caller_may_act_on(client):
+    """Own claims, direct reports, and states they could transition — nothing else."""
+    _set_admin_session(client, 99849)
+    try:
+        _seed_expense_users(client)
+        # A stranger, created while the session is still an admin.
+        _create_policy_user(client, 'EMP965', role='Employee')
+        _login_as(client, 'EMP960', 'Employee', 99848)
+        mine = _file_claim(client, description='mine')
+        _login_as(client, 'EMP965', 'Employee', 99847)
+        theirs = _file_claim(client, description='theirs')
+
+        _login_as(client, 'EMP960', 'Employee', 99846)
+        ids = {r['id'] for r in client.get('/api/expenses').get_json()}
+        assert ids == {mine}, ids
+        # An employee who is nobody's manager may act on nothing.
+        assert all(r['allowed_actions'] == [] for r in client.get('/api/expenses').get_json())
+
+        _login_as(client, 'EMP001', 'Admin', 99845)
+        admin_rows = {r['id']: r for r in client.get('/api/expenses').get_json()}
+        assert {mine, theirs} <= set(admin_rows), 'an admin can view all (policy.can_view_all)'
+        assert admin_rows[theirs]['allowed_actions'] == ['Approved', 'Rejected']
+        # But the admin filed nothing here, so nothing is self-approvable.
+        assert all(a for a in admin_rows[theirs]['allowed_actions'])
+    finally:
+        _cleanup_expense_rows('EMP960', 'EMP961', 'EMP965')
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):

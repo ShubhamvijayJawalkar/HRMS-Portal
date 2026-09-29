@@ -849,6 +849,45 @@ DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**
 (the new `leave-accrual(monthly ledger)` flow reads the canonical table back), and
 the CC-01 checker plus the read-only preflight both pass on that database.
 
+### 14.11 Expense claim state machine (implemented)
+
+Following the traceability matrix into `expenses_api` found three defects the
+matrix could only point at, not describe: any of the four statuses was accepted
+from any state, so an admin could approve a claim they had filed themselves, a
+claim could jump `Pending -> Paid` with no approval at all, and a second write
+could move a paid claim back to `Pending`. Appendix A-11 of the SRS records the
+v1.0 deviation; `expenses.py` is the fix.
+
+`expenses.py` owns the transition table and decides the move, so every caller
+gets the same answer, and an edge that is not in the table is a 409 rather than a
+guess. Self-approval is blocked, authority is per-target (`Paid` is
+Finance/Admin only, `Approved`/`Rejected` are the owner's manager or HR/Admin), a
+rejection requires a reason, and every write is a conditional `UPDATE ... WHERE
+status = <the state it was decided on>` so two approvers racing give one winner
+and one 409.
+
+The gate was the other half of the bug: `admin_required` excluded the claim
+owner's manager and Finance alike, so `Approved -> Paid` was unreachable by the
+role the SRS names for it. `expense_actor_required` admits manager, HR, Finance
+and Admin, and Finance now holds the `expenses` module in the matrix — a
+deliberate widening, recorded because it grants *reach* while the list stays
+scoped to own + reports + actionable states.
+
+`POST /api/expenses` also took `emp_id` from the request body, so any
+authenticated user could file (and then approve) a claim in a colleague's name.
+A body override is now a 400 (CC-10).
+
+The matrix moves FR-EXP-03 to IMPLEMENTED (48 IMPLEMENTED / 43 PARTIAL /
+12 NOT_STARTED / 1 RETIRED). It also corrects itself: the previous claim that
+FR-DOC-02 validated the extension rather than the content was wrong — the upload
+route does sniff the magic number and reject EICAR — so FR-DOC-02, FR-USR-12 and
+FR-ONB-04 now name the real gaps (per-category size cap, no real scanner).
+
+Validation: **143 DuckDB unit tests passed / 6 skipped**, **148 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**, and
+the CC-01 checker plus the read-only preflight both pass on that database.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

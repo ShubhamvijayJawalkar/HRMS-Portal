@@ -44,6 +44,7 @@ from security import (
 load_dotenv()
 
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
+import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
@@ -1311,6 +1312,15 @@ def init_db():
             FOREIGN KEY (cat_id) REFERENCES expense_categories(cat_id)
         )
     ''')
+    # FR-EXP-03: `Approved -> Paid by Finance only` needs the timestamp the
+    # canonical target already carries, and a rejection has to say why. Both are
+    # additive on legacy/DuckDB; on v2.0 `public` the columns already exist and
+    # the ALTER is skipped, so the boot seed does not reshape the target.
+    for _column, _ddl in (('paid_at', 'TIMESTAMP'), ('rejection_reason', 'VARCHAR')):
+        try:
+            conn.execute(f'ALTER TABLE expense_claims ADD COLUMN {_column} {_ddl}')
+        except Exception:
+            pass  # already present on this schema
 
     # ── Help Desk Tickets (Phase 3) ──────────────────────────────────
     conn.execute('''
@@ -2389,6 +2399,68 @@ def _gate_passes(actor, gate, departments=()):
 
 def _gate_module(f):
     return _ROUTE_MODULES.get(f.__name__, _DEFAULT_GATED_MODULE)
+
+
+def expense_actor_required(f):
+    """Gate for the expense state machine (FR-EXP-03).
+
+    The SRS transition table has three kinds of actor — the claim owner's
+    manager (approve/reject), HR (approve/reject), and Finance (pay) — and none of
+    the existing role gates is that set. `admin_required` excluded the manager and
+    Finance entirely, which is why `Approved -> Paid` was unreachable by the role
+    the SRS names for it.
+
+    The gate only decides *whether* the caller may attempt a transition.
+    `expenses.check_transition` still decides *which*, and re-reads the actor from
+    the database, so a stale session copy cannot widen this.
+    """
+    def denial():
+        if request.is_json:
+            return jsonify({'error': 'Forbidden'}), 403
+        return redirect(url_for('dashboard'))
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'emp_id' not in session or not _session_user_active():
+            session.clear()
+            if request.is_json:
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('login'))
+        conn = get_db()
+        try:
+            actor = policy.current_actor(conn)
+            role = str(actor.get('role') or '')
+            if role in policy.ADMIN_ROLES or role in ('HR', 'Finance'):
+                pass
+            elif actor.get('department') == 'HR':
+                pass
+            elif not _manages_any_employee(conn, actor.get('emp_id')):
+                return denial()
+            if not policy.can(actor, 'expenses', conn=conn) and role not in policy.ADMIN_ROLES:
+                # The matrix says an explicit override may deny the module, and
+                # an Admin is not narrowed by it either (same invariant as
+                # `_gated`: the matrix can revoke, never grant).
+                return denial()
+        finally:
+            conn.close()
+        return f(*args, **kwargs)
+    return _tag_gate(decorated, 'expense_actor', _gate_module(f))
+
+
+def _manages_any_employee(conn, manager_emp_id):
+    """Does this employee manage at least one other employee?
+
+    Checked against the database rather than the session, so a re-org takes
+    effect immediately.
+    """
+    if not manager_emp_id:
+        return False
+    try:
+        return bool(conn.execute(
+            'SELECT 1 FROM users WHERE manager_emp_id = ? LIMIT 1', [manager_emp_id]
+        ).fetchone())
+    except Exception:
+        return False
 
 
 def _tag_gate(decorated, gate, module):
@@ -6077,35 +6149,151 @@ def expense_categories():
 def expenses_api():
     if request.method == 'GET':
         conn = get_db()
-        if policy.can_view_all(policy.current_actor(conn), 'expenses', conn=conn):
+        actor = _lifecycle_actor(conn)
+        viewer = policy.current_actor(conn)
+        if policy.can_view_all(viewer, 'expenses', conn=conn):
             rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id ORDER BY c.created_at DESC").fetchall()
         else:
-            rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.emp_id = ? ORDER BY c.created_at DESC", [session['emp_id']]).fetchall()
+            # FR-EXP-03: a reviewer has to be able to *find* the claims they may
+            # act on, so the list is scoped to "mine, my reports', or anything in
+            # a state I could transition" rather than "mine only". Without the
+            # third clause Finance could never see an Approved claim to pay,
+            # which would make the requirement unreachable through the UI. The
+            # company-wide view stays with the roles policy.can_view_all admits.
+            reports = {
+                r[0] for r in conn.execute(
+                    'SELECT emp_id FROM users WHERE manager_emp_id = ?', [session['emp_id']]
+                ).fetchall()
+            }
+            # The states this actor could actually move somebody else's claim out
+            # of, derived from the same rules the write enforces, so the list and
+            # the state machine cannot disagree about what is reviewable.
+            actionable = expenses.actionable_statuses(actor)
+            clauses = ['c.emp_id = ?']
+            params: list = [session['emp_id']]
+            if reports:
+                clauses.append(f"c.emp_id IN ({','.join('?' for _ in reports)})")
+                params.extend(sorted(reports))
+            if actionable:
+                clauses.append(f"c.status IN ({','.join('?' for _ in actionable)})")
+                params.extend(actionable)
+            rows = conn.execute(
+                "SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, "
+                "c.description, c.status, c.created_at "
+                "FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id "
+                "JOIN expense_categories e ON c.cat_id = e.cat_id "
+                f"WHERE {' OR '.join(clauses)} ORDER BY c.created_at DESC",
+                params,
+            ).fetchall()
+        claims = [{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'cat_id': r[3],
+                   'category': r[4], 'amount': float(r[5]), 'description': r[6],
+                   'status': r[7],
+                   # FR-EXP-03: tell the client which transitions are actually
+                   # available, rather than letting it guess and get a 403.
+                   'allowed_actions': expenses.permitted_targets(actor, (r[1], r[7], r[5])),
+                   'created_at': r[8].isoformat() if r[8] else None} for r in rows]
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'cat_id': r[3], 'category': r[4], 'amount': float(r[5]), 'description': r[6], 'status': r[7], 'created_at': r[8].isoformat() if r[8] else None} for r in rows]), 200
+        return jsonify(claims), 200
     data = request.get_json(silent=True) or {}
     if not data.get('cat_id') or not data.get('amount'):
         return jsonify({'error': 'cat_id and amount required'}), 400
+    # CC-10: emp_id comes from the session, never from the body. v1.0 accepted an
+    # override, which let any authenticated user file a claim in a colleague's
+    # name and, because there was no self-approval block, approve it themselves.
+    if data.get('emp_id') not in (None, '', session['emp_id']):
+        return jsonify({'error': 'A claim may only be filed for yourself'}), 400
+    try:
+        amount = float(data['amount'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'amount must be a number'}), 400
+    if amount <= 0:
+        return jsonify({'error': 'amount must be greater than zero'}), 400
     conn = get_db()
-    cid = _next_generated_id(conn, 'expense_claims', 'claim_id')
-    conn.execute("INSERT INTO expense_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [cid, data.get('emp_id', session['emp_id']), data['cat_id'], float(data['amount']), data.get('description'), data.get('receipt_path'), 'Pending', None, datetime.now()])
-    conn.close()
+    try:
+        if not conn.execute('SELECT 1 FROM expense_categories WHERE cat_id = ?', [data['cat_id']]).fetchone():
+            return jsonify({'error': 'Unknown expense category'}), 400
+        cid = _next_generated_id(conn, 'expense_claims', 'claim_id')
+        # Explicit column list: a bare VALUES would mis-target now that the
+        # table carries paid_at and rejection_reason (the v2.0 lesson).
+        conn.execute(
+            "INSERT INTO expense_claims (claim_id, emp_id, cat_id, amount, description, "
+            "receipt_path, status, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [cid, session['emp_id'], data['cat_id'], amount, data.get('description'),
+             data.get('receipt_path'), 'Pending', None, datetime.now()])
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'EXPENSE_CLAIM',
+        f'Filed expense claim {cid} for {amount}',
+        entity='expense_claims', entity_id=cid,
+        after={'amount': amount, 'cat_id': data['cat_id']},
+    )
     return jsonify({'message': 'Expense claimed', 'id': cid}), 201
 
 
 @app.route('/api/v1/expenses/<int:eid>/status', methods=['PUT'])
 @app.route('/api/expenses/<int:eid>/status', methods=['PUT'])
-@admin_required
+@expense_actor_required
 def update_expense_status(eid):
+    """Move an expense claim through the FR-EXP-03 state machine.
+
+    The decision is `expenses.check_transition`'s, not this handler's: it enforces
+    the strict transition table, blocks self-approval, requires an actual reason
+    for a rejection, and gives ``Paid`` to Finance/Admin only (Appendix A-11
+    recorded v1.0 letting any logged-in user pay). The write below is conditional
+    on the status the decision was made against, so two approvers racing produce
+    one winner and one 409 rather than a silent overwrite.
+    """
     data = request.get_json(silent=True) or {}
-    status = data.get('status')
-    if status not in ('Pending', 'Approved', 'Rejected', 'Paid'):
-        return jsonify({'error': 'Invalid status'}), 400
+    target = data.get('status')
+    reason = data.get('reason')
     conn = get_db()
-    conn.execute("UPDATE expense_claims SET status = ?, approved_by = ? WHERE claim_id = ?", [status, session['emp_id'], eid])
-    conn.close()
-    return jsonify({'message': f'Expense {status.lower()}'}), 200
+    try:
+        actor = _lifecycle_actor(conn)
+        claim = conn.execute(
+            "SELECT emp_id, status, amount FROM expense_claims WHERE claim_id = ?", [eid]
+        ).fetchone()
+        if not claim:
+            return jsonify({'error': 'Expense claim not found'}), 404
+        before = claim[1]
+        try:
+            expenses.check_transition(actor, claim, target, reason)
+        except expenses.ExpenseTransitionError as exc:
+            return jsonify({'error': str(exc), 'allowed': expenses.permitted_targets(actor, claim)}), exc.status
+        if target == 'Paid':
+            result = conn.execute(
+                "UPDATE expense_claims SET status = ?, approved_by = ?, paid_at = ? "
+                "WHERE claim_id = ? AND status = ?",
+                [target, session['emp_id'], datetime.now(), eid, before],
+            )
+        else:
+            result = conn.execute(
+                "UPDATE expense_claims SET status = ?, approved_by = ?, rejection_reason = ? "
+                "WHERE claim_id = ? AND status = ?",
+                [target, session['emp_id'], reason if target == 'Rejected' else None,
+                 eid, before],
+            )
+        if result.rowcount == 0:
+            return jsonify({
+                'error': 'The claim changed while you were reviewing it; reload and retry',
+                'allowed': expenses.permitted_targets(actor, claim),
+            }), 409
+    finally:
+        conn.close()
+    detail = f' ({reason})' if target == 'Rejected' and reason else ''
+    audit_log(
+        session['emp_id'], f'EXPENSE_{target.upper()}',
+        f'Expense {eid}: {before} -> {target}{detail}',
+        entity='expense_claims', entity_id=eid,
+        before={'status': before}, after={'status': target, 'reason': reason},
+    )
+    if target in ('Approved', 'Rejected'):
+        add_notification(
+            claim[0], f'EXPENSE_{target.upper()}',
+            f'Your expense claim of {claim[2]} was {target.lower()}.{detail}',
+            '/expenses', 'Expenses',
+        )
+    return jsonify({'message': f'Expense {target.lower()}', 'status': target}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
