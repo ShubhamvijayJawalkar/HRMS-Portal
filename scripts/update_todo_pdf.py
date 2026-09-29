@@ -40,6 +40,15 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "Server-side session coverage: CI re-ran the whole unit suite with REDIS_URL "
+     "set, but no test in the suite referred to the session store, so the step passed identically "
+     "whether the backend was Redis or the app had silently fallen back to signed cookies - which "
+     "is what the first run of the new tests found. tests/test_redis_sessions.py is now its own "
+     "pytest process (the backend is chosen when app is imported) and asserts the opaque cookie, "
+     "the Redis payload and TTL, session persistence, logout deleting the key, block and archive "
+     "revoking the session while an unrelated one survives, re-blocking after an unblock, CSRF "
+     "still enforced, and both fallback paths. The duplicate 122-test CI step is replaced by "
+     "these 10 tests."),
     ("2026-09-29", "FR-LEA-08 monthly leave accrual: monthly_leave_grants was in the canonical "
      "target and unwritten, so an accrual rate was collapsed into a flat annual ceiling at "
      "assignment time. The rate-driven entitlement is now what the employee has earned so far "

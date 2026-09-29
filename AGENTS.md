@@ -538,9 +538,10 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - The new `postgres` job runs a `postgres:17` service plus Redis and executes
   the matrix that was previously only ever run by hand:
   `alembic upgrade head` (so the v2.0 `public` schema exists), the unit suite on
-  the compatibility `legacy` schema, the unit suite again with `REDIS_URL` set
-  for the server-side session path, the browser suite, and — on a *clean*
-  database created by Alembic — the three cutover gates: the read-only
+  the compatibility `legacy` schema, the **server-side session store** asserted
+  in its own process with `REDIS_URL` set (see the section below — it used to be
+  a duplicate whole-suite run that asserted nothing), the browser suite, and — on
+  a *clean* database created by Alembic — the three cutover gates: the read-only
   preflight, `scripts/check_cc_rules.py` and `scripts/probe_public_flip.py`.
   All three already exit non-zero on failure, so a step turns red on its own.
 - Two things had to be fixed to make it pass, both found by running it for real:
@@ -683,6 +684,33 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   the canonical `monthly_leave_grants` back. DuckDB is 126 passed / 6 skipped;
   PostgreSQL 131 passed / 1 skipped (also with Redis); Playwright 21/21 on both
   backends; probe 97/97 GET + **45/45** write.
+
+## The server-side session store is now actually tested (`tests/test_redis_sessions.py`)
+- **The gap was real, and it was not hypothetical.** CI ran the entire unit
+  suite a second time with `REDIS_URL` set — and *no test in the suite referred
+  to the session store*. So the production session backend, plus the four code
+  paths that claim to revoke a server-side session, were unverified: the step
+  passed identically whether or not Redis was in use. The first run of the new
+  file caught it — Redis happened to be down, the app silently fell back to
+  signed cookies, and the old step would still have been green.
+- The backend is chosen when `app` is imported (`maybe_enable_redis_sessions`
+  runs at module level), so it **cannot** be asserted from inside the main suite.
+  It is its own file, run as its own pytest process, and every test skips when
+  `REDIS_URL` is unset so a bare `pytest tests/` is still safe.
+- 10 tests cover: the switch itself (the fallback is silent, so it is asserted
+  directly); a login writing an **opaque** cookie plus the payload in Redis under
+  `hrms:session:<sid>` with a TTL and no sid echoed into the payload; the session
+  surviving across requests; logout deleting the key so the cookie cannot be
+  replayed; **block and archive each revoking the server-side session** while an
+  unrelated session survives; re-blocking after an unblock revoking the *new*
+  session (a stale revocation is not enough); CSRF still refusing an un-tokened
+  write with a valid session; and the two fallback paths (unreachable Redis keeps
+  cookie sessions, no `REDIS_URL` keeps cookie sessions).
+- The CI step `Run unit tests with server-side Redis sessions` (122 tests) is
+  replaced by `Assert the server-side Redis session store` (10 tests). The old
+  step was pure duplicated cost; this one actually asserts the property it was
+  named for. 10 passed on both DuckDB+Redis and PostgreSQL+Redis; all 10 skip
+  cleanly with `REDIS_URL` unset.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

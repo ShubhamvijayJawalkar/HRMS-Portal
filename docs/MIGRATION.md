@@ -239,12 +239,23 @@ identically on DuckDB and PostgreSQL; nothing here depends on the DB backend.
   Redis; the cookie then holds only an opaque session id. Default (unset) keeps
   signed cookies, so dev/CI needs no Redis.
 - TTL = `PERMANENT_SESSION_LIFETIME` (8 h); logout deletes the server copy.
+- Blocking, archiving, unchecking `allow_login`, anonymisation and the nightly
+  offboarding revocation all call `_revoke_redis_sessions()`, which scans
+  `hrms:session:*` and deletes the keys whose payload names that employee.
 
 ### Run it
 
 ```bash
-REDIS_URL=redis://localhost:56379/0 python -m pytest tests/test_app.py -v  # unit on Redis sessions
+REDIS_URL=redis://localhost:56379/0 python -m pytest tests/test_redis_sessions.py -v
 ```
+
+That file is the assertion the old CI step was named for but never made. It used
+to re-run the whole unit suite with `REDIS_URL` set, and not one test in the
+suite referred to the session store, so the step passed identically whether the
+backend was Redis or the app had silently fallen back to signed cookies — which
+is exactly what happened the first time the new file ran. The backend is chosen
+when `app` is imported, so the coverage has to be its own pytest process; every
+test skips when `REDIS_URL` is unset.
 
 ### Exit criteria (§14 CC-06)
 

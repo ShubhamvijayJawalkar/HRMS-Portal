@@ -132,10 +132,16 @@ jobs:
       - name: Run unit tests on the compatibility schema
         run: python -m pytest tests/test_app.py -v
 
-      # Server-side Redis sessions are the production path, so the same suite
-      # runs once with REDIS_URL set (cookie sessions otherwise).
-      - name: Run unit tests with server-side Redis sessions
-        run: python -m pytest tests/test_app.py -v
+      # Server-side Redis sessions are the production path. This used to be the
+      # whole suite re-run with REDIS_URL set, which asserted nothing about the
+      # session store: no test referred to it, so the step passed identically
+      # whether or not the backend was Redis. That was not hypothetical - the
+      # first run of the new file found the app silently on cookie sessions
+      # because Redis was down, and the old step would still have been green.
+      # The backend is chosen when `app` is imported, so it needs its own
+      # pytest process.
+      - name: Assert the server-side Redis session store
+        run: python -m pytest tests/test_redis_sessions.py -v
         env:
           REDIS_URL: redis://localhost:6379/0
 
