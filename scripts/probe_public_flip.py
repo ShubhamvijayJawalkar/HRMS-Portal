@@ -434,6 +434,11 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
         pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
         pc.execute("DELETE FROM goals WHERE title = 'public write probe'")
+        # Comments first: ticket_comments has a foreign key to tickets, so
+        # deleting the ticket before its comments is a constraint violation.
+        pc.execute("DELETE FROM ticket_comments WHERE comment IN "
+                   "('still broken', 'not mine', 'probe comment')")
+        pc.execute("DELETE FROM tickets WHERE subject = 'public write probe'")
         pc.execute("DELETE FROM performance_reviews WHERE review_period = 'public write probe'")
         pc.execute("DELETE FROM feedback_360 WHERE comment = 'public write probe'")
         # The `auth(reset-password)` flow below changes EMP002's password, so a
@@ -701,6 +706,41 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             ).fetchone()
         return 200 if row == (4, "Submitted") else 409
     run("performance-reviews(reviewer signoff)", review_signoff)
+    # ── FR-TKT-03/04: visibility on the writes, and the chain ────────────────
+    # The list and the detail view enforced the visibility rule; the two write
+    # paths did not, so a user refused a ticket with 403 could still comment on it
+    # and close it. The status route also had no state machine at all.
+    def ticket_lifecycle():
+        created = _post(cl, tok, "/api/tickets", {"subject": "public write probe",
+                                                 "priority": "High"})
+        if created.status_code != 201:
+            return created.status_code
+        tid = (created.get_json() or {}).get("id")
+        if not tid:
+            return 409
+        # A third party can neither comment on it nor move it.
+        if _post(cl_f, tok_f, f"/api/tickets/{tid}/comment", {"comment": "not mine"}).status_code != 403:
+            return 409
+        if _put(cl_f, tok_f, f"/api/tickets/{tid}/status", {"status": "In Progress"}).status_code != 403:
+            return 409
+        # The chain is strict: Open cannot jump to Closed.
+        if _put(cl, tok, f"/api/tickets/{tid}/status", {"status": "Closed"}).status_code != 409:
+            return 409
+        for step in ("In Progress", "Resolved", "Closed"):
+            if _put(cl, tok, f"/api/tickets/{tid}/status", {"status": step}).status_code != 200:
+                return 409
+        # A Closed ticket reopens when its *reporter* comments, and only then.
+        reopened = _post(cl, tok, f"/api/tickets/{tid}/comment", {"comment": "still broken"})
+        if reopened.status_code != 201 or not (reopened.get_json() or {}).get("reopened"):
+            return 409
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT status, resolved_at FROM tickets WHERE ticket_id = %s", [tid],
+            ).fetchone()
+        return 200 if row == ("Reopened", None) else 409
+    run("tickets(visibility + chain + reopen)", ticket_lifecycle)
+
+
 
 
 
@@ -776,6 +816,11 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     def ticket_resolve():
         tid = state.get("ticket_id")
         if not tid:
+            return 409
+        # FR-TKT-04 is a chain, so Open -> Resolved is refused. This step used to
+        # jump straight there and the probe never noticed because there was no
+        # state machine to notice with.
+        if _put(cl_a, tok_a, f"/api/tickets/{tid}/status", {"status": "In Progress"}).status_code != 200:
             return 409
         return _put(cl_a, tok_a, f"/api/tickets/{tid}/status", {"status": "Resolved"}).status_code
     run("tickets(resolve)", ticket_resolve)

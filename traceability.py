@@ -355,16 +355,31 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'HR/IT queues and a priority on every ticket. The SLA target per '
                   'priority is not configurable and there are no subcategories.'),
     'FR-TKT-02': ('M', 'C', 'PARTIAL', ('/api/tickets',),
-                  'Create and list with the owner/assignee/department/admin visibility '
-                  'rule. Department notification is partial: the department is notified '
-                  'but not Super Admin.'),
-    'FR-TKT-03': ('M', 'C', 'IMPLEMENTED', ('/api/tickets/<int:tid>', '/api/tickets/<int:tid>/comment'),
-                  'The detail view re-checks visibility server-side rather than trusting '
-                  'the list query, and comments bump updated_at.'),
-    'FR-TKT-04': ('M', 'C', 'PARTIAL', ('/api/tickets/<int:tid>/status',),
-                  'Open -> In Progress -> Resolved -> Closed is enforced with a guarded '
-                  'transition. Reopened does not exist: a comment on a closed ticket is '
-                  'accepted but leaves it Closed.'),
+                  'Create and list with one shared visibility rule in tickets.can_view: '
+                  'owner, assignee, or a role policy.can_view_all admits. The reporter is '
+                  'always the session user, so a ticket cannot be filed in a colleague\'s '
+                  'name. Still missing: the SRS also lists "matching department" scoping, '
+                  'and Super Admin is not notified of a new ticket.'),
+    'FR-TKT-03': ('M', 'C', 'IMPLEMENTED', ('/api/tickets', '/api/tickets/<int:tid>',
+                                             '/api/tickets/<int:tid>/comment',
+                                             '/api/tickets/<int:tid>/status'),
+                  'One visibility rule (tickets.can_view) now serves the list, the detail '
+                  'view, commenting and status changes, so the "defence in depth" the '
+                  'requirement asks for is real rather than half of it. The comment route '
+                  'had only an existence check, so a user refused a ticket with 403 could '
+                  'still write into its history; the status route had no check at all. '
+                  'Comments bump updated_at.'),
+    'FR-TKT-04': ('M', 'C', 'IMPLEMENTED', ('/api/tickets/<int:tid>/status',
+                                             '/api/tickets/<int:tid>/comment',
+                                             '/api/tickets/<int:tid>/assign'),
+                  'tickets.py holds the chain Open -> In Progress -> Resolved -> Closed, '
+                  'enforced strictly and with a conditional write, so Open -> Closed is a '
+                  '409 naming what is allowed. Reopened is a real status: a Closed ticket '
+                  'reopens when its *reporter* comments within seven days of closing, and '
+                  'nobody else can reopen it that way; an older closure stays closed. '
+                  'Resolved -> In Progress and Reopened -> In Progress are the ways back. '
+                  'Assignment is audited, which FR-TKT-04 asks for and nothing did; a ghost '
+                  'assignee is a 404 and the assignee is notified.'),
 
     # ── FR-DOC: documents ───────────────────────────────────────────────
     'FR-DOC-01': ('M', 'R', 'IMPLEMENTED', ('/api/documents',),
@@ -375,8 +390,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'the content, and there is no malware scan. A renamed .exe passes.'),
     'FR-DOC-03': ('M', 'C', 'PARTIAL', ('/api/documents/<int:did>/download', '/api/documents/<int:did>'),
                   'Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is '
-                  'closed). The download is a direct file response, not a presigned URL, '
-                  'and it is not audited.'),
+                  'closed), and the download now writes a DOCUMENT_DOWNLOAD audit row - a '
+                  'document read that leaves no trail is the one that matters after an '
+                  'incident. Still missing: a presigned URL rather than a direct file '
+                  'response, so the object store is never reachable directly.'),
 
     # ── FR-HOL: holidays ────────────────────────────────────────────────
     'FR-HOL-01': ('M', 'C', 'PARTIAL', ('/api/holidays',),

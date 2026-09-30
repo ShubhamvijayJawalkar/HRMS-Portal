@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 165 on DuckDB, 170 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 172 on DuckDB, 177 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (165 on DuckDB, 170 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (172 on DuckDB, 177 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -749,8 +749,15 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   three defects (an admin could approve their own claim, a claim could jump
   `Pending -> Paid`, a paid claim could be moved back to `Pending`) plus the CC-10
   impersonation hole on the create route. See the FR-EXP-03 section.
-- **It has now paid for itself twice more, and the second time it was the worst
-  defect found so far: `POST /api/goals` had never worked at all** — a bare
+- **It has now paid for itself five times over.** The clearest demonstration is
+  the ticket surface: the list hid a ticket from an unrelated employee, the detail
+  view returned 403, and the comment route returned 201 — "defence in depth"
+  implemented on the read paths and absent from the writes. See FR-TKT-03/04.
+- **And it found a bug in my own patch.** I wrote `jsonify(body, exc.status)`,
+  which passes the status as a positional argument and returns **200** with a
+  409-shaped body, so every refused transition would have read as a success to any
+  client checking `status_code`. A test asserting 409 caught it.
+- **The worst defect it found: `POST /api/goals` had never worked at all** — a bare
   `INSERT INTO goals VALUES (...)` with ten placeholders against a nine-column
   table, so every goal creation returned 500 on every backend. The seed used an
   explicit column list, which is why the seed worked. See the FR-PERF-01 section.
@@ -957,6 +964,56 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - DuckDB is 165 passed / 6 skipped; PostgreSQL 170 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends; probe 97/97 GET + 47/47 write, with
   CC-01 and the preflight green.
+
+## FR-TKT-03/04 tickets: the visibility rule was only half-implemented (`tickets.py`)
+- **FR-TKT-03 asks for "defence in depth": the detail view enforces the same
+  visibility rule server-side, not just in the list query.** The list and the detail
+  view did enforce it. The two *write* paths did not, and the probe output made
+  that unmistakable: an unrelated employee's list was empty, the detail view
+  returned 403, and `POST /api/tickets/<id>/comment` returned **201**.
+  - **`add_ticket_comment` had only an existence check**, so a user refused a
+    ticket could still write into its history.
+  - **`update_ticket_status` had neither a visibility check nor a state machine** —
+    `@login_required` and four accepted strings. Any authenticated user could move
+    any ticket to any state, so any employee could close anybody's ticket.
+- **`tickets.can_view` is now the single rule** for the list, the detail view,
+  commenting and status changes, so the four paths cannot disagree.
+- **One deliberate widening, recorded in the module:** the rule was "owner or a
+  role that can view all", which meant a ticket *assigned* to an IT officer was
+  invisible to the very person asked to fix it. The assignee can now see and work
+  on it, which is what the SRS's "owner, assignee, matching department, or admin"
+  intends. Department scoping is still not implemented and the matrix says so.
+- **FR-TKT-04's chain is now strict.** The SRS writes
+  `Open → In Progress → Resolved → Closed` as a chain, so it is one: `Open →
+  Closed` is a 409 that names what *is* allowed. `Resolved → In Progress` and
+  `Reopened → In Progress` are the ways back, because a ticket has to be able to
+  return from a claim of resolution.
+- **`Reopened` is a real status now.** A Closed ticket reopens when its
+  **reporter** comments within seven days of closing — not a bystander, not the IT
+  officer triaging — and an older closure stays closed, because a stale ticket
+  should come back through a fresh request rather than re-entering the queue weeks
+  later. FR-TKT-04's last sentence, "Assignment audited", also had no audit: it does
+  now, with before/after, a 404 for a ghost assignee, and a notification to the
+  assignee.
+- **FR-DOC-03 folded in:** document downloads now write a `DOCUMENT_DOWNLOAD`
+  audit row. A document *read* that leaves no trail is the one that matters after
+  an incident. The presigned-URL part is still open.
+- 7 new unit tests and a probe flow
+  (`tickets(visibility + chain + reopen)`). The probe's own `tickets(resolve)` step
+  had to change: it jumped `Open → Resolved`, which the new chain refuses — the
+  probe had never noticed because there was no state machine to notice with.
+  **48/48 write flows** on the clean v2.0 target.
+- **A bug in my own patch, caught by a test asserting 409 and getting 200.** I had
+  written `jsonify(body, exc.status)` while formatting, which passes the status as a
+  *positional argument* to `jsonify` and returns **200** with a 409-shaped body.
+  A client checking `status_code` would have read every refused transition as a
+  success. It is fixed, and the test that found it is the reason it cannot come
+  back.
+- The matrix moves FR-TKT-04 to `IMPLEMENTED` and restates FR-TKT-03
+  (**52 IMPLEMENTED / 40 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- DuckDB is 172 passed / 6 skipped; PostgreSQL 177 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + 48/48 write, with
+  CC-01 and the preflight green, and the probe is idempotent across two runs.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

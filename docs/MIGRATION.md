@@ -993,6 +993,43 @@ DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 47/47 write**, an
 the CC-01 checker plus the read-only preflight both pass on that database. The
 matrix is now **51 IMPLEMENTED / 41 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
 
+### 14.15 Tickets: defence in depth, and a state machine (implemented)
+
+FR-TKT-03 asks for the detail view to enforce the same visibility rule as the list
+query, "not just in the list query (defence in depth)". The list and the detail
+view did enforce it. The two write paths did not, and the probe output made it
+unmistakable: an unrelated employee's list was empty, the detail view returned
+403, and `POST /api/tickets/<id>/comment` returned 201. `update_ticket_status` had
+neither a visibility check nor a state machine at all, so any authenticated user
+could move any ticket to any state.
+
+`tickets.py` now holds one `can_view` rule serving the list, the detail view,
+commenting and status changes, and the strict chain
+`Open -> In Progress -> Resolved -> Closed`. The chain is strict because the SRS
+writes it as a chain, so `Open -> Closed` is a 409 that names what is allowed;
+`Resolved -> In Progress` and `Reopened -> In Progress` are the ways back, because a
+ticket has to be able to return from a claim of resolution.
+
+`Reopened` is now a real status: a Closed ticket reopens when its *reporter*
+comments within seven days of closing, and an older closure stays closed. FR-TKT-04's
+last sentence, "Assignment audited", had no audit at all; it does now, with
+before/after, a 404 for a ghost assignee, and a notification to the assignee. One
+deliberate widening is recorded in the module: the assignee can now see the ticket
+they were given, which the old rule prevented.
+
+The probe's own `tickets(resolve)` step had to change — it jumped `Open ->
+Resolved`, which the new chain refuses. The probe had never noticed because there
+was no state machine to notice with.
+
+FR-DOC-03 folded in: document downloads now write a `DOCUMENT_DOWNLOAD` audit row.
+
+Validation: **172 DuckDB unit tests passed / 6 skipped**, **177 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 48/48 write** and is
+idempotent across two runs, and the CC-01 checker plus the read-only preflight both
+pass on that database. The matrix is now **52 IMPLEMENTED / 40 PARTIAL / 11
+NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 51 | 49% |
-| `PARTIAL` | 41 | 39% |
+| `IMPLEMENTED` | 52 | 50% |
+| `PARTIAL` | 40 | 38% |
 | `NOT_STARTED` | 11 | 11% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (51)
+### IMPLEMENTED (52)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -75,7 +75,8 @@ rather than quietly invalidating this document.
 | `FR-PERF-01` | M | R | `/api/goals`<br>`/api/goals/<int:gid>`<br>`/api/goals/<int:gid>/rate` | CRUD plus a 1-5 rating that transitions the goal to Completed, all in goals.py. POST /api/goals had never worked (a bare VALUES with ten placeholders against a nine-column table, so every create was a 500) and now uses an explicit column list and takes emp_id from the session. PUT /api/goals/<id> was @login_required with no ownership check, so any authenticated user could rewrite any goal by guessing a sequential id; it is now owner/manager/HR and cannot set status or rating, which is how the rating flow used to be skipped. Rating is by the reporting manager or HR/Admin and never the owner (the SRS calls that out), through a new reporting-line gate because @admin_required excluded the role the requirement names. Completed is terminal and the write is conditional. |
 | `FR-PERF-02` | M | R | `/api/performance-reviews`<br>`/api/performance-reviews/<int:rid>/submit`<br>`/api/feedback-360` | reviews.py. Cycle create/list stays HR/Admin-gated; a self-review is refused at creation (409) because a review whose subject is also its reviewer has nobody to sign it, and both employees must exist. Submit requires the assigned reviewer and nothing else - HR and Admin get no bypass, deliberately, because the rule exists to stop a review being signed by somebody who did not write it (Appendix A-18). The rating is bounded 1-5, the write is conditional on Draft so a signed review is final, and the before/after is audited and the subject notified. 360° feedback refuses self-feedback and takes a fixed category set. |
 | `FR-REG-03` | H | C | `/api/regularization/<int:rid>/approve` | Approval writes the corrected time and triggers the FR-JOB-01 recompute for that day. |
-| `FR-TKT-03` | M | C | `/api/tickets/<int:tid>`<br>`/api/tickets/<int:tid>/comment` | The detail view re-checks visibility server-side rather than trusting the list query, and comments bump updated_at. |
+| `FR-TKT-03` | M | C | `/api/tickets`<br>`/api/tickets/<int:tid>`<br>`/api/tickets/<int:tid>/comment`<br>`/api/tickets/<int:tid>/status` | One visibility rule (tickets.can_view) now serves the list, the detail view, commenting and status changes, so the "defence in depth" the requirement asks for is real rather than half of it. The comment route had only an existence check, so a user refused a ticket with 403 could still write into its history; the status route had no check at all. Comments bump updated_at. |
+| `FR-TKT-04` | M | C | `/api/tickets/<int:tid>/status`<br>`/api/tickets/<int:tid>/comment`<br>`/api/tickets/<int:tid>/assign` | tickets.py holds the chain Open -> In Progress -> Resolved -> Closed, enforced strictly and with a conditional write, so Open -> Closed is a 409 naming what is allowed. Reopened is a real status: a Closed ticket reopens when its *reporter* comments within seven days of closing, and nobody else can reopen it that way; an older closure stays closed. Resolved -> In Progress and Reopened -> In Progress are the ways back. Assignment is audited, which FR-TKT-04 asks for and nothing did; a ghost assignee is a 404 and the assignee is notified. |
 | `FR-USR-01` | M | R | `/api/users` | page/per_page parsed as ints, per_page capped at 200, sort on an allow-list; invalid input is 400, never a silent default. |
 | `FR-USR-03` | M | R | `/api/users/<emp_id>` | Field allow-list, true partial update, role changes audited with a before/after diff, email re-verifies uniqueness. |
 | `FR-USR-04` | H | C | `/api/users/<emp_id>/block`<br>`/api/users/<emp_id>/unblock` | Blocking closes the DB sessions and revokes the Redis sessions; asserted in tests/test_redis_sessions.py. |
@@ -86,7 +87,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (41)
+### PARTIAL (40)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -105,7 +106,7 @@ rather than quietly invalidating this document.
 | `FR-AUTH-13` | H | N | `/api/credentials` | Restricted by the permission policy and no longer returns passwords or hashes. Missing the 5-minute re-authentication and the audit row for a credential read. |
 | `FR-AUTH-14` | H | N | — | An hourly job purges expired reset and idempotency tokens. It does not auto-close breaks Active for more than 12 hours, so a forgotten break-end leaves a row Active indefinitely. |
 | `FR-DOC-02` | H | C | `/api/upload` | Multipart upload, a size cap and an extension allow-list. The MIME type is taken from the filename extension rather than sniffed from the content, and there is no malware scan. A renamed .exe passes. |
-| `FR-DOC-03` | M | C | `/api/documents/<int:did>/download`<br>`/api/documents/<int:did>` | Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is closed). The download is a direct file response, not a presigned URL, and it is not audited. |
+| `FR-DOC-03` | M | C | `/api/documents/<int:did>/download`<br>`/api/documents/<int:did>` | Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is closed), and the download now writes a DOCUMENT_DOWNLOAD audit row - a document read that leaves no trail is the one that matters after an incident. Still missing: a presigned URL rather than a direct file response, so the object store is never reachable directly. |
 | `FR-EXP-01` | M | R | `/api/expense-categories` | Six seeded categories and a read endpoint. No CRUD, so the set is configurable only by editing rows. |
 | `FR-EXP-02` | M | C | `/api/expenses` | emp_id is taken from the session and a body override is rejected with a 400, closing the v1.0 impersonation hole; the category must exist and the amount must be positive. Missing: receipt validation on upload. |
 | `FR-HOL-01` | M | C | `/api/holidays` | National/Optional types, per-location applicability and search. The location field is stored but not filtered on. |
@@ -123,8 +124,7 @@ rather than quietly invalidating this document.
 | `FR-RPT-01` | M | C | `/api/reports` | The self-service view substitutes the caller scope. It ignores a supplied department only in some paths; the admin/HR view is gated by the policy. |
 | `FR-RPT-02` | M | C | `/api/reports/export`<br>`/api/reports/pdf`<br>`/api/reports/department-summary` | Excel and PDF export plus the department summary, all synchronous. No async job for ranges beyond a month or 200 employees. |
 | `FR-TKT-01` | M | C | `/api/tickets` | HR/IT queues and a priority on every ticket. The SLA target per priority is not configurable and there are no subcategories. |
-| `FR-TKT-02` | M | C | `/api/tickets` | Create and list with the owner/assignee/department/admin visibility rule. Department notification is partial: the department is notified but not Super Admin. |
-| `FR-TKT-04` | M | C | `/api/tickets/<int:tid>/status` | Open -> In Progress -> Resolved -> Closed is enforced with a guarded transition. Reopened does not exist: a comment on a closed ticket is accepted but leaves it Closed. |
+| `FR-TKT-02` | M | C | `/api/tickets` | Create and list with one shared visibility rule in tickets.can_view: owner, assignee, or a role policy.can_view_all admits. The reporter is always the session user, so a ticket cannot be filed in a colleague's name. Still missing: the SRS also lists "matching department" scoping, and Super Admin is not notified of a new ticket. |
 | `FR-USR-02` | M | C | `/api/users` | emp_id/email/role/department validated, case-insensitive email uniqueness, default status Active + allow_login. Missing: the welcome email with a 24 h single-use reset token, and balances seeded from the grade/location policy rather than the default matrix (leave_policy derives on read instead). |
 | `FR-USR-08` | L | R | `/api/users/<emp_id>` | Missing the meta endpoint, the async CSV export and the last-50 sessions history. The list endpoint carries the pagination meta. |
 | `FR-USR-10` | H | C | `/api/users/import`<br>`/api/users/import/<int:job_id>` | CSV via pandas as a background job (202 + job id), per-row validation, {imported, skipped, errors, job_id}. The progress endpoint is /api/users/import/<job_id>, not the /api/imports/... path the SRS names, and errors are capped at 20 rather than 50. |

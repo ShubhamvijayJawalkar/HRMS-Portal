@@ -53,6 +53,7 @@ import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 import reviews  # noqa: E402  # performance review + 360 feedback integrity (FR-PERF-02)
+import tickets  # noqa: E402  # ticket state machine + visibility (FR-TKT-03/04)
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
@@ -6586,22 +6587,47 @@ def tickets_page():
 def tickets_api():
     if request.method == 'GET':
         conn = get_db()
-        if policy.can_view_all(policy.current_actor(conn), 'tickets', conn=conn):
+        actor = policy.current_actor(conn)
+        if policy.can_view_all(actor, 'tickets', conn=conn):
             rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.created_at DESC").fetchall()
         else:
-            rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.emp_id = ? ORDER BY t.created_at DESC", [session['emp_id']]).fetchall()
+            # Owned *or* assigned — the same rule the detail view and the write
+            # paths use. An assignee who cannot see the ticket they were given
+            # cannot work on it.
+            rows = conn.execute(
+                "SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, "
+                "t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t "
+                "JOIN users u ON t.emp_id = u.emp_id "
+                "WHERE t.emp_id = ? OR t.assigned_to = ? ORDER BY t.created_at DESC",
+                [session['emp_id'], session['emp_id']],
+            ).fetchall()
         conn.close()
         return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'subject': r[3], 'category': r[4], 'priority': r[5], 'status': r[6], 'assigned_to': r[7], 'created_at': r[8].isoformat() if r[8] else None, 'updated_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('subject'):
         return jsonify({'error': 'subject required'}), 400
     conn = get_db()
-    tid = _next_generated_id(conn, 'tickets', 'ticket_id')
-    conn.execute(
-        "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, status, assigned_to, created_at, updated_at, resolved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [tid, session['emp_id'], data['subject'], data.get('description'), data.get('category'), data.get('priority', 'Medium'),
-         'Open', None, datetime.now(), None, None])
-    conn.close()
+    try:
+        # FR-TKT-01's SLA table is keyed on priority, so an unrecognised value
+        # would silently fall out of every SLA calculation.
+        try:
+            priority = tickets.validate_priority(data.get('priority'))
+        except tickets.TicketError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        tid = _next_generated_id(conn, 'tickets', 'ticket_id')
+        conn.execute(
+            "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, "
+            "status, assigned_to, created_at, updated_at, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [tid, session['emp_id'], data['subject'], data.get('description'),
+             data.get('category'), priority, 'Open', None, datetime.now(), None, None])
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'TICKET_CREATE', f'Created ticket {tid}',
+        entity='tickets', entity_id=tid,
+        after={'priority': priority, 'subject': data['subject']},
+    )
     return jsonify({'message': 'Ticket created', 'id': tid}), 201
 
 
@@ -6615,7 +6641,11 @@ def ticket_detail(tid):
         conn.close()
         return jsonify({'error': 'Not found'}), 404
     actor = policy.current_actor(conn)
-    if not policy.can_view_all(actor, 'tickets', conn=conn) and actor.get('emp_id') != row[1]:
+    # The same rule the write paths use (`tickets.can_view`), so the list, the
+    # detail view, commenting and status changes cannot disagree about who can see
+    # a ticket. FR-TKT-03 asks for exactly this.
+    if not (policy.can_view_all(actor, 'tickets', conn=conn)
+            or tickets.can_view(actor, (row[1], row[8]))):
         conn.close()
         return jsonify({'error': 'Forbidden'}), 403
     comments = conn.execute("SELECT c.comment_id, c.emp_id, u.name, c.comment, c.created_at FROM ticket_comments c JOIN users u ON c.emp_id = u.emp_id WHERE c.ticket_id = ? ORDER BY c.created_at", [tid]).fetchall()
@@ -6634,46 +6664,162 @@ def ticket_detail(tid):
 @app.route('/api/tickets/<int:tid>/comment', methods=['POST'])
 @login_required
 def add_ticket_comment(tid):
+    """Append a comment (FR-TKT-03) and reopen the ticket if the rule says so.
+
+    This route had only an existence check, so an employee who is refused the
+    detail view with a 403 could still write into the ticket's history. The
+    visibility rule is now applied here as well, which is the "defence in depth"
+    FR-TKT-03 asks for.
+
+    FR-TKT-04's other half lives here too: a Closed ticket receiving a comment
+    **from its reporter** within seven days of closing is Reopened, and nobody
+    else can reopen a ticket by commenting on it.
+    """
     data = request.get_json(silent=True) or {}
-    if not data.get('comment'):
-        return jsonify({'error': 'comment required'}), 400
     conn = get_db()
-    chk = conn.execute("SELECT 1 FROM tickets WHERE ticket_id = ?", [tid]).fetchone()
-    if not chk:
+    now = datetime.now()
+    try:
+        row = conn.execute(
+            'SELECT emp_id, assigned_to, status, resolved_at FROM tickets WHERE ticket_id = ?',
+            [tid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Ticket not found'}), 404
+        actor = policy.current_actor(conn)
+        try:
+            tickets.check_visibility(
+                actor, (row[0], row[1]),
+                can_view_all=policy.can_view_all(actor, 'tickets', conn=conn),
+            )
+            comment = tickets.validate_comment(data.get('comment'))
+        except tickets.TicketError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        cid = _next_generated_id(conn, 'ticket_comments', 'comment_id')
+        conn.execute(
+            'INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) '
+            'VALUES (?, ?, ?, ?, ?)', [cid, tid, session['emp_id'], comment, now],
+        )
+        reopened = tickets.should_reopen((row[2], row[0], row[3]), session['emp_id'], now)
+        if reopened:
+            conn.execute(
+                "UPDATE tickets SET status = 'Reopened', resolved_at = NULL, updated_at = ? "
+                'WHERE ticket_id = ? AND status = ?', [now, tid, 'Closed'],
+            )
+        else:
+            conn.execute('UPDATE tickets SET updated_at = ? WHERE ticket_id = ?', [now, tid])
+    finally:
         conn.close()
-        return jsonify({'error': 'Ticket not found'}), 404
-    cid = _next_generated_id(conn, 'ticket_comments', 'comment_id')
-    conn.execute("INSERT INTO ticket_comments (comment_id, ticket_id, emp_id, comment, created_at) VALUES (?, ?, ?, ?, ?)", [cid, tid, session['emp_id'], data['comment'], datetime.now()])
-    conn.execute("UPDATE tickets SET updated_at = ? WHERE ticket_id = ?", [datetime.now(), tid])
-    conn.close()
-    return jsonify({'message': 'Comment added', 'id': cid}), 201
+    if reopened:
+        audit_log(
+            session['emp_id'], 'TICKET_REOPEN',
+            f'Ticket {tid} reopened by the reporter within the 7-day window',
+            entity='tickets', entity_id=tid,
+            before={'status': 'Closed'}, after={'status': 'Reopened'},
+        )
+        return jsonify({
+            'message': 'Comment added; the ticket has been reopened',
+            'id': cid, 'status': 'Reopened', 'reopened': True,
+        }), 201
+    return jsonify({'message': 'Comment added', 'id': cid, 'reopened': False}), 201
 
 
 @app.route('/api/v1/tickets/<int:tid>/status', methods=['PUT'])
 @app.route('/api/tickets/<int:tid>/status', methods=['PUT'])
 @login_required
 def update_ticket_status(tid):
+    """Move a ticket along the FR-TKT-04 chain.
+
+    This route had neither a visibility check nor a state machine: `@login_required`
+    and four accepted strings, so any authenticated user could close anybody's
+    ticket. `tickets.check_transition` enforces the chain strictly — the SRS
+    writes it as `Open -> In Progress -> Resolved -> Closed` — and the write is
+    conditional on the status the decision was made against, so two triagers
+    racing give one winner and one 409.
+    """
     data = request.get_json(silent=True) or {}
-    status = data.get('status')
-    if status not in ('Open', 'In Progress', 'Resolved', 'Closed'):
-        return jsonify({'error': 'Invalid status'}), 400
+    target = data.get('status')
     conn = get_db()
     now = datetime.now()
-    resolved_at = now if status == 'Resolved' else None
-    conn.execute("UPDATE tickets SET status = ?, updated_at = ?, resolved_at = ? WHERE ticket_id = ?", [status, now, resolved_at, tid])
-    conn.close()
-    return jsonify({'message': f'Status set to {status}'}), 200
+    try:
+        row = conn.execute(
+            'SELECT emp_id, assigned_to, status FROM tickets WHERE ticket_id = ?', [tid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Ticket not found'}), 404
+        actor = policy.current_actor(conn)
+        try:
+            tickets.check_visibility(
+                actor, (row[0], row[1]),
+                can_view_all=policy.can_view_all(actor, 'tickets', conn=conn),
+            )
+            tickets.check_transition(row[2], target)
+        except tickets.TicketError as exc:
+            payload = {
+                'error': str(exc),
+                'allowed': sorted(tickets.TRANSITIONS.get(row[2], ())),
+            }
+            return jsonify(payload), exc.status
+        result = conn.execute(
+            'UPDATE tickets SET status = ?, updated_at = ?, resolved_at = ? '
+            'WHERE ticket_id = ? AND status = ?',
+            [target, now, tickets.resolved_at_for(target, now), tid, row[2]],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'The ticket changed while you were triaging it; reload and retry'}), 409
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'TICKET_STATUS',
+        f'Ticket {tid}: {row[2]} -> {target}',
+        entity='tickets', entity_id=tid,
+        before={'status': row[2]}, after={'status': target},
+    )
+    if row[0] != session['emp_id']:
+        add_notification(
+            row[0], 'TICKET_UPDATED',
+            f'Your ticket "{tid}" moved to {target}.', '/tickets', 'Tickets',
+        )
+    return jsonify({'message': f'Status set to {target}', 'status': target}), 200
 
 
 @app.route('/api/v1/tickets/<int:tid>/assign', methods=['PUT'])
 @app.route('/api/tickets/<int:tid>/assign', methods=['PUT'])
 @admin_required
 def assign_ticket(tid):
+    """Assign a ticket. FR-TKT-04: "Assignment audited" — it was not."""
     data = request.get_json(silent=True) or {}
+    assignee = data.get('assigned_to') or None
     conn = get_db()
-    conn.execute("UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE ticket_id = ?", [data.get('assigned_to'), datetime.now(), tid])
-    conn.close()
-    return jsonify({'message': 'Ticket assigned'}), 200
+    try:
+        row = conn.execute(
+            'SELECT emp_id, assigned_to, status FROM tickets WHERE ticket_id = ?', [tid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Ticket not found'}), 404
+        if assignee is not None:
+            exists = conn.execute(
+                'SELECT 1 FROM users WHERE emp_id = ?', [assignee]
+            ).fetchone()
+            if not exists:
+                return jsonify({'error': f'No such employee: {assignee}'}), 404
+        conn.execute(
+            'UPDATE tickets SET assigned_to = ?, updated_at = ? WHERE ticket_id = ?',
+            [assignee, datetime.now(), tid],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'TICKET_ASSIGN',
+        f'Ticket {tid} assigned to {assignee or "nobody"}',
+        entity='tickets', entity_id=tid,
+        before={'assigned_to': row[1]}, after={'assigned_to': assignee},
+    )
+    if assignee and assignee != row[0]:
+        add_notification(
+            assignee, 'TICKET_ASSIGNED',
+            f'Ticket {tid} was assigned to you.', '/tickets', 'Tickets',
+        )
+    return jsonify({'message': 'Ticket assigned', 'assigned_to': assignee}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -6782,6 +6928,14 @@ def download_document(did):
     filepath = os.path.join(UPLOAD_FOLDER, os.path.basename(row[1]))
     if not os.path.exists(filepath):
         return jsonify({'error': 'File not found on disk'}), 404
+    # FR-DOC-03: the download is audited. Document *reads* leaving no trail is
+    # the one thing that makes a document store hard to reason about after an
+    # incident, and the SRS asks for it explicitly.
+    audit_log(
+        session['emp_id'], 'DOCUMENT_DOWNLOAD',
+        f'Downloaded document {did} ({row[2]})',
+        entity='documents', entity_id=did, after={'owner_emp_id': row[0]},
+    )
     return send_file(filepath, as_attachment=True, download_name=row[1])
 
 

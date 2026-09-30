@@ -40,6 +40,19 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-30", "FR-TKT-03/04 tickets: FR-TKT-03 asks for defence in depth on the visibility "
+     "rule, and the list and detail view had it - but the two write paths did not. An unrelated "
+     "employee's list was empty, the detail view returned 403, and POST /api/tickets/<id>/comment "
+     "returned 201. update_ticket_status had neither a visibility check nor a state machine, so any "
+     "authenticated user could move any ticket to any state and close anyone else's. tickets.py now "
+     "holds one can_view rule for all four paths and the strict Open -> In Progress -> Resolved -> "
+     "Closed chain, with Reopened as a real status: a Closed ticket reopens when its reporter "
+     "comments within seven days, and an older closure stays closed. Assignment is audited, which "
+     "FR-TKT-04 asks for and nothing did. The assignee can now see the ticket they were given, "
+     "which the old rule prevented. FR-DOC-03 folded in: document downloads are audited. This slice "
+     "also caught a bug in my own patch - jsonify(body, exc.status) returns 200 with a 409-shaped "
+     "body, so every refused transition read as a success. Matrix is now 52 IMPLEMENTED / 40 "
+     "PARTIAL / 11 NOT_STARTED / 1 RETIRED."),
     ("2026-09-30", "FR-PERF-02 review integrity: the SRS has two sentences for this requirement "
      "and neither was enforced - submit requires the assigned reviewer (Appendix A-18, recorded as "
      "a v1.0 gap) and 360 feedback reviewer cannot be the subject. submit_review had no reviewer "
@@ -244,9 +257,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "165 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "170 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "170 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "172 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "177 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "177 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

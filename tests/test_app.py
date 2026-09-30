@@ -2618,6 +2618,266 @@ def test_a_reviewer_cannot_give_themselves_360_feedback(client):
     finally:
         _cleanup_review_rows('EMP930', 'EMP931')
 
+
+# ── FR-TKT-03/04 tickets: visibility on the writes, and the chain ─────────
+
+def _ticket_users(client):
+    _create_policy_user(client, 'EMP910', role='Employee')
+    _create_policy_user(client, 'EMP911', role='Employee')
+    conn = get_db()
+    try:
+        # Different departments, so nothing but the ownership rule can excuse a
+        # cross-department read.
+        conn.execute("UPDATE users SET department = 'MIS' WHERE emp_id = 'EMP910'")
+        conn.execute("UPDATE users SET department = 'HR' WHERE emp_id = 'EMP911'")
+    finally:
+        conn.close()
+
+
+def _open_ticket(client, owner='EMP910'):
+    _login_as(client, owner, 'Employee', 99800)
+    response = client.post('/api/tickets', json={'subject': 'Printer jams', 'description': 'every page'})
+    assert response.status_code == 201, response.get_json()
+    return response.get_json()['id']
+
+
+def _ticket_row(ticket_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT emp_id, assigned_to, status FROM tickets WHERE ticket_id = ?', [ticket_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_ticket_rows(*emp_ids):
+    conn = get_db()
+    try:
+        for emp_id in emp_ids:
+            conn.execute(
+                'DELETE FROM ticket_comments WHERE emp_id = ? OR ticket_id IN '
+                '(SELECT ticket_id FROM tickets WHERE emp_id = ?)', [emp_id, emp_id],
+            )
+            conn.execute('DELETE FROM notifications WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM tickets WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?', [emp_id])
+            conn.execute('DELETE FROM users WHERE emp_id = ?', [emp_id])
+    finally:
+        conn.close()
+
+
+def test_no_one_can_comment_on_a_ticket_they_cannot_see(client):
+    """The detail view refused it; the comment route had only an existence check."""
+    _set_admin_session(client, 99800)
+    try:
+        _ticket_users(client)
+        ticket_id = _open_ticket(client)
+        _login_as(client, 'EMP911', 'Employee', 99799)
+        # The same request that is refused on the detail view must be refused here.
+        assert client.get(f'/api/tickets/{ticket_id}').status_code == 403
+        assert client.get('/api/tickets').get_json() == []
+        commented = client.post(f'/api/tickets/{ticket_id}/comment', json={'comment': 'not my ticket'})
+        assert commented.status_code == 403, commented.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM ticket_comments WHERE ticket_id = ?', [ticket_id]
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_a_ticket_moves_along_the_chain_and_nowhere_else(client):
+    """FR-TKT-04 writes the transitions as a chain, so it is enforced as one."""
+    import tickets as tickets_module
+
+    _set_admin_session(client, 99801)
+    try:
+        _ticket_users(client)
+        ticket_id = _open_ticket(client)
+        _login_as(client, 'EMP910', 'Employee', 99800)
+
+        skipped = client.put(f'/api/tickets/{ticket_id}/status', json={'status': 'Closed'})
+        assert skipped.status_code == 409, skipped.get_json()
+        assert skipped.get_json()['allowed'] == ['In Progress'], skipped.get_json()
+        assert _ticket_row(ticket_id)[2] == 'Open'
+
+        for step in ('In Progress', 'Resolved', 'Closed'):
+            moved = client.put(f'/api/tickets/{ticket_id}/status', json={'status': step})
+            assert moved.status_code == 200, (step, moved.get_json())
+        assert _ticket_row(ticket_id)[2] == 'Closed'
+        # A closed ticket is terminal unless the reporter's comment reopens it.
+        again = client.put(f'/api/tickets/{ticket_id}/status', json={'status': 'Open'})
+        assert again.status_code == 409, again.get_json()
+        assert 'reopens it' in str(again.get_json()), again.get_json()
+
+        # The table itself: no edge exists that the route does not allow.
+        assert tickets_module.TRANSITIONS['Open'] == frozenset({'In Progress'})
+        assert tickets_module.TRANSITIONS['Reopened'] == frozenset({'In Progress'})
+        assert 'Open' not in tickets_module.TRANSITIONS['Closed']
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_a_reporter_comment_reopens_a_closed_ticket_within_seven_days(client):
+    _set_admin_session(client, 99802)
+    try:
+        _ticket_users(client)
+        ticket_id = _open_ticket(client)
+        _login_as(client, 'EMP001', 'Admin', 99801)
+        for step in ('In Progress', 'Resolved', 'Closed'):
+            assert client.put(f'/api/tickets/{ticket_id}/status', json={'status': step}).status_code == 200
+
+        # A bystander cannot reopen it by commenting.
+        _login_as(client, 'EMP911', 'Employee', 99800)
+        assert client.post(f'/api/tickets/{ticket_id}/comment', json={'comment': 'any update?'}).status_code == 403
+
+        # The reporter can, and the response says so.
+        _login_as(client, 'EMP910', 'Employee', 99799)
+        reopened = client.post(f'/api/tickets/{ticket_id}/comment', json={'comment': 'still jamming'})
+        assert reopened.status_code == 201, reopened.get_json()
+        assert reopened.get_json()['reopened'] is True
+        assert reopened.get_json()['status'] == 'Reopened'
+        assert _ticket_row(ticket_id)[2] == 'Reopened'
+        conn = get_db()
+        try:
+            assert _ticket_row(ticket_id)[2] == 'Reopened'
+            audit = conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'TICKET_REOPEN' "
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(ticket_id)],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert audit == 1, 'the reopen was not audited'
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_an_old_closed_ticket_is_not_reopened(client):
+    """A closure older than the window stays closed; a fresh request is the route."""
+    _set_admin_session(client, 99803)
+    try:
+        _ticket_users(client)
+        ticket_id = _open_ticket(client)
+        _login_as(client, 'EMP001', 'Admin', 99802)
+        for step in ('In Progress', 'Resolved', 'Closed'):
+            assert client.put(f'/api/tickets/{ticket_id}/status', json={'status': step}).status_code == 200
+        # Backdate the closure by eight days.
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE tickets SET resolved_at = ? WHERE ticket_id = ?",
+                [datetime.now() - timedelta(days=8), ticket_id],
+            )
+        finally:
+            conn.close()
+        _login_as(client, 'EMP910', 'Employee', 99801)
+        late = client.post(f'/api/tickets/{ticket_id}/comment', json={'comment': 'any luck?'})
+        assert late.status_code == 201, late.get_json()
+        assert late.get_json()['reopened'] is False
+        assert _ticket_row(ticket_id)[2] == 'Closed'
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_the_assignee_can_work_on_the_ticket_they_were_given(client):
+    """The old rule hid an assigned ticket from the person asked to fix it."""
+    _set_admin_session(client, 99804)
+    try:
+        _ticket_users(client)
+        ticket_id = _open_ticket(client)
+        _login_as(client, 'EMP001', 'Admin', 99803)
+        assigned = client.put(f'/api/tickets/{ticket_id}/assign', json={'assigned_to': 'EMP911'})
+        assert assigned.status_code == 200, assigned.get_json()
+        assert assigned.get_json()['assigned_to'] == 'EMP911'
+        # A ghost assignee is a 404, not a dangling reference.
+        assert client.put(f'/api/tickets/{ticket_id}/assign',
+                          json={'assigned_to': 'EMP9999'}).status_code == 404
+
+        _login_as(client, 'EMP911', 'Employee', 99802)
+        assert client.get(f'/api/tickets/{ticket_id}').status_code == 200, 'the assignee cannot see it'
+        assert client.put(f'/api/tickets/{ticket_id}/status',
+                          json={'status': 'In Progress'}).status_code == 200
+
+        # FR-TKT-04: "Assignment audited."
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT "before", "after" FROM audit_log WHERE action = \'TICKET_ASSIGN\' '
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(ticket_id)],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'the assignment was not audited'
+        assert json.loads(row[0]) == {'assigned_to': None}
+        assert json.loads(row[1]) == {'assigned_to': 'EMP911'}
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_a_ticket_priority_is_validated(client):
+    """FR-TKT-01's SLA table is keyed on priority, so junk must not be stored."""
+    _set_admin_session(client, 99805)
+    try:
+        _ticket_users(client)
+        _login_as(client, 'EMP910', 'Employee', 99804)
+        bad = client.post('/api/tickets', json={'subject': 'x', 'priority': 'URGENT!!'})
+        assert bad.status_code == 400, bad.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE priority = 'URGENT!!'"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+        for good in ('Low', 'Medium', 'High', 'Critical'):
+            assert client.post('/api/tickets', json={
+                'subject': f'{good} priority', 'priority': good,
+            }).status_code == 201
+    finally:
+        _cleanup_ticket_rows('EMP910', 'EMP911')
+
+
+def test_document_downloads_are_audited(client):
+    """FR-DOC-03: a document read that leaves no trail is the one that matters."""
+    _set_admin_session(client, 99806)
+    try:
+        payload = b'%PDF-1.4\n' + b'sample payslip bytes' * 8
+        uploaded = client.post('/api/upload', data={
+            'file': (BytesIO(payload), 'payslip.pdf'), 'category': 'Payslip',
+        }, content_type='multipart/form-data')
+        assert uploaded.status_code == 201, uploaded.get_json()
+        doc_id = uploaded.get_json()['id']
+        conn = get_db()
+        try:
+            before = conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'DOCUMENT_DOWNLOAD' "
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(doc_id)],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert before == 0
+        assert client.get(f'/api/documents/{doc_id}/download').status_code == 200
+        conn = get_db()
+        try:
+            after = conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE action = 'DOCUMENT_DOWNLOAD' "
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(doc_id)],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert after == 1, 'the download left no audit row'
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM documents WHERE category = ?', ['Payslip'])
+            conn.execute("DELETE FROM audit_log WHERE action = 'DOCUMENT_DOWNLOAD'")
+        finally:
+            conn.close()
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):
