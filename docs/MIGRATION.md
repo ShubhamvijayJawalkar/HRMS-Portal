@@ -1065,6 +1065,55 @@ idempotent across two runs, and the CC-01 checker plus the read-only preflight b
 pass on that database. The matrix is now **53 IMPLEMENTED / 39 PARTIAL / 11
 NOT_STARTED / 1 RETIRED**.
 
+### 14.17 Optional-holiday opt-ins (implemented)
+
+FR-HOL-03 is a defect rather than a feature, which is why it is worth recording.
+`holiday_optins` was in the canonical schema and `init_db` created it on the
+compatibility shape, and nothing ever wrote to it. `_is_attendance_holiday`
+counts an Optional holiday only for an employee with an `Approved` opt-in — the
+correct rule — and with no route to obtain one, the nightly FR-JOB-01
+finalisation classified the seeded **Diwali as `Weekly-off`** and would have said
+`Absent` on Christmas, for every employee. An implemented High-priority
+requirement was producing a wrong answer because a High-priority requirement's
+dependency had no route.
+
+The SRS asks for "Opt-in/opt-out for Optional holidays, one active opt-in per
+employee per holiday (unique constraint); approval queue for HR", and all four
+clauses are now real. The rules that carry the weight are eligibility ones and
+live in `holidays_optin`: only an Optional holiday can be opted into, a passed
+holiday cannot (its attendance is finalised and a rerun would rewrite a published
+record), and a review is a conditional write so two reviewers give one winner and
+one 409.
+
+The canonical schema contradicted the requirement and itself. The baseline had
+`uq_optin UNIQUE (emp_id, holiday_id)` — a constraint on *one request ever*, not
+on *one active request*, so a withdrawn or rejected opt-in could never be
+repeated, which is exactly what "opt-in/opt-out" is meant to allow. It also
+contradicted `uq_active_offer_candidate` four lines above it, which is partial
+for the same reason. Alembic `0006_holiday_optins_unique` drops it and adds
+`uq_holiday_optins_active ... WHERE status IN ('Pending', 'Approved')`;
+`db/postgres_schema.sql` is corrected so a fresh baseline and a migrated database
+end in the same shape. DuckDB cannot build a partial index, so the compatibility
+schema enforces the identical definition in a conditional `INSERT ... WHERE NOT
+EXISTS`.
+
+A latent `VARCHAR(32)` limit on `alembic_version.version_num` is recorded in the
+revision: a longer id runs its DDL and then fails at the version stamp with
+`StringDataRightTruncation`, rolling the upgrade back with nothing pointing at
+the name. The first draft of this revision was 33 characters.
+
+A latent bare-`VALUES` insert was found on the way, in `add_holiday`: five
+placeholders against v2.0's six-column table. The same shape of defect that made
+`POST /api/goals` return 500 forever, on a route the probe had never exercised
+because it never created a holiday. Now an explicit column list.
+
+Validation: **188 DuckDB unit tests passed / 6 skipped**, **193 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **101/101 GET + 50/50 write**
+and is idempotent across two runs, and the CC-01 checker plus the read-only
+preflight both pass on that database. The matrix is now **54 IMPLEMENTED / 38
+PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

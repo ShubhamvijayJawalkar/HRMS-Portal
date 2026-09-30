@@ -479,6 +479,14 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             "DELETE FROM user_sessions WHERE emp_id = 'EMP002' AND session_date = %s",
             [attendance_date],
         )
+        # FR-HOL-03: the probe's own Optional holiday, its opt-ins and the
+        # attendance it produced, so a second run re-requests cleanly. The opt-ins
+        # go first: holiday_optins references holidays.
+        pc.execute("DELETE FROM holiday_optins WHERE holiday_id IN "
+                   "(SELECT holiday_id FROM holidays WHERE name = 'Probe Optional')")
+        pc.execute("DELETE FROM attendance_days WHERE attendance_date IN "
+                   "(SELECT holiday_date FROM holidays WHERE name = 'Probe Optional')")
+        pc.execute("DELETE FROM holidays WHERE name = 'Probe Optional'")
     _remove_probe_upload_files(upload_paths)
 
     def run(name, fn):
@@ -778,6 +786,78 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
               and after["remaining"] == held["remaining"] + days)
         return 200 if ok else 409
     run("leaves(cancel releases the reservation)", leave_cancel)
+
+    # ── FR-HOL-03: an Optional holiday becomes an attendance holiday only for an
+    # employee with an Approved opt-in. Nothing could ever obtain one before this
+    # slice, so the seeded Diwali was finalised as something other than a holiday.
+    def holiday_optin():
+        # The holiday is an HR artefact and the opt-in is the employee's, so this
+        # flow needs both sessions — which is also the shape of the approval
+        # workflow it is checking.
+        hl, htok, hstatus = _login(app_mod, "EMP001")
+        if hstatus != 200:
+            return hstatus
+        created = _post(hl, htok, "/api/holidays", {
+            "name": "Probe Optional",
+            "date": (today + timedelta(days=60)).isoformat(),
+            "type": "Optional",
+        })
+        if created.status_code != 201:
+            return created.status_code
+        hid = (created.get_json() or {}).get("id")
+        if not hid:
+            return 409
+        # A National holiday cannot be opted into, and the seed has one in range.
+        national = [h for h in hl.get("/api/holidays").get_json() or []
+                    if h.get("type") == "National"]
+        if national:
+            refused = _post(hl, htok, f"/api/holidays/{national[0]['id']}/opt-in", {})
+            if refused.status_code != 409:
+                return 409
+        requested = _post(cl, tok, f"/api/holidays/{hid}/opt-in", {})
+        if requested.status_code != 201:
+            return requested.status_code
+        # One active opt-in per employee per holiday.
+        if _post(cl, tok, f"/api/holidays/{hid}/opt-in", {}).status_code != 409:
+            return 409
+        # The queue is not the employee's to read.
+        if cl.get("/api/holidays/opt-ins").status_code != 403:
+            return 409
+        optin_id = (requested.get_json() or {}).get("optin_id")
+        if not optin_id:
+            return 409
+        queue = hl.get("/api/holidays/opt-ins").get_json() or {}
+        if optin_id not in [o.get("optin_id") for o in queue.get("optins", [])]:
+            return 409
+        approved = _post(hl, htok, f"/api/holidays/opt-ins/{optin_id}/approve", {})
+        if approved.status_code != 200:
+            return approved.status_code
+        # A settled request is not reviewable twice.
+        if _post(hl, htok, f"/api/holidays/opt-ins/{optin_id}/approve", {}).status_code != 409:
+            return 409
+        # The point of the whole flow: the canonical holiday_optins row exists, and
+        # attendance for that date is now a Holiday for this employee.
+        with psycopg.connect(pg_dsn) as vpc:
+            row = vpc.execute(
+                "SELECT status FROM holiday_optins WHERE optin_id = %s", (optin_id,)
+            ).fetchone()
+            if not row or row[0] != 'Approved':
+                return 409
+            when = vpc.execute(
+                "SELECT holiday_date FROM holidays WHERE holiday_id = %s", (hid,)
+            ).fetchone()
+            if not when:
+                return 409
+        from app import finalize_attendance_for_date
+        finalize_attendance_for_date(when[0], employee_ids=['EMP002'])
+        with psycopg.connect(pg_dsn) as vpc:
+            status = vpc.execute(
+                "SELECT status FROM attendance_days WHERE emp_id = 'EMP002' "
+                "AND attendance_date = %s", (when[0],)
+            ).fetchone()
+        return 200 if (status and status[0] == 'Holiday') else 409
+    run("holidays(optional opt-in drives attendance)", holiday_optin)
+
 
 
 

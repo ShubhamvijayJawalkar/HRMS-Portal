@@ -410,10 +410,24 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'CRUD for HR/Admin with a duplicate (name, date) check. The check is '
                   'in the handler, not a unique constraint, so it races under '
                   'concurrency. No year-to-year copy, so Feb-29 handling is absent.'),
-    'FR-HOL-03': ('H', 'C', 'PARTIAL', (),
-                  'holiday_optins exists in the canonical schema with a unique index. No '
-                  'route writes an opt-in and there is no HR approval queue, so Optional '
-                  'holidays cannot actually be opted into.'),
+    'FR-HOL-03': ('H', 'C', 'IMPLEMENTED',
+                  ('/api/holidays/<int:hid>/opt-in', '/api/holidays/opt-ins/mine',
+                   '/api/holidays/opt-ins', '/api/holidays/opt-ins/<int:oid>/approve',
+                   '/api/holidays/opt-ins/<int:oid>/cancel'),
+                  'The table existed and nothing wrote to it, which made FR-JOB-01 wrong '
+                  'rather than merely incomplete: an Optional holiday is an attendance '
+                  'holiday only for an employee with an Approved opt-in, no employee could '
+                  'ever obtain one, and the nightly finalisation recorded the seeded Diwali '
+                  'as Weekly-off. An employee requests, HR approves or rejects from a queue, '
+                  'and the owner may withdraw; all of it is holidays_optin.check_request / '
+                  'check_cancel / check_review. Only Optional holidays can be opted into, a '
+                  'passed holiday cannot (its attendance is finalised), and the review is a '
+                  'conditional write so two reviewers give one winner and one 409. '
+                  '"One active opt-in per employee per holiday" is a partial unique index '
+                  '(Alembic 0006) because a withdrawn or rejected request must not stop the '
+                  'employee asking again - the baseline uq_optin was a plain UNIQUE, which '
+                  'made opt-out irreversible, and the compatibility schema enforces the same '
+                  'definition in a conditional INSERT because DuckDB has no partial index.'),
 
     # ── FR-JOB: scheduled work ──────────────────────────────────────────
     'FR-JOB-01': ('H', 'C', 'IMPLEMENTED', (),

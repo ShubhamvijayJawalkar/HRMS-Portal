@@ -293,7 +293,7 @@ def main() -> int:
     parser.add_argument("--legacy-schema", default="legacy", help="fallback schema to compare")
     parser.add_argument(
         "--expected-head",
-        default="0005_anonymisation_requests",
+        default="0006_holiday_optins_unique",
         help="required Alembic head on the target schema",
     )
     parser.add_argument("--duckdb-file", help="optional legacy DuckDB fallback path")

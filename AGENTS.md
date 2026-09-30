@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 178 on DuckDB, 183 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 188 on DuckDB, 193 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (178 on DuckDB, 183 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (188 on DuckDB, 193 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -1055,6 +1055,76 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - DuckDB is 178 passed / 6 skipped; PostgreSQL 183 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends; probe 97/97 GET + 49/49 write, with
   CC-01 and the preflight green.
+
+
+## FR-HOL-03 optional-holiday opt-ins: the table existed, and FR-JOB-01 was wrong (`holidays_optin.py`)
+- **This slice is a defect, not a feature.** `holiday_optins` was in the canonical
+  schema and `init_db` created it on the compatibility shape, and *nothing ever
+  wrote to it*. The consequence was that an already-implemented High-priority
+  requirement was producing a wrong answer:
+  - the boot seed creates two **Optional** holidays (Diwali, Christmas);
+  - `_is_attendance_holiday` counts an Optional holiday only for an employee with
+    an `Approved` opt-in — the correct rule;
+  - with no route to obtain one, the nightly FR-JOB-01 finalisation classified
+    **Diwali as `Weekly-off`** and would have said `Absent` on Christmas, for
+    every employee in the company.
+- The SRS: *"Opt-in/opt-out for Optional holidays, one active opt-in per
+  employee per holiday (unique constraint); approval queue for HR."* All four
+  clauses are now real: an employee requests, HR approves or rejects from a
+  queue, the owner may withdraw, and the constraint is a real index.
+- **The rules that carry the weight are eligibility ones, and they live in
+  `holidays_optin`**, not in the routes: only **Optional** holidays can be opted
+  into (a National one applies to everyone, so an opt-in is a mistake and
+  silently ignoring it would leave the employee thinking they had done
+  something); a holiday that has **already passed** cannot be opted into,
+  because its attendance is finalised and a rerun would rewrite a published
+  record; and a review is a **conditional write**, so two reviewers racing give
+  one winner and one 409 rather than a silent overwrite.
+- **The canonical schema contradicted the requirement, and itself.** The baseline
+  had `ALTER TABLE holiday_optins ADD CONSTRAINT uq_optin UNIQUE (emp_id,
+  holiday_id)` — a constraint on *one request ever*, not on *one active
+  request*. An employee who withdrew an opt-in, or whose request HR rejected,
+  could never ask again, which is precisely what "opt-in/**opt-out**" is
+  supposed to allow. It also contradicted the constraint four lines above it:
+  `uq_active_offer_candidate` is partial, for the same reason. Alembic
+  `0006_holiday_optins_unique` drops `uq_optin` and adds the partial
+  `uq_holiday_optins_active ... WHERE status IN ('Pending', 'Approved')`, and
+  `db/postgres_schema.sql` is corrected to match so a fresh baseline and a
+  migrated database end in the same shape. `Rejected` is deliberately not
+  active — a declined employee has to be able to ask again.
+- **DuckDB cannot build a partial index** (`Not implemented Error: Creating
+  partial indexes is not supported currently`), so on the compatibility schema
+  the rule is a conditional `INSERT ... WHERE NOT EXISTS` using the identical
+  status set. Both backends therefore answer the same way, and the index is what
+  makes the canonical target refuse the duplicate the application would otherwise
+  have to catch.
+- A **latent `VARCHAR(32)` limit on `alembic_version.version_num`** surfaced
+  here and is recorded in the revision: a longer revision id runs its DDL, then
+  fails at the *version stamp* with `StringDataRightTruncation`, rolling the
+  whole upgrade back with nothing pointing at the name. My first draft of this
+  revision was 33 characters. The id is 24 for that reason, not for taste.
+- **A latent bare-`VALUES` insert found on the way**, in `add_holiday`:
+  `INSERT INTO holidays VALUES (?, ?, ?, ?, ?)` with five placeholders against
+  v2.0's six-column table (`location`, FR-HOL-01). It is the same shape of
+  defect that made `POST /api/goals` return 500 on every backend, on a route the
+  probe had never exercised because the probe never created a holiday. Now an
+  explicit column list.
+- A third test-harness fix: `_cleanup_user_contract_rows` deleted the user
+  before the rows referencing it, so a login's `user_sessions` row, a
+  notification and a holiday opt-in each raised a foreign-key error and left the
+  user in place — the next test to reuse the id failed with "Employee ID already
+  exists" somewhere unrelated. The helper clears the referencing tables first.
+- 9 new unit tests (including one asserting the Diwali classification flips from
+  not-`Holiday` to `Holiday` on approval) and a probe flow
+  (`holidays(optional opt-in drives attendance)`) that refuses a National
+  opt-in, asserts the one-active rule, asserts the employee's 403 on the queue,
+  approves as HR, refuses a second review, reads the canonical row back, and
+  finalises attendance to prove the day is a `Holiday` — **101/101 GET + 50/50
+  write**, idempotent across two runs, with CC-01 and the preflight green.
+- The matrix moves FR-HOL-03 to `IMPLEMENTED`
+  (**54 IMPLEMENTED / 38 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- DuckDB is 188 passed / 6 skipped; PostgreSQL 193 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

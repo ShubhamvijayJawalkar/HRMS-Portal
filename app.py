@@ -46,6 +46,7 @@ load_dotenv()
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
+import holidays_optin  # noqa: E402  # optional-holiday opt-ins (FR-HOL-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
@@ -2338,6 +2339,8 @@ _ROUTE_MODULES = {
     'cancel_import_job': 'import_users', 'run_import_job': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
+    'holiday_optin_queue': 'holidays', 'approve_holiday_optin': 'holidays',
+    'reject_holiday_optin': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
     'admin_leaves_page': 'leaves', 'export_leaves': 'leaves',
     'approve_leave': 'leaves', 'reject_leave': 'leaves', 'cancel_leave': 'leaves',
@@ -3119,8 +3122,15 @@ def add_holiday():
         if dup:
             return jsonify({'error': 'Holiday with this name and date already exists'}), 409
         hid = _next_generated_id(conn, 'holidays', 'holiday_id')
-        conn.execute("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)",
-                     [hid, data['name'], d, d.year, htype])
+        # An explicit column list, not `INSERT INTO holidays VALUES (...)`. v2.0
+        # `holidays` has a sixth column (`location`, FR-HOL-01), so a bare VALUES
+        # with five placeholders mis-targets every value and raises — the same
+        # shape of defect that made `POST /api/goals` return 500 on every backend.
+        conn.execute(
+            'INSERT INTO holidays (holiday_id, name, holiday_date, year, type) '
+            'VALUES (?, ?, ?, ?, ?)',
+            [hid, data['name'], d, d.year, htype],
+        )
         return jsonify({'message': 'Holiday added', 'id': hid}), 201
     finally:
         conn.close()
@@ -3138,6 +3148,246 @@ def delete_holiday(hid):
         return jsonify({'message': 'Deleted'}), 200
     finally:
         conn.close()
+
+
+# ── Optional-holiday opt-ins (FR-HOL-03) ───────────────────────────────
+# `holiday_optins` exists in the canonical schema and `init_db` creates it on the
+# compatibility shape, but nothing ever wrote to it. The consequence was not
+# theoretical: the boot seed creates two Optional holidays (Diwali, Christmas),
+# `_is_attendance_holiday` counts an Optional holiday only for an employee with an
+# Approved opt-in, and with no route no employee could ever have one — so the
+# nightly FR-JOB-01 finalisation classified a company holiday as `Weekly-off` on
+# Diwali and would have said `Absent` on Christmas. A High-priority implemented
+# requirement was producing a wrong answer because a Medium one had no route.
+
+
+def _optin_row(conn, optin_id):
+    """One opt-in with its holiday, for the approval queue and the owner's view."""
+    return conn.execute(
+        'SELECT o.optin_id, o.emp_id, o.holiday_id, o.status, o.created_at, '
+        'h.name, h.holiday_date, h.type FROM holiday_optins o '
+        'JOIN holidays h ON h.holiday_id = o.holiday_id WHERE o.optin_id = ?',
+        [optin_id],
+    ).fetchone()
+
+
+def _optin_json(row):
+    optin_id, emp_id, holiday_id, status, created_at, name, when, htype = row
+    payload = {
+        'optin_id': optin_id,
+        'emp_id': emp_id,
+        'holiday_id': holiday_id,
+        'holiday': name,
+        'holiday_date': when.isoformat() if hasattr(when, 'isoformat') else str(when),
+        'holiday_type': htype,
+        'status': status,
+        'created_at': created_at.isoformat() if hasattr(created_at, 'isoformat') else created_at,
+    }
+    return payload
+
+
+def _recompute_optin_attendance(emp_id, holiday_date):
+    """Correct an already-finalised day whose classification just changed.
+
+    Normally a no-op: opt-ins are refused for a holiday that has passed, so the
+    nightly job has not run for that date yet and will pick the approval up by
+    itself. It fires when an attendance row for the date already exists — for
+    example a re-finalisation, or an admin editing the calendar around the nightly
+    cut-off — and returning a stale `Absent` there would be a wrong record that
+    nothing else would revisit.
+    """
+    conn = get_db()
+    try:
+        present = conn.execute(
+            'SELECT 1 FROM attendance_days WHERE emp_id = ? AND attendance_date = ?',
+            [emp_id, holiday_date],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not present:
+        return False
+    finalize_attendance_for_date(holiday_date, employee_ids=[emp_id])
+    return True
+
+
+@app.route('/api/v1/holidays/<int:hid>/opt-in', methods=['POST'])
+@app.route('/api/holidays/<int:hid>/opt-in', methods=['POST'])
+@login_required
+@idempotent
+def request_holiday_optin(hid):
+    """Ask to take an Optional holiday off (FR-HOL-03).
+
+    The eligibility rules — Optional only, not already passed, no second active
+    opt-in — are `holidays_optin.check_request`'s, so the queue and the tests get
+    the same answer.
+    """
+    conn = get_db()
+    try:
+        holiday = conn.execute(
+            'SELECT holiday_id, name, holiday_date, type FROM holidays WHERE holiday_id = ?',
+            [hid],
+        ).fetchone()
+        if not holiday:
+            return jsonify({'error': 'Holiday not found'}), 404
+        emp_id = session['emp_id']
+        existing = conn.execute(
+            'SELECT optin_id, status FROM holiday_optins WHERE emp_id = ? AND holiday_id = ? '
+            'ORDER BY created_at DESC, optin_id DESC',
+            [emp_id, hid],
+        ).fetchall()
+        try:
+            holidays_optin.check_request(holiday, existing[0] if existing else None)
+        except holidays_optin.HolidayOptInError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        optin_id = _next_generated_id(conn, 'holiday_optins', 'optin_id')
+        now = datetime.now()
+        # The insert is conditional rather than checked-then-inserted, and mirrors
+        # the canonical partial unique index exactly: `Rejected` is not active, so a
+        # declined employee may ask again. DuckDB cannot build a partial index, so
+        # on the compatibility shape this *is* the constraint.
+        result = conn.execute(
+            "INSERT INTO holiday_optins (optin_id, emp_id, holiday_id, status, created_at) "
+            'SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ('
+            "SELECT 1 FROM holiday_optins WHERE emp_id = ? AND holiday_id = ? "
+            "AND status IN ('Pending', 'Approved'))",
+            [optin_id, emp_id, hid, 'Pending', now, emp_id, hid],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': f'You already have an active opt-in for {holiday[1]}'}), 409
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'HOLIDAY_OPTIN_REQUEST',
+              f'Opt-in requested for {holiday[1]}', entity='holiday_optins', entity_id=optin_id)
+    add_notification(
+        session['emp_id'], 'HOLIDAY_OPTIN_REQUESTED',
+        f'Your opt-in request for {holiday[1]} is waiting for HR approval.', '/leaves', 'Leave',
+    )
+    return jsonify({
+        'message': 'Opt-in requested', 'optin_id': optin_id, 'status': 'Pending',
+        'holiday': holiday[1],
+    }), 201
+
+
+@app.route('/api/v1/holidays/opt-ins/mine', methods=['GET'])
+@app.route('/api/holidays/opt-ins/mine', methods=['GET'])
+@login_required
+def my_holiday_optins():
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT o.optin_id, o.emp_id, o.holiday_id, o.status, o.created_at, '
+            'h.name, h.holiday_date, h.type FROM holiday_optins o '
+            'JOIN holidays h ON h.holiday_id = o.holiday_id WHERE o.emp_id = ? '
+            'ORDER BY h.holiday_date',
+            [session['emp_id']],
+        ).fetchall()
+        return jsonify([_optin_json(r) for r in rows]), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/holidays/opt-ins/<int:oid>/cancel', methods=['POST'])
+@app.route('/api/holidays/opt-ins/<int:oid>/cancel', methods=['POST'])
+@login_required
+def cancel_holiday_optin(oid):
+    """Withdraw an opt-in before the holiday; the attendance is corrected."""
+    conn = get_db()
+    try:
+        row = _optin_row(conn, oid)
+        if not row:
+            return jsonify({'error': 'Opt-in not found'}), 404
+        emp_id, when, holiday_name = row[1], row[6], row[5]
+        if emp_id != session['emp_id']:
+            return jsonify({'error': 'You can only withdraw your own opt-in request'}), 403
+        try:
+            holidays_optin.check_cancel((row[0], row[3], when))
+        except holidays_optin.HolidayOptInError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        was_approved = row[3] == 'Approved'
+        result = conn.execute(
+            "UPDATE holiday_optins SET status = 'Cancelled' WHERE optin_id = ? AND status = ?",
+            [oid, row[3]],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'That opt-in changed while you were withdrawing it'}), 409
+    finally:
+        conn.close()
+    if was_approved:
+        _recompute_optin_attendance(emp_id, when)
+    audit_log(session['emp_id'], 'HOLIDAY_OPTIN_CANCEL',
+              f'Opt-in for {holiday_name} withdrawn', entity='holiday_optins', entity_id=oid,
+              before={'status': row[3]}, after={'status': 'Cancelled'})
+    return jsonify({'message': 'Opt-in withdrawn', 'status': 'Cancelled'}), 200
+
+
+@app.route('/api/v1/holidays/opt-ins', methods=['GET'])
+@app.route('/api/holidays/opt-ins', methods=['GET'])
+@hr_or_admin_required
+def holiday_optin_queue():
+    """The HR approval queue (FR-HOL-03). Pending by default."""
+    status = request.args.get('status', 'Pending')
+    if status not in holidays_optin.STATUSES:
+        return jsonify({'error': f'status must be one of {", ".join(holidays_optin.STATUSES)}'}), 400
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT o.optin_id, o.emp_id, o.holiday_id, o.status, o.created_at, '
+            'h.name, h.holiday_date, h.type FROM holiday_optins o '
+            'JOIN holidays h ON h.holiday_id = o.holiday_id WHERE o.status = ? '
+            'ORDER BY h.holiday_date, o.optin_id',
+            [status],
+        ).fetchall()
+        return jsonify({'status': status, 'optins': [_optin_json(r) for r in rows]}), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/holidays/opt-ins/<int:oid>/approve', methods=['POST'])
+@app.route('/api/holidays/opt-ins/<int:oid>/approve', methods=['POST'])
+@hr_or_admin_required
+def approve_holiday_optin(oid):
+    return _review_holiday_optin(oid, 'Approved')
+
+
+@app.route('/api/v1/holidays/opt-ins/<int:oid>/reject', methods=['POST'])
+@app.route('/api/holidays/opt-ins/<int:oid>/reject', methods=['POST'])
+@hr_or_admin_required
+def reject_holiday_optin(oid):
+    return _review_holiday_optin(oid, 'Rejected')
+
+
+def _review_holiday_optin(oid, target):
+    """Shared approve/reject body, so the two routes cannot drift apart."""
+    conn = get_db()
+    try:
+        row = _optin_row(conn, oid)
+        if not row:
+            return jsonify({'error': 'Opt-in request not found'}), 404
+        try:
+            holidays_optin.check_review((row[0], row[3]), target)
+        except holidays_optin.HolidayOptInError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        # Conditional on the state it was decided on, so two reviewers racing give
+        # one winner and one 409 rather than a silent overwrite.
+        result = conn.execute(
+            'UPDATE holiday_optins SET status = ? WHERE optin_id = ? AND status = ?',
+            [target, oid, row[3]],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'That request was reviewed by someone else'}), 409
+        emp_id, when, holiday_name = row[1], row[6], row[5]
+    finally:
+        conn.close()
+    if target == 'Approved':
+        _recompute_optin_attendance(emp_id, when)
+    audit_log(session['emp_id'], f'HOLIDAY_OPTIN_{target.upper()}',
+              f'Opt-in for {holiday_name} {target.lower()}', entity='holiday_optins',
+              entity_id=oid, before={'status': 'Pending'}, after={'status': target})
+    add_notification(
+        emp_id, f'HOLIDAY_OPTIN_{target.upper()}',
+        f'Your opt-in request for {holiday_name} was {target.lower()}.', '/leaves', 'Leave',
+    )
+    return jsonify({'message': f'Opt-in {target.lower()}', 'optin_id': oid, 'status': target}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════

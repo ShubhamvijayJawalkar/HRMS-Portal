@@ -710,11 +710,20 @@ def _cleanup_user_contract_rows(*emp_ids):
             f"DELETE FROM audit_log WHERE entity = 'users' AND entity_id IN ({placeholders})",
             list(emp_ids),
         )
-        for table in ('user_sessions', 'shift_assignments', 'user_permissions', 'password_reset_tokens'):
+        # Everything that points at the employee goes first: `users` is still
+        # referenced by a `user_sessions` row from a login, by the notification a
+        # request raises, and by a holiday opt-in, so deleting the employee first
+        # raised a foreign-key error, left the user in place, and made the *next*
+        # test that reused the id fail with "Employee ID already exists" somewhere
+        # unrelated.
+        for table in ('user_sessions', 'shift_assignments', 'user_permissions',
+                      'password_reset_tokens', 'notifications', 'holiday_optins',
+                      'attendance_days', 'leave_requests', 'leave_balance',
+                      'regularization_requests', 'dependents', 'employee_documents'):
             try:
                 conn.execute(f"DELETE FROM {table} WHERE emp_id IN ({placeholders})", list(emp_ids))
             except Exception:
-                pass
+                pass  # a table this backend does not have
         conn.execute(f"DELETE FROM users WHERE emp_id IN ({placeholders})", list(emp_ids))
     finally:
         conn.close()
@@ -3055,6 +3064,279 @@ def test_cancelling_uses_the_same_day_count_as_the_reservation(client):
     assert leave_policy.days_between(start, start) == 1
     # Only these two states are cancellable.
     assert leave_policy.CANCELLABLE_STATUSES == frozenset({'Pending', 'Approved'})
+
+
+# ── FR-HOL-03 optional-holiday opt-ins: the table existed, nothing wrote to it ──
+
+def _optional_holiday(client, name='Probe Optional'):
+    """An Optional holiday in the future, created through the admin route."""
+    assert client.post('/api/holidays', json={
+        'name': name, 'date': (date.today() + timedelta(days=60)).isoformat(), 'type': 'Optional',
+    }).status_code == 201
+    conn = get_db()
+    try:
+        return conn.execute(
+            "SELECT holiday_id, name, holiday_date, type FROM holidays WHERE name = ?", [name],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _national_holiday(client, name='Probe National'):
+    assert client.post('/api/holidays', json={
+        'name': name, 'date': (date.today() + timedelta(days=61)).isoformat(), 'type': 'National',
+    }).status_code == 201
+    conn = get_db()
+    try:
+        return conn.execute(
+            "SELECT holiday_id, name, holiday_date, type FROM holidays WHERE name = ?", [name],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_optin_rows(*names):
+    conn = get_db()
+    try:
+        for name in names:
+            ids = [r[0] for r in conn.execute(
+                'SELECT holiday_id FROM holidays WHERE name = ?', [name]).fetchall()]
+            for hid in ids:
+                conn.execute('DELETE FROM holiday_optins WHERE holiday_id = ?', [hid])
+                conn.execute('DELETE FROM attendance_days WHERE attendance_date = '
+                             '(SELECT holiday_date FROM holidays WHERE holiday_id = ?)', [hid])
+                conn.execute('DELETE FROM holidays WHERE holiday_id = ?', [hid])
+    finally:
+        conn.close()
+
+
+def test_an_optional_holiday_opt_in_is_requested_and_approved_by_hr(client):
+    """FR-HOL-03: "Opt-in/opt-out for Optional holidays ... approval queue for HR"."""
+    _set_admin_session(client, 99780)
+    try:
+        holiday = _optional_holiday(client)
+        _create_policy_user(client, 'EMP960', role='Employee')
+        _login_as(client, 'EMP960', 'Employee', 99779)
+        requested = client.post(f'/api/holidays/{holiday[0]}/opt-in')
+        assert requested.status_code == 201, requested.get_json()
+        assert requested.get_json()['status'] == 'Pending'
+        optin_id = requested.get_json()['optin_id']
+
+        # The employee sees their own, and only their own.
+        mine = client.get('/api/holidays/opt-ins/mine').get_json()
+        assert [o['optin_id'] for o in mine] == [optin_id], mine
+        assert mine[0]['holiday'] == 'Probe Optional'
+        # The approval queue is not the employee's to read.
+        assert client.get('/api/holidays/opt-ins').status_code == 403
+
+        _login_as(client, 'EMP001', 'Admin', 99779)
+        queue = client.get('/api/holidays/opt-ins').get_json()
+        assert [o['optin_id'] for o in queue['optins']] == [optin_id], queue
+        assert queue['status'] == 'Pending'
+
+        approved = client.post(f'/api/holidays/opt-ins/{optin_id}/approve')
+        assert approved.status_code == 200, approved.get_json()
+        assert approved.get_json()['status'] == 'Approved'
+        # A settled request is not reviewable again — the conditional write and the
+        # guard agree, so a second reviewer gets a 409 rather than a silent overwrite.
+        again = client.post(f'/api/holidays/opt-ins/{optin_id}/approve')
+        assert again.status_code == 409, again.get_json()
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+
+
+def test_an_approved_opt_in_makes_the_optional_holiday_an_attendance_holiday(client):
+    """The reason this slice matters: FR-JOB-01 said `Weekly-off` where it meant `Holiday`.
+
+    `_is_attendance_holiday` counts an Optional holiday only for an employee with
+    an Approved opt-in. With no route to obtain one, the seeded Diwali produced a
+    wrong classification for every employee in the company.
+    """
+    from app import finalize_attendance_for_date
+
+    _set_admin_session(client, 99781)
+    try:
+        holiday = _optional_holiday(client)
+        _create_policy_user(client, 'EMP961', role='Employee')
+        _login_as(client, 'EMP961', 'Employee', 99780)
+        optin_id = client.post(f'/api/holidays/{holiday[0]}/opt-in').get_json()['optin_id']
+
+        # Before approval: not a holiday for this employee.
+        finalize_attendance_for_date(holiday[2], employee_ids=['EMP961'])
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT status FROM attendance_days WHERE emp_id = ? AND attendance_date = ?',
+                ['EMP961', holiday[2]],
+            ).fetchone()[0] != 'Holiday'
+        finally:
+            conn.close()
+
+        _login_as(client, 'EMP001', 'Admin', 99780)
+        assert client.post(f'/api/holidays/opt-ins/{optin_id}/approve').status_code == 200
+        finalize_attendance_for_date(holiday[2], employee_ids=['EMP961'])
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT status FROM attendance_days WHERE emp_id = ? AND attendance_date = ?',
+                ['EMP961', holiday[2]],
+            ).fetchone()[0] == 'Holiday'
+        finally:
+            conn.close()
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+
+
+def test_only_an_optional_holiday_can_be_opted_into(client):
+    """A National holiday is a holiday for everyone; an opt-in for one is a mistake."""
+    _set_admin_session(client, 99782)
+    try:
+        national = _national_holiday(client)
+        _login_as(client, 'EMP001', 'Admin', 99781)
+        refused = client.post(f'/api/holidays/{national[0]}/opt-in')
+        assert refused.status_code == 409, refused.get_json()
+        assert 'National' in str(refused.get_json()), refused.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM holiday_optins WHERE holiday_id = ?', [national[0]],
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_optin_rows('Probe National')
+
+
+def test_one_active_opt_in_per_employee_per_holiday(client):
+    """"one active opt-in per employee per holiday" — and Rejected is not active."""
+    _set_admin_session(client, 99783)
+    try:
+        holiday = _optional_holiday(client)
+        _create_policy_user(client, 'EMP962', role='Employee')
+        _login_as(client, 'EMP962', 'Employee', 99782)
+        first = client.post(f'/api/holidays/{holiday[0]}/opt-in')
+        assert first.status_code == 201
+        duplicate = client.post(f'/api/holidays/{holiday[0]}/opt-in')
+        assert duplicate.status_code == 409, duplicate.get_json()
+        assert 'already have' in str(duplicate.get_json()), duplicate.get_json()
+
+        # A rejected request does not block a new one: the employee can ask again.
+        _login_as(client, 'EMP001', 'Admin', 99782)
+        assert client.post(f'/api/holidays/opt-ins/{first.get_json()["optin_id"]}/reject'
+                           ).status_code == 200
+        _login_as(client, 'EMP962', 'Employee', 99781)
+        retried = client.post(f'/api/holidays/{holiday[0]}/opt-in')
+        assert retried.status_code == 201, retried.get_json()
+        assert retried.get_json()['optin_id'] != first.get_json()['optin_id']
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+
+
+def test_an_opt_in_can_be_withdrawn_and_a_settled_one_cannot(client):
+    _set_admin_session(client, 99784)
+    try:
+        holiday = _optional_holiday(client)
+        _create_policy_user(client, 'EMP963', role='Employee')
+        _login_as(client, 'EMP963', 'Employee', 99783)
+        optin_id = client.post(f'/api/holidays/{holiday[0]}/opt-in').get_json()['optin_id']
+        withdrawn = client.post(f'/api/holidays/opt-ins/{optin_id}/cancel')
+        assert withdrawn.status_code == 200, withdrawn.get_json()
+        assert withdrawn.get_json()['status'] == 'Cancelled'
+        again = client.post(f'/api/holidays/opt-ins/{optin_id}/cancel')
+        assert again.status_code == 409, again.get_json()
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+
+
+def test_only_the_owner_may_withdraw_an_opt_in(client):
+    _set_admin_session(client, 99785)
+    try:
+        holiday = _optional_holiday(client)
+        _create_policy_user(client, 'EMP964', role='Employee')
+        _create_policy_user(client, 'EMP965', role='Employee')
+        _login_as(client, 'EMP964', 'Employee', 99784)
+        optin_id = client.post(f'/api/holidays/{holiday[0]}/opt-in').get_json()['optin_id']
+        _login_as(client, 'EMP965', 'Employee', 99783)
+        refused = client.post(f'/api/holidays/opt-ins/{optin_id}/cancel')
+        assert refused.status_code == 403, refused.get_json()
+        assert 'your own' in str(refused.get_json()), refused.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT status FROM holiday_optins WHERE optin_id = ?', [optin_id],
+            ).fetchone()[0] == 'Pending', 'a refused withdrawal still changed the row'
+        finally:
+            conn.close()
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+        _cleanup_user_contract_rows('EMP964', 'EMP965')
+
+
+def test_a_past_holiday_cannot_be_opted_into(client):
+    """Its attendance is already finalised, and a rerun would rewrite a published record."""
+    _set_admin_session(client, 99786)
+    try:
+        assert client.post('/api/holidays', json={
+            'name': 'Probe Past', 'date': (date.today() - timedelta(days=1)).isoformat(),
+            'type': 'Optional',
+        }).status_code == 201
+        conn = get_db()
+        try:
+            hid = conn.execute(
+                "SELECT holiday_id FROM holidays WHERE name = 'Probe Past'").fetchone()[0]
+        finally:
+            conn.close()
+        refused = client.post(f'/api/holidays/{hid}/opt-in')
+        assert refused.status_code == 409, refused.get_json()
+        assert 'already passed' in str(refused.get_json()), refused.get_json()
+    finally:
+        _cleanup_optin_rows('Probe Past')
+
+
+def test_the_opt_in_queue_validates_its_status_filter(client):
+    _set_admin_session(client, 99787)
+    bad = client.get('/api/holidays/opt-ins?status=Nope')
+    assert bad.status_code == 400, bad.get_json()
+    assert 'Pending, Approved' in str(bad.get_json()), bad.get_json()
+    ok = client.get('/api/holidays/opt-ins?status=Rejected')
+    assert ok.status_code == 200, ok.get_json()
+    assert ok.get_json()['optins'] == [], ok.get_json()
+
+
+def test_holiday_optin_writes_are_idempotent(client):
+    """A retried request with the same key must not queue the same opt-in twice."""
+    _set_admin_session(client, 99788)
+    try:
+        holiday = _optional_holiday(client)
+        _login_as(client, 'EMP001', 'Admin', 99787)
+        headers = {'Idempotency-Key': 'optin-probe-key'}
+        first = client.post(f'/api/holidays/{holiday[0]}/opt-in', headers=headers)
+        second = client.post(f'/api/holidays/{holiday[0]}/opt-in', headers=headers)
+        assert first.status_code == 201, first.get_json()
+        assert second.status_code == first.status_code, second.get_json()
+        assert second.get_json() == first.get_json(), 'the replay created a second opt-in'
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM holiday_optins WHERE holiday_id = ?', [holiday[0]],
+            ).fetchone()[0] == 1
+        finally:
+            conn.close()
+    finally:
+        _cleanup_optin_rows('Probe Optional')
+
+
+def test_the_opt_in_rules_are_owned_by_the_module(client):
+    """The decision belongs to the module, not the route, so the queue and the
+    tests cannot get different answers."""
+    import holidays_optin
+
+    assert holidays_optin.STATUSES == ('Pending', 'Approved', 'Rejected', 'Cancelled')
+    # A Rejected row is not active, which is why the canonical partial unique index
+    # is written on Pending|Approved rather than on "not Cancelled".
+    assert holidays_optin.ACTIVE_STATUSES == frozenset({'Pending', 'Approved'})
+    assert holidays_optin.active_optin((1, 'Rejected')) is None
+    assert holidays_optin.active_optin((1, 'Pending')) == (1, 'Pending')
 
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 

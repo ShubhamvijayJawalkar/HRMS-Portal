@@ -40,6 +40,22 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-30", "FR-HOL-03 optional-holiday opt-ins: a defect rather than a feature. "
+     "holiday_optins existed in the canonical schema, init_db created it on the compatibility "
+     "shape, and nothing ever wrote to it. An Optional holiday is an attendance holiday only "
+     "for an employee with an Approved opt-in, no employee could ever obtain one, and the "
+     "nightly FR-JOB-01 finalisation recorded the seeded Diwali as Weekly-off and would have "
+     "said Absent on Christmas - an implemented High-priority requirement producing a wrong "
+     "answer. Employee requests, HR approves or rejects from a queue, the owner may withdraw. "
+     "The canonical schema also contradicted the requirement and itself: uq_optin was a plain "
+     "UNIQUE (emp_id, holiday_id), a constraint on one request ever rather than one active "
+     "request, which made opt-out irreversible, and it contradicted the partial "
+     "uq_active_offer_candidate four lines above it. Alembic 0006 replaces it with the partial "
+     "index. Also found a latent bare-VALUES insert in add_holiday (five placeholders against "
+     "v2.0's six-column table) - the same shape that made POST /api/goals return 500 forever - "
+     "and a latent VARCHAR(32) limit on alembic_version.version_num that fails at the version "
+     "stamp rather than at the migration. Matrix is now 54 IMPLEMENTED / 38 PARTIAL / 11 "
+     "NOT_STARTED / 1 RETIRED."),
     ("2026-09-30", "FR-LEA-05 leave cancellation: the SRS asks for one sentence and there was no "
      "cancel route at all, so a Pending leave request reserved days against the employee's balance "
      "and nothing could ever give them back - a request that changed its mind silently reduced "
@@ -268,9 +284,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "178 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "183 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "183 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "188 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "193 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "193 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

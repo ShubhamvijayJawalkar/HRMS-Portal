@@ -805,7 +805,12 @@ ALTER TABLE offer_letters ADD CONSTRAINT split_sums_100
 CREATE UNIQUE INDEX uq_active_offer_candidate
     ON offer_letters (candidate_id) WHERE status IN ('Pending', 'Accepted');
 
--- FR-HOL-03: one opt-in per employee/holiday
-ALTER TABLE holiday_optins ADD CONSTRAINT uq_optin UNIQUE (emp_id, holiday_id);
+-- FR-HOL-03: one *active* opt-in per employee/holiday.
+-- Partial, like uq_active_offer_candidate above and for the same reason: a
+-- withdrawn or rejected request must not stop the employee asking again, which
+-- is the whole point of "opt-in/opt-out". A plain UNIQUE (emp_id, holiday_id)
+-- would make one request per employee per holiday, forever.
+CREATE UNIQUE INDEX uq_holiday_optins_active
+    ON holiday_optins (emp_id, holiday_id) WHERE status IN ('Pending', 'Approved');
 
 COMMIT;
