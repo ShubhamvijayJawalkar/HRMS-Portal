@@ -96,7 +96,9 @@ def test_admin_sees_user_tab(page):
     page.wait_for_timeout(2000)
     tbody = page.locator('#usersTableBody')
     assert tbody.is_visible()
-    page.wait_for_timeout(1000)
+    # Wait for the rows rather than a fixed sleep: the table is filled by page JS,
+    # and this test flaked once on a slow CDN load with an empty #pageInfo.
+    tbody.locator('tr').first.wait_for(state='visible', timeout=15000)
     assert page.text_content('#pageInfo').startswith('Page')
 
 def test_employee_cannot_access_admin_users(page):

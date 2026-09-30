@@ -434,6 +434,15 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
         pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
         pc.execute("DELETE FROM goals WHERE title = 'public write probe'")
+        pc.execute("DELETE FROM performance_reviews WHERE review_period = 'public write probe'")
+        pc.execute("DELETE FROM feedback_360 WHERE comment = 'public write probe'")
+        # The `auth(reset-password)` flow below changes EMP002's password, so a
+        # second probe run against the same database would fail at login. Restoring
+        # the seeded hash keeps the probe idempotent across runs rather than only
+        # against a freshly created database.
+        from security import hash_password as _seed_hash
+        pc.execute("UPDATE users SET password = %s WHERE emp_id = 'EMP002'",
+                   [_seed_hash("pass123")])
         pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
         pc.execute("DELETE FROM ticket_comments WHERE comment = 'probe comment'")
@@ -649,6 +658,51 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             ).fetchone()
         return 200 if row == (4, "Completed") else 409
     run("goals(create -> rate)", goals_lifecycle)
+    # ── FR-PERF-02: only the assigned reviewer may sign a review ──────────────
+    # Appendix A-18 records this as a v1.0 gap: "Submit PUT … (auth any – no role
+    # check gap – record)". The route was `@login_required` with an id from the
+    # path, so any authenticated user could sign off anybody's performance review.
+    def review_signoff():
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            pc.execute("UPDATE users SET manager_emp_id = 'EMP001' WHERE emp_id = 'EMP002'")
+        # A self-review has nobody to sign it, so it cannot even be opened.
+        self_review = _post(cl_a, tok_a, "/api/performance-reviews",
+                            {"emp_id": "EMP002", "reviewer_id": "EMP002",
+                             "review_period": "public write probe"})
+        if self_review.status_code != 409:
+            return 409
+        opened = _post(cl_a, tok_a, "/api/performance-reviews",
+                       {"emp_id": "EMP002", "reviewer_id": "EMP001",
+                        "review_period": "public write probe"})
+        if opened.status_code != 201:
+            return opened.status_code
+        rid = (opened.get_json() or {}).get("id")
+        if not rid:
+            return 409
+        # Neither the subject nor an unrelated third party may sign it. The
+        # "admin who merely opened the cycle" case is covered by the unit test;
+        # here the opener and the reviewer are the same client, so conflating them
+        # would assert the opposite of what is meant.
+        for client, token in ((cl, tok), (cl_f, tok_f)):
+            if _put(client, token, f"/api/performance-reviews/{rid}/submit",
+                    {"rating": 5}).status_code != 403:
+                return 409
+        # The assigned reviewer can, and the signed review is then final.
+        if _put(cl_a, tok_a, f"/api/performance-reviews/{rid}/submit",
+                {"rating": 4}).status_code != 200:
+            return 409
+        if _put(cl_a, tok_a, f"/api/performance-reviews/{rid}/submit",
+                {"rating": 1}).status_code != 409:
+            return 409
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT overall_rating, status FROM performance_reviews WHERE review_id = %s",
+                [rid],
+            ).fetchone()
+        return 200 if row == (4, "Submitted") else 409
+    run("performance-reviews(reviewer signoff)", review_signoff)
+
+
 
     run("leave-accrual(monthly ledger)", leave_accrual)
 

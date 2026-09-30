@@ -52,6 +52,7 @@ import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08
 import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
+import reviews  # noqa: E402  # performance review + 360 feedback integrity (FR-PERF-02)
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
@@ -6243,13 +6244,33 @@ def reviews_api():
         conn.close()
         return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'reviewer_id': r[3], 'reviewer': r[4], 'period': r[5], 'rating': float(r[6]) if r[6] else None, 'comments': r[7], 'status': r[8], 'submitted_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
-    if not data.get('emp_id') or not data.get('reviewer_id') or not data.get('review_period'):
-        return jsonify({'error': 'emp_id, reviewer_id, review_period required'}), 400
     conn = get_db()
-    rid = _next_generated_id(conn, 'performance_reviews', 'review_id')
-    conn.execute("INSERT INTO performance_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [rid, data['emp_id'], data['reviewer_id'], data['review_period'], None, None, 'Draft', datetime.now(), None])
-    conn.close()
+    try:
+        # FR-PERF-02: HR opening a review is legitimate; HR opening one whose
+        # subject and reviewer are the same person is not, because a self-review
+        # has nobody to sign it. Both users must also exist, or a foreign key is
+        # the only thing that would notice.
+        try:
+            values = reviews.validate_assignment(
+                conn, data.get('emp_id'), data.get('reviewer_id'), data.get('review_period'),
+            )
+        except reviews.ReviewError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        rid = _next_generated_id(conn, 'performance_reviews', 'review_id')
+        conn.execute(
+            "INSERT INTO performance_reviews (review_id, emp_id, reviewer_id, review_period, "
+            "overall_rating, comments, status, created_at, submitted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [rid, values['emp_id'], values['reviewer_id'], values['review_period'],
+             None, None, 'Draft', datetime.now(), None],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'REVIEW_CREATE',
+        f'Opened review {rid} for {values["emp_id"]} (reviewer {values["reviewer_id"]})',
+        entity='performance_reviews', entity_id=rid, after=values,
+    )
     return jsonify({'message': 'Review created', 'id': rid}), 201
 
 
@@ -6257,12 +6278,65 @@ def reviews_api():
 @app.route('/api/performance-reviews/<int:rid>/submit', methods=['PUT'])
 @login_required
 def submit_review(rid):
+    """Submit a performance review (FR-PERF-02).
+
+    The requirement is "submit requires the reviewer to be the assigned reviewer
+    for that review", recorded in Appendix A-18 as a v1.0 gap that let any
+    authenticated user submit any review. This route was `@login_required` with an
+    id from the path, so the gap was still open.
+
+    `reviews.check_submit` is deliberately strict: HR and Admin get no bypass,
+    because a review signed by somebody who did not write it is exactly what the
+    requirement exists to prevent. The write is also conditional on Draft, so a
+    submitted review is final and cannot be quietly rewritten.
+    """
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    conn.execute("UPDATE performance_reviews SET overall_rating = ?, comments = ?, status = 'Submitted', submitted_at = ? WHERE review_id = ?",
-                 [data.get('rating'), data.get('comments'), datetime.now(), rid])
-    conn.close()
-    return jsonify({'message': 'Review submitted'}), 200
+    try:
+        actor = _lifecycle_actor(conn)
+        review = conn.execute(
+            'SELECT emp_id, reviewer_id, status, overall_rating, comments '
+            'FROM performance_reviews WHERE review_id = ?', [rid],
+        ).fetchone()
+        if not review:
+            return jsonify({'error': 'Review not found'}), 404
+        try:
+            reviews.check_submit(actor, review)
+            rating = reviews.validate_rating(data.get('rating'), 'overall_rating')
+            comments = str(data.get('comments') or '').strip() or None
+            if comments and len(comments) > reviews.MAX_COMMENTS:
+                raise reviews.ReviewError(
+                    f'comments must be {reviews.MAX_COMMENTS} characters or fewer')
+        except reviews.ReviewError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        if review[2] != 'Draft':
+            return jsonify({
+                'error': f'This review is already {review[2]} and is final',
+                'status': review[2],
+            }), 409
+        result = conn.execute(
+            "UPDATE performance_reviews SET overall_rating = ?, comments = ?, "
+            "status = 'Submitted', submitted_at = ? WHERE review_id = ? AND status = 'Draft'",
+            [rating, comments, datetime.now(), rid],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'The review changed while you were writing it; reload and retry'}), 409
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'REVIEW_SUBMIT',
+        f'Reviewer submitted review {rid} for {review[0]} with {rating}',
+        entity='performance_reviews', entity_id=rid,
+        before={'status': 'Draft', 'overall_rating': review[3], 'comments': review[4]},
+        after={'status': 'Submitted', 'overall_rating': rating, 'comments': comments},
+    )
+    add_notification(
+        review[0], 'REVIEW_SUBMITTED',
+        f'Your performance review ({rid}) has been submitted.', '/goals', 'Performance',
+    )
+    return jsonify({
+        'message': 'Review submitted', 'status': 'Submitted', 'overall_rating': rating,
+    }), 200
 
 
 # ── 360 Feedback ──────────────────────────────────────────────────
@@ -6283,11 +6357,32 @@ def feedback_api():
     if not data.get('emp_id') or not data.get('rating'):
         return jsonify({'error': 'emp_id and rating required'}), 400
     conn = get_db()
-    fid = _next_generated_id(conn, 'feedback_360', 'feedback_id')
-    conn.execute("INSERT INTO feedback_360 VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [fid, data['emp_id'], session['emp_id'], data.get('category'), data['rating'], data.get('comment'), datetime.now()])
-    conn.close()
-    return jsonify({'message': 'Feedback submitted'}), 201
+    try:
+        # FR-PERF-02: "360° feedback: reviewer cannot be the subject". The reviewer
+        # is the session user, so rating yourself five stars used to be possible.
+        try:
+            values = reviews.validate_feedback(
+                conn, _lifecycle_actor(conn), data.get('emp_id'),
+                data.get('rating'), data.get('category'), data.get('comment'),
+            )
+        except reviews.ReviewError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        fid = _next_generated_id(conn, 'feedback_360', 'feedback_id')
+        conn.execute(
+            "INSERT INTO feedback_360 (feedback_id, emp_id, reviewer_id, category, rating, "
+            "comment, submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [fid, values['emp_id'], values['reviewer_id'], values['category'],
+             values['rating'], values['comment'], datetime.now()],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'FEEDBACK_360',
+        f'Gave 360 feedback {fid} to {values["emp_id"]}',
+        entity='feedback_360', entity_id=fid,
+        after={'rating': values['rating'], 'category': values['category']},
+    )
+    return jsonify({'message': 'Feedback submitted', 'id': fid}), 201
 
 
 # ══════════════════════════════════════════════════════════════════════

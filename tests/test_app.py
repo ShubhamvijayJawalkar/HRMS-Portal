@@ -2413,6 +2413,211 @@ def test_rating_a_goal_is_audited_and_notifies_the_owner(client):
     finally:
         _cleanup_goal_rows('EMP920', 'EMP921')
 
+
+# ── FR-PERF-02 review integrity: the Appendix A-18 gap, and 360 ───────────
+
+def _seed_review_users(client):
+    _create_policy_user(client, 'EMP930', role='Employee')
+    _create_policy_user(client, 'EMP931', role='Team Leader')
+    conn = get_db()
+    try:
+        conn.execute("UPDATE users SET manager_emp_id = 'EMP001' WHERE emp_id = 'EMP930'")
+        conn.execute("UPDATE users SET manager_emp_id = 'EMP930' WHERE emp_id = 'EMP931'")
+    finally:
+        conn.close()
+
+
+def _open_review(client, subject='EMP930', reviewer='EMP931', period='2026-H1'):
+    response = client.post('/api/performance-reviews', json={
+        'emp_id': subject, 'reviewer_id': reviewer, 'review_period': period,
+    })
+    assert response.status_code == 201, response.get_json()
+    return response.get_json()['id']
+
+
+def _review_row(review_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT emp_id, reviewer_id, overall_rating, status, comments '
+            'FROM performance_reviews WHERE review_id = ?', [review_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_review_rows(*emp_ids):
+    conn = get_db()
+    try:
+        for emp_id in emp_ids:
+            conn.execute('DELETE FROM feedback_360 WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM feedback_360 WHERE reviewer_id = ?', [emp_id])
+            conn.execute('DELETE FROM notifications WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM performance_reviews WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM performance_reviews WHERE reviewer_id = ?', [emp_id])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?', [emp_id])
+            conn.execute('DELETE FROM users WHERE emp_id = ?', [emp_id])
+    finally:
+        conn.close()
+
+
+def test_a_review_cannot_be_its_own_reviewer(client):
+    """A self-review has nobody to sign it, and the submit rule depends on that."""
+    _set_admin_session(client, 99810)
+    try:
+        _seed_review_users(client)
+        self_review = client.post('/api/performance-reviews', json={
+            'emp_id': 'EMP930', 'reviewer_id': 'EMP930', 'review_period': '2026-H1',
+        })
+        assert self_review.status_code == 409, self_review.get_json()
+        assert 'self-review' in str(self_review.get_json()), self_review.get_json()
+        # A reviewer who does not exist is a 404, not a foreign-key error later.
+        assert client.post('/api/performance-reviews', json={
+            'emp_id': 'EMP930', 'reviewer_id': 'EMP9999', 'review_period': '2026-H1',
+        }).status_code == 404
+        assert client.post('/api/performance-reviews', json={
+            'emp_id': 'EMP930', 'review_period': '2026-H1',
+        }).status_code == 400
+        conn = get_db()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM performance_reviews WHERE review_period = '2026-H1'"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_review_rows('EMP930', 'EMP931')
+
+
+def test_only_the_assigned_reviewer_may_submit_a_review(client):
+    """Appendix A-18: v1.0 let any authenticated user submit any review."""
+    _set_admin_session(client, 99811)
+    try:
+        _seed_review_users(client)
+        review_id = _open_review(client)
+        # The subject cannot sign off their own review.
+        _login_as(client, 'EMP930', 'Employee', 99810)
+        subject = client.put(f'/api/performance-reviews/{review_id}/submit',
+                             json={'rating': 5, 'comments': 'excellent'})
+        assert subject.status_code == 403, subject.get_json()
+        assert _review_row(review_id)[3] == 'Draft'
+
+        # Neither can an admin, even though an admin opened the cycle: a review
+        # signed by somebody who did not write it is the thing the rule prevents.
+        _login_as(client, 'EMP001', 'Admin', 99809)
+        admin = client.put(f'/api/performance-reviews/{review_id}/submit',
+                           json={'rating': 5, 'comments': 'from the top'})
+        assert admin.status_code == 403, admin.get_json()
+        assert 'assigned to this review' in str(admin.get_json()), admin.get_json()
+
+        # The assigned reviewer can.
+        _login_as(client, 'EMP931', 'Team Leader', 99808)
+        ok = client.put(f'/api/performance-reviews/{review_id}/submit',
+                        json={'rating': 4.5, 'comments': 'solid quarter'})
+        assert ok.status_code == 200, ok.get_json()
+        assert ok.get_json() == {
+            'message': 'Review submitted', 'status': 'Submitted', 'overall_rating': 4.5,
+        }
+        row = _review_row(review_id)
+        assert row[2] == 4.5 and row[3] == 'Submitted' and row[4] == 'solid quarter', row
+    finally:
+        _cleanup_review_rows('EMP930', 'EMP931')
+
+
+def test_a_submitted_review_is_final(client):
+    """The write was unconditional, so a 5/5 could be replaced with a 1/1."""
+    _set_admin_session(client, 99812)
+    try:
+        _seed_review_users(client)
+        review_id = _open_review(client)
+        _login_as(client, 'EMP931', 'Team Leader', 99811)
+        assert client.put(f'/api/performance-reviews/{review_id}/submit',
+                          json={'rating': 5, 'comments': 'outstanding'}).status_code == 200
+        again = client.put(f'/api/performance-reviews/{review_id}/submit',
+                           json={'rating': 1, 'comments': 'retracted'})
+        assert again.status_code == 409, again.get_json()
+        assert 'final' in str(again.get_json()), again.get_json()
+        row = _review_row(review_id)
+        assert row[2] == 5 and row[4] == 'outstanding', 'the signed review was rewritten'
+    finally:
+        _cleanup_review_rows('EMP930', 'EMP931')
+
+
+def test_review_submission_validates_its_rating_and_audits(client):
+    _set_admin_session(client, 99813)
+    try:
+        _seed_review_users(client)
+        review_id = _open_review(client)
+        _login_as(client, 'EMP931', 'Team Leader', 99812)
+        for bad in (0, 6, 'excellent', None):
+            refused = client.put(f'/api/performance-reviews/{review_id}/submit',
+                                 json={'rating': bad})
+            assert refused.status_code == 400, (bad, refused.get_json())
+        assert _review_row(review_id)[3] == 'Draft', 'a rejected rating still wrote the row'
+
+        assert client.put(f'/api/performance-reviews/{review_id}/submit',
+                          json={'rating': 3}).status_code == 200
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT \"before\", \"after\" FROM audit_log WHERE action = 'REVIEW_SUBMIT' "
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(review_id)],
+            ).fetchone()
+            notified = conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE emp_id = 'EMP930' "
+                "AND type = 'REVIEW_SUBMITTED'").fetchone()[0]
+        finally:
+            conn.close()
+        assert row is not None, 'the submission was not audited'
+        assert json.loads(row[0]) == {'status': 'Draft', 'overall_rating': None, 'comments': None}
+        assert json.loads(row[1])['status'] == 'Submitted'
+        assert json.loads(row[1])['overall_rating'] == 3
+        assert notified == 1, 'the subject was not told'
+    finally:
+        _cleanup_review_rows('EMP930', 'EMP931')
+
+
+def test_a_reviewer_cannot_give_themselves_360_feedback(client):
+    """FR-PERF-02's second sentence, unenforced: you could rate yourself 5 stars."""
+    _set_admin_session(client, 99814)
+    try:
+        _seed_review_users(client)
+        _login_as(client, 'EMP930', 'Employee', 99813)
+        self_feedback = client.post('/api/feedback-360', json={
+            'emp_id': 'EMP930', 'rating': 5, 'comment': 'I am excellent',
+        })
+        assert self_feedback.status_code == 403, self_feedback.get_json()
+        assert 'yourself' in str(self_feedback.get_json()), self_feedback.get_json()
+
+        # About somebody else, it works, and the reviewer is the session user.
+        given = client.post('/api/feedback-360', json={
+            'emp_id': 'EMP931', 'rating': 4, 'category': 'Collaboration',
+            'comment': 'pairs well',
+        })
+        assert given.status_code == 201, given.get_json()
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT emp_id, reviewer_id, rating, category FROM feedback_360 '
+                'WHERE feedback_id = ?', [given.get_json()['id']],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == ('EMP931', 'EMP930', 4, 'Collaboration'), row
+
+        # And the categories are a fixed set, not free text.
+        assert client.post('/api/feedback-360', json={
+            'emp_id': 'EMP931', 'rating': 4, 'category': 'Vibes',
+        }).status_code == 400
+        assert client.post('/api/feedback-360', json={
+            'emp_id': 'EMP931', 'rating': 99,
+        }).status_code == 400
+        assert client.post('/api/feedback-360', json={
+            'emp_id': 'EMP9999', 'rating': 4,
+        }).status_code == 404
+    finally:
+        _cleanup_review_rows('EMP930', 'EMP931')
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):

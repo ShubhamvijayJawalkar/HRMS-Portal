@@ -958,6 +958,41 @@ new `goals(create -> rate)` flow), and the CC-01 checker plus the read-only
 preflight both pass on that database. The matrix is now **50 IMPLEMENTED /
 42 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
 
+### 14.14 Review integrity: closing the Appendix A-18 gap (implemented)
+
+The SRS has two sentences for FR-PERF-02 and neither was enforced: "submit
+requires the reviewer to be the assigned reviewer for that review (v1.0 allowed
+any authenticated user to submit any review — Appendix A-18)" and "360° feedback:
+reviewer cannot be the subject". Reading the handler found four live defects:
+`submit_review` had no reviewer check at all; a self-review could be opened
+because both `emp_id` and `reviewer_id` came from the body unexamined; a signed
+review could be reopened and rewritten because the write was unconditional; and
+anyone could rate themselves five stars.
+
+`reviews.py` now owns the rules. One decision is worth stating plainly:
+`check_submit` gives **HR and Admin no bypass** — only the assigned reviewer may
+sign. The SRS wording is unambiguous, and an HR override would reintroduce
+precisely what the rule prevents: a review signed by somebody who did not write
+it. If HR needs to correct a review, a new cycle is the honest route, and that is
+a deliberate product decision rather than something to add casually.
+
+A self-review is refused at creation, because a review whose subject is also its
+reviewer has nobody to sign it — which is what gives the submit rule its meaning.
+Both employees must exist, the rating is bounded 1–5, `Submitted` is terminal with
+a conditional `UPDATE ... WHERE status = 'Draft'`, and the before/after is audited
+and the subject notified. 360° feedback refuses self-feedback and takes a fixed
+category set.
+
+The probe is also idempotent across runs now: its `auth(reset-password)` flow used
+to change EMP002's password permanently, so a second run on the same database
+failed at login. That was only visible because I ran the probe twice.
+
+Validation: **165 DuckDB unit tests passed / 6 skipped**, **170 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 47/47 write**, and
+the CC-01 checker plus the read-only preflight both pass on that database. The
+matrix is now **51 IMPLEMENTED / 41 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

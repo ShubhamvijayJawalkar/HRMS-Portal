@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 50 | 48% |
-| `PARTIAL` | 42 | 40% |
+| `IMPLEMENTED` | 51 | 49% |
+| `PARTIAL` | 41 | 39% |
 | `NOT_STARTED` | 11 | 11% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (50)
+### IMPLEMENTED (51)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -73,6 +73,7 @@ rather than quietly invalidating this document.
 | `FR-ONB-05` | H | C | `/api/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete` | Advancement is guard-based; HR only confirms the physical/logistics steps. |
 | `FR-ONB-06` | L | C | `/api/onboarding-workflows` | Own workflow, or the HR/Admin list with days-in-step. |
 | `FR-PERF-01` | M | R | `/api/goals`<br>`/api/goals/<int:gid>`<br>`/api/goals/<int:gid>/rate` | CRUD plus a 1-5 rating that transitions the goal to Completed, all in goals.py. POST /api/goals had never worked (a bare VALUES with ten placeholders against a nine-column table, so every create was a 500) and now uses an explicit column list and takes emp_id from the session. PUT /api/goals/<id> was @login_required with no ownership check, so any authenticated user could rewrite any goal by guessing a sequential id; it is now owner/manager/HR and cannot set status or rating, which is how the rating flow used to be skipped. Rating is by the reporting manager or HR/Admin and never the owner (the SRS calls that out), through a new reporting-line gate because @admin_required excluded the role the requirement names. Completed is terminal and the write is conditional. |
+| `FR-PERF-02` | M | R | `/api/performance-reviews`<br>`/api/performance-reviews/<int:rid>/submit`<br>`/api/feedback-360` | reviews.py. Cycle create/list stays HR/Admin-gated; a self-review is refused at creation (409) because a review whose subject is also its reviewer has nobody to sign it, and both employees must exist. Submit requires the assigned reviewer and nothing else - HR and Admin get no bypass, deliberately, because the rule exists to stop a review being signed by somebody who did not write it (Appendix A-18). The rating is bounded 1-5, the write is conditional on Draft so a signed review is final, and the before/after is audited and the subject notified. 360° feedback refuses self-feedback and takes a fixed category set. |
 | `FR-REG-03` | H | C | `/api/regularization/<int:rid>/approve` | Approval writes the corrected time and triggers the FR-JOB-01 recompute for that day. |
 | `FR-TKT-03` | M | C | `/api/tickets/<int:tid>`<br>`/api/tickets/<int:tid>/comment` | The detail view re-checks visibility server-side rather than trusting the list query, and comments bump updated_at. |
 | `FR-USR-01` | M | R | `/api/users` | page/per_page parsed as ints, per_page capped at 200, sort on an allow-list; invalid input is 400, never a silent default. |
@@ -85,7 +86,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (42)
+### PARTIAL (41)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -117,7 +118,6 @@ rather than quietly invalidating this document.
 | `FR-LEA-05` | M | C | `/api/leaves/<int:leave_id>/reject` | Reject is conditional and releases the reservation. Cancel is not implemented at all — there is no cancel route. |
 | `FR-NOT-01` | M | C | `/api/notifications` | Last-50 list with an unread count. Delivery is a direct SMTP call on the request thread rather than an outbox enqueue, so a slow provider can block the request that triggered it. |
 | `FR-ONB-04` | H | C | `/api/preboarding/<token>/documents/<doc_type>`<br>`/api/onboarding-checklist/<int:item_id>/review` | Upload, review, and mandatory rejection notes all ship. The shared pipeline only checks the file extension (FR-DOC-02 is partial). |
-| `FR-PERF-02` | M | R | `/api/performance-reviews`<br>`/api/performance-reviews/<int:rid>/submit` | Cycle create/list is HR/Admin-gated. The submit path does not require the submitter to be the assigned reviewer, so any user who can reach it can submit somebody else's review, and the write is unconditional. |
 | `FR-REG-01` | M | R | `/api/regularization` | Filters and the company-wide/self split ship, the split decided by policy.can_view_all. Delegated reports are not included. |
 | `FR-REG-02` | M | C | `/api/regularization` | Corrected times are captured and future dates are refused. The "a specific corrected time is required" rule is not enforced: a reason-only request is accepted. |
 | `FR-RPT-01` | M | C | `/api/reports` | The self-service view substitutes the caller scope. It ignores a supplied department only in some paths; the admin/HR view is gated by the policy. |

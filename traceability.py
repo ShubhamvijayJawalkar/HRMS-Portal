@@ -319,10 +319,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'HR/Admin and never the owner (the SRS calls that out), through a new '
                    'reporting-line gate because @admin_required excluded the role the '
                    'requirement names. Completed is terminal and the write is conditional.'),
-    'FR-PERF-02': ('M', 'R', 'PARTIAL', ('/api/performance-reviews', '/api/performance-reviews/<int:rid>/submit'),
-                   'Cycle create/list is HR/Admin-gated. The submit path does not require '
-                   'the submitter to be the assigned reviewer, so any user who can reach it '
-                   'can submit somebody else\'s review, and the write is unconditional.'),
+    'FR-PERF-02': ('M', 'R', 'IMPLEMENTED', ('/api/performance-reviews',
+                                             '/api/performance-reviews/<int:rid>/submit',
+                                             '/api/feedback-360'),
+                   'reviews.py. Cycle create/list stays HR/Admin-gated; a self-review is '
+                   'refused at creation (409) because a review whose subject is also its '
+                   'reviewer has nobody to sign it, and both employees must exist. Submit '
+                   'requires the assigned reviewer and nothing else - HR and Admin get no '
+                   'bypass, deliberately, because the rule exists to stop a review being '
+                   'signed by somebody who did not write it (Appendix A-18). The rating is '
+                   'bounded 1-5, the write is conditional on Draft so a signed review is '
+                   'final, and the before/after is audited and the subject notified. 360° '
+                   'feedback refuses self-feedback and takes a fixed category set.'),
 
     # ── FR-EXP: expenses ────────────────────────────────────────────────
     'FR-EXP-01': ('M', 'R', 'PARTIAL', ('/api/expense-categories',),

@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 160 on DuckDB, 165 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 165 on DuckDB, 170 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (160 on DuckDB, 165 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (165 on DuckDB, 170 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -911,6 +911,52 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - DuckDB is 160 passed / 6 skipped; PostgreSQL 165 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends; probe 97/97 GET + **46/46** write,
   with CC-01 and the preflight green.
+
+## FR-PERF-02 review integrity: closing the Appendix A-18 gap (`reviews.py`)
+- The SRS has two sentences for this requirement and neither was enforced:
+  *"submit requires the reviewer to be the assigned reviewer for that review (v1.0
+  allowed any authenticated user to submit any review — Appendix A-18)"* and
+  *"360° feedback: reviewer cannot be the subject"*. Reading the handler found
+  four live defects:
+  - **`submit_review` had no reviewer check at all** — `@login_required` and an id
+    from the path, so any authenticated user could sign off anybody's performance
+    review. Appendix A-18 records this as a known gap; it was still open.
+  - **A self-review could be opened.** `emp_id` and `reviewer_id` both came from
+    the body with no relationship check, so HR could open a review whose subject
+    and reviewer were the same person — who could then sign it themselves.
+  - **A signed review could be reopened and rewritten.** The write was
+    unconditional, so a 5/5 and an honest comment could be replaced with a 1/1
+    and "retracted" after the fact, with no audit row of either version.
+  - **360° feedback had no self-feedback guard**, so anyone could rate themselves
+    five stars.
+- **One deliberate decision, recorded in the module.** `reviews.check_submit`
+  gives **HR and Admin no bypass**: only the assigned reviewer may sign. The SRS
+  wording is unambiguous and an HR override would reintroduce exactly what the
+  rule prevents — a review signed by somebody who did not write it. If HR needs to
+  correct a review, the honest route is a new cycle, and that is a deliberate
+  feature decision rather than something to add casually later.
+- Also: a self-review is refused at creation (a review with the subject as
+  reviewer has nobody to sign it, which is what makes the submit rule mean
+  anything), both employees must exist, the rating is bounded 1–5, `Submitted` is
+  terminal with a conditional `UPDATE ... WHERE status = 'Draft'`, and the
+  before/after is audited and the subject notified. 360° feedback takes a fixed
+  category set instead of free text.
+- 6 new unit tests and a probe flow
+  (`performance-reviews(reviewer signoff)`) that refuses the self-review, refuses
+  two non-reviewer clients, signs as the reviewer, then confirms the signed review
+  is final — **47/47 write flows** on the clean v2.0 target.
+- **The probe is now idempotent across runs.** Its `auth(reset-password)` flow
+  permanently changed EMP002's password, so a second run against the same
+  database failed at login. Only visible because I ran the probe twice while
+  fixing my own flow; the cleanup now restores the seeded hash.
+- The matrix moves FR-PERF-02 to `IMPLEMENTED`
+  (**51 IMPLEMENTED / 41 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- One browser flake recorded rather than hidden: `test_admin_sees_user_tab` failed
+  once on an empty `#pageInfo` after a slow CDN load and passed on both re-runs.
+  It waited a fixed 1 s for JS-filled content; it now waits for the first row.
+- DuckDB is 165 passed / 6 skipped; PostgreSQL 170 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + 47/47 write, with
+  CC-01 and the preflight green.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
