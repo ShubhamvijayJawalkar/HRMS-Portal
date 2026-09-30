@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 152 on DuckDB, 157 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 160 on DuckDB, 165 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (152 on DuckDB, 157 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (160 on DuckDB, 165 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -749,6 +749,11 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   three defects (an admin could approve their own claim, a claim could jump
   `Pending -> Paid`, a paid claim could be moved back to `Pending`) plus the CC-10
   impersonation hole on the create route. See the FR-EXP-03 section.
+- **It has now paid for itself twice more, and the second time it was the worst
+  defect found so far: `POST /api/goals` had never worked at all** — a bare
+  `INSERT INTO goals VALUES (...)` with ten placeholders against a nine-column
+  table, so every goal creation returned 500 on every backend. The seed used an
+  explicit column list, which is why the seed worked. See the FR-PERF-01 section.
 - **And it caught the matrix being wrong about itself.** This slice claimed
   FR-DOC-02 "validates the extension, not the content — a renamed .exe passes".
   It does not: `upload_document` reads the first bytes and requires the magic
@@ -859,6 +864,53 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - DuckDB is 152 passed / 6 skipped; PostgreSQL 157 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends; probe 97/97 GET + 45/45 write, with
   CC-01 and the preflight green.
+
+## FR-PERF-01 goals: the feature was broken and the writes were open (`goals.py`)
+- **Reading `goals_api` off the matrix found the worst defect of the whole
+  traceability effort: `POST /api/goals` had never worked, not once, on any
+  backend.** The insert was a bare `INSERT INTO goals VALUES (?, ?, ...)` with
+  **ten placeholders against a nine-column table**, so every create returned 500.
+  The boot seed used an explicit column list — which is exactly why the seed
+  worked and the create path did not, and why nobody noticed. No test created a
+  goal (the three that touched `/api/goals` were all GETs) and the public-flip
+  probe had no goals write flow. An employee could not set a goal.
+- **The update was open to anyone.** `PUT /api/goals/<id>` was `@login_required`
+  with an id from the path and **no ownership check at all**, so any authenticated
+  user could rewrite any goal in the company by guessing a sequential integer. The
+  *list* was already correctly scoped, which made the hole invisible from the UI.
+  It could also set `status`, which was a way to skip rating entirely.
+- **The rating enforced neither half of the SRS rule.** FR-PERF-01 says "rating
+  1-5 by manager (not self)"; the route had no manager check and no self-rating
+  block. It was `@admin_required`, so an employee could not reach it — but an
+  admin could rate their own goal, and a Team Leader who actually manages people
+  could not rate their reports' goals.
+- **The gate was the other half of the bug, the same shape as the expense one.**
+  `@admin_required` excluded the role the requirement names, so a new
+  `reporting_line_required` gate admits an administrator, HR, or anyone who
+  manages at least one employee. The gate is coarse on purpose: *which* report,
+  and whether the actor is the owner, is decided by `goals.check_rating`, which
+  re-reads the actor from the database.
+- `goals.py` owns the rules: `EDITABLE_FIELDS` deliberately **excludes `status`
+  and `rating`** (they are the rating flow's, and an edit that tries gets a 400
+  naming the route rather than a silent ignore); `check_edit` allows
+  owner/manager/HR; `check_rating` allows the owner's manager or HR/Admin and
+  **refuses the owner**, which is the half the SRS calls out; `Completed` is
+  terminal and the write is `UPDATE ... WHERE status = 'Active'`, so two raters
+  give one winner and one 409. The create takes `emp_id` from the session (CC-10),
+  validates the payload (CC-12: no unknown keys, weight 1-10, a real date) and
+  audits.
+- 8 new unit tests, including one whose only job is to fail if `POST /api/goals`
+  ever breaks again, and the public-flip probe gained a
+  `goals(create -> rate)` flow that creates, checks both guards refuse, has the
+  manager rate, and reads the canonical table back.
+- The matrix moves FR-PERF-01 to `IMPLEMENTED`
+  (**50 IMPLEMENTED / 42 PARTIAL / 11 NOT_STARTED / 1 RETIRED**) and sharpens
+  FR-PERF-02, which has the same open-write shape: `submit_review` does not
+  require the submitter to be the assigned reviewer, and its write is
+  unconditional. That is the obvious next slice.
+- DuckDB is 160 passed / 6 skipped; PostgreSQL 165 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + **46/46** write,
+  with CC-01 and the preflight green.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

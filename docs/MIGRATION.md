@@ -921,6 +921,43 @@ DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 45/45 write**, an
 the CC-01 checker plus the read-only preflight both pass on that database. The
 matrix is now **49 IMPLEMENTED / 43 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
 
+### 14.13 Goals: a feature that never worked, and an open write (implemented)
+
+Reading `goals_api` off the traceability matrix found the worst defect the
+exercise has surfaced: `POST /api/goals` had never worked, not once, on any
+backend. The insert was a bare `INSERT INTO goals VALUES (?, ?, ...)` with ten
+placeholders against a nine-column table, so every creation returned 500. The
+boot seed used an explicit column list — which is exactly why the seed worked and
+the create path did not, and why nobody noticed. No test created a goal and the
+probe had no goals write flow, so an employee could not set a goal at all.
+
+The update was worse in kind rather than in degree: `PUT /api/goals/<id>` was
+`@login_required` with an id from the path and no ownership check, so any
+authenticated user could rewrite any goal in the company by guessing a sequential
+integer — and could set `status`, which was a way to skip rating entirely. The
+list was already correctly scoped, which is what made the hole invisible from the
+UI.
+
+The rating enforced neither half of the FR-PERF-01 rule ("rating 1-5 by manager,
+not self"). As with the expense gate, the route gate was the other half of the
+bug: `@admin_required` excluded the reporting manager the requirement names, so a
+Team Leader could not rate their reports' goals, while an admin could rate their
+own. `reporting_line_required` admits an administrator, HR, or anyone who manages
+at least one employee, and `goals.check_rating` then decides *which* report and
+refuses the owner.
+
+`goals.py` owns the rules: `EDITABLE_FIELDS` excludes `status` and `rating` (an
+edit that tries gets a 400 naming the rating route rather than a silent ignore),
+the create takes `emp_id` from the session (CC-10) and validates the payload
+(CC-12), and the rating is a conditional `UPDATE ... WHERE status = 'Active'`.
+
+Validation: **160 DuckDB unit tests passed / 6 skipped**, **165 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 46/46 write** (the
+new `goals(create -> rate)` flow), and the CC-01 checker plus the read-only
+preflight both pass on that database. The matrix is now **50 IMPLEMENTED /
+42 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

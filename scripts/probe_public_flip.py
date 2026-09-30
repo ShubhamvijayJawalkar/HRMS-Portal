@@ -433,6 +433,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         upload_paths = _cleanup_lifecycle_probe_residue(pc)
         pc.execute("DELETE FROM regularization_requests WHERE reason = 'public write probe'")
         pc.execute("DELETE FROM leave_requests WHERE reason IN ('public write probe', 'idempotency probe')")
+        pc.execute("DELETE FROM goals WHERE title = 'public write probe'")
         pc.execute("DELETE FROM break_approvals WHERE reason = 'public write probe'")
         pc.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002' AND status = 'Active'")
         pc.execute("DELETE FROM ticket_comments WHERE comment = 'probe comment'")
@@ -616,6 +617,39 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         ok = (posted == expected and all(r[1] > 0 and r[2] is None for r in rows)
               and derived is not None and int(derived) == sum(r[1] for r in rows))
         return 200 if ok else 409
+    # ── FR-PERF-01: goals, end to end on the v2.0 identity key ───────────────
+    # `POST /api/goals` used to be a bare `INSERT INTO goals VALUES (...)` with
+    # ten placeholders against a nine-column table, so it returned 500 on every
+    # backend and no probe flow covered it. This one creates a goal as EMP002,
+    # has their manager rate it, and reads the ledger back.
+    def goals_lifecycle():
+        # `cl` is EMP002, the goal's owner, so they are who legitimately edits it.
+        created = _post(cl, tok, "/api/goals",
+                        {"title": "public write probe", "weight": 3})
+        if created.status_code != 201:
+            return created.status_code
+        gid = (created.get_json() or {}).get("id")
+        if not gid:
+            return 409
+        # An edit may not smuggle the status past the rating flow, not even by the
+        # owner, and the body may not name somebody else (CC-10).
+        for payload in ({"status": "Completed"}, {"emp_id": "EMP001", "title": "x"}):
+            blocked = _put(cl, tok, f"/api/goals/{gid}", payload)
+            if blocked.status_code != 400:
+                return 409
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            pc.execute(
+                "UPDATE users SET manager_emp_id = 'EMP001' WHERE emp_id = 'EMP002'")
+        rated = _put(cl_a, tok_a, f"/api/goals/{gid}/rate", {"rating": 4})
+        if rated.status_code != 200:
+            return rated.status_code
+        with psycopg.connect(pg_dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT rating, status FROM goals WHERE goal_id = %s", [gid],
+            ).fetchone()
+        return 200 if row == (4, "Completed") else 409
+    run("goals(create -> rate)", goals_lifecycle)
+
     run("leave-accrual(monthly ledger)", leave_accrual)
 
     # ── FR-JOB-01: nightly finalisation against the v2.0 identity key and

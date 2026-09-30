@@ -45,6 +45,7 @@ load_dotenv()
 
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
+import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
@@ -2462,6 +2463,54 @@ def _manages_any_employee(conn, manager_emp_id):
         ).fetchone())
     except Exception:
         return False
+
+
+def reporting_line_required(f):
+    """Gate for an action the SRS assigns to a *manager* rather than a role.
+
+    FR-PERF-01 says a goal is "rated 1-5 by manager (not self)", but the rating
+    route was `@admin_required`, so a Team Leader who actually manages people
+    could not rate their reports' goals — the requirement was unreachable for the
+    role it names, the same way `Approved -> Paid` was unreachable for Finance
+    before the expense gate.
+
+    The gate is deliberately coarse: it admits an administrator, HR, or anyone who
+    manages at least one employee. Which report, and whether the actor is the
+    owner, is decided by `goals.check_rating`, which re-reads the actor from the
+    database. The `performance` module still applies, so an explicit override can
+    revoke it.
+    """
+    def denial():
+        if request.is_json:
+            return jsonify({'error': 'Forbidden'}), 403
+        return redirect(url_for('dashboard'))
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if 'emp_id' not in session or not _session_user_active():
+            session.clear()
+            if request.is_json:
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('login'))
+        conn = get_db()
+        try:
+            actor = policy.current_actor(conn)
+            role = str(actor.get('role') or '')
+            on_the_line = (
+                role in policy.ADMIN_ROLES
+                or role == 'HR'
+                or actor.get('department') == 'HR'
+                or _manages_any_employee(conn, actor.get('emp_id'))
+            )
+            if not on_the_line:
+                return denial()
+            # The matrix may revoke, never grant — the same invariant as `_gated`.
+            if not policy.can(actor, 'performance', conn=conn) and role not in policy.ADMIN_ROLES:
+                return denial()
+        finally:
+            conn.close()
+        return f(*args, **kwargs)
+    return _tag_gate(decorated, 'reporting_line', _gate_module(f))
 
 
 def _tag_gate(decorated, gate, module):
@@ -6061,42 +6110,123 @@ def goals_api():
         conn.close()
         return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'title': r[3], 'description': r[4], 'target_date': r[5].isoformat() if r[5] else None, 'weight': r[6], 'rating': r[7], 'status': r[8], 'created_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
-    if not data.get('title'):
-        return jsonify({'error': 'title required'}), 400
+    # CC-10: emp_id comes from the session, never the body. The bare `VALUES`
+    # insert this replaces had ten placeholders against a nine-column table, so
+    # every create returned 500 — the explicit column list is also the v2.0 lesson.
+    if data.get('emp_id') not in (None, '', session['emp_id']):
+        return jsonify({'error': 'A goal may only be created for yourself'}), 400
+    try:
+        values = goals.validate_create(data)
+    except goals.GoalError as exc:
+        return jsonify({'error': str(exc)}), exc.status
     conn = get_db()
-    gid = _next_generated_id(conn, 'goals', 'goal_id')
-    conn.execute("INSERT INTO goals VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [gid, data.get('emp_id', session['emp_id']), data['title'], data.get('description'),
-                  parse_date(data.get('target_date')), data.get('weight', 1), None, 'Active', datetime.now()])
-    conn.close()
+    try:
+        gid = _next_generated_id(conn, 'goals', 'goal_id')
+        conn.execute(
+            "INSERT INTO goals (goal_id, emp_id, title, description, target_date, weight, "
+            "rating, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [gid, session['emp_id'], values['title'], values['description'],
+             values['target_date'], values['weight'], None, 'Active', datetime.now()],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'GOAL_CREATE', f'Created goal {gid}',
+        entity='goals', entity_id=gid, after=values,
+    )
     return jsonify({'message': 'Goal created', 'id': gid}), 201
 
 
 @app.route('/api/v1/goals/<int:gid>/rate', methods=['PUT'])
 @app.route('/api/goals/<int:gid>/rate', methods=['PUT'])
-@admin_required
+@reporting_line_required
 def rate_goal(gid):
+    """Rate a goal and complete it (FR-PERF-01: "by manager, not self").
+
+    The write is conditional on the goal still being Active, so two raters
+    produce one winner and one 409 rather than a silent overwrite. `status` is set
+    here and only here: the edit route refuses to touch it.
+    """
     data = request.get_json(silent=True) or {}
-    rating = data.get('rating')
-    if not rating or rating < 1 or rating > 5:
-        return jsonify({'error': 'rating must be 1-5'}), 400
     conn = get_db()
-    conn.execute("UPDATE goals SET rating = ?, status = 'Completed' WHERE goal_id = ?", [rating, gid])
-    conn.close()
-    return jsonify({'message': 'Goal rated'}), 200
+    try:
+        actor = _lifecycle_actor(conn)
+        goal = conn.execute(
+            'SELECT emp_id, status, weight FROM goals WHERE goal_id = ?', [gid]
+        ).fetchone()
+        if not goal:
+            return jsonify({'error': 'Goal not found'}), 404
+        try:
+            rating = goals.check_rating_value(data.get('rating'))
+            goals.check_rating(actor, goal)
+        except goals.GoalError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        if goal[1] != 'Active':
+            return jsonify({
+                'error': f'This goal is already {goal[1]}',
+                'status': goal[1],
+            }), 409
+        result = conn.execute(
+            "UPDATE goals SET rating = ?, status = 'Completed' WHERE goal_id = ? AND status = 'Active'",
+            [rating, gid],
+        )
+        if result.rowcount == 0:
+            return jsonify({'error': 'The goal changed while you were rating it; reload and retry'}), 409
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'GOAL_RATE', f'Rated goal {gid} as {rating}',
+        entity='goals', entity_id=gid,
+        before={'status': 'Active', 'rating': None},
+        after={'status': 'Completed', 'rating': rating},
+    )
+    add_notification(
+        goal[0], 'GOAL_RATED', f'Your goal was rated {rating}/5.', '/goals', 'Performance',
+    )
+    return jsonify({'message': 'Goal rated', 'rating': rating, 'status': 'Completed'}), 200
 
 
 @app.route('/api/v1/goals/<int:gid>', methods=['PUT'])
 @app.route('/api/goals/<int:gid>', methods=['PUT'])
 @login_required
 def update_goal(gid):
+    """Edit a goal. Owner, their manager, or HR/Admin — and never anyone else.
+
+    This route was `@login_required` with no ownership check, so any authenticated
+    user could rewrite any goal in the company by guessing a sequential id, and
+    could set `status` to skip rating entirely. `goals.check_edit` owns the
+    decision and `goals.EDITABLE_FIELDS` deliberately excludes status and rating.
+    """
     data = request.get_json(silent=True) or {}
     conn = get_db()
-    for field in ('title', 'description', 'target_date', 'weight', 'status'):
-        if field in data:
-            conn.execute(f"UPDATE goals SET {field} = ? WHERE goal_id = ?", [data[field], gid])
-    conn.close()
-    return jsonify({'message': 'Goal updated'}), 200
+    try:
+        actor = _lifecycle_actor(conn)
+        goal = conn.execute(
+            'SELECT emp_id, title, description, target_date, weight, status FROM goals '
+            'WHERE goal_id = ?', [gid]
+        ).fetchone()
+        if not goal:
+            return jsonify({'error': 'Goal not found'}), 404
+        try:
+            goals.check_edit(actor, goal)
+            cleaned = goals.validate_patch(data)
+        except goals.GoalError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        assignments = ', '.join(f'{field} = ?' for field in cleaned)
+        conn.execute(
+            f'UPDATE goals SET {assignments} WHERE goal_id = ?',
+            [*cleaned.values(), gid],
+        )
+        before = {field: goal[1 + i] for i, field in enumerate(goals.EDITABLE_FIELDS)}
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'GOAL_UPDATE', f'Updated goal {gid}',
+        entity='goals', entity_id=gid,
+        before={**before, 'status': goal[5]},
+        after={**{k: v for k, v in before.items() if k not in cleaned}, **cleaned},
+    )
+    return jsonify({'message': 'Goal updated', 'fields': sorted(cleaned)}), 200
 
 
 # ── Performance Reviews ───────────────────────────────────────────

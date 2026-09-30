@@ -2159,6 +2159,260 @@ def test_expense_list_scopes_to_what_the_caller_may_act_on(client):
     finally:
         _cleanup_expense_rows('EMP960', 'EMP961', 'EMP965')
 
+
+# ── FR-PERF-01 goals: the create was broken and the writes were open ─────
+
+def _seed_goal_users(client, manager='EMP001'):
+    """An owner and a peer, both reporting to ``manager``."""
+    _create_policy_user(client, 'EMP920', role='Employee')
+    _create_policy_user(client, 'EMP921', role='Employee')
+    conn = get_db()
+    try:
+        conn.execute(
+            'UPDATE users SET manager_emp_id = ? WHERE emp_id IN (?, ?)',
+            [manager, 'EMP920', 'EMP921'],
+        )
+    finally:
+        conn.close()
+
+
+def _new_goal(client, title='Ship the thing', **overrides):
+    body = {'title': title}
+    body.update(overrides)
+    response = client.post('/api/goals', json=body)
+    assert response.status_code == 201, response.get_json()
+    return response.get_json()['id']
+
+
+def _goal_row(goal_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT emp_id, title, rating, status FROM goals WHERE goal_id = ?', [goal_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _cleanup_goal_rows(*emp_ids):
+    conn = get_db()
+    try:
+        for emp_id in emp_ids:
+            conn.execute('DELETE FROM notifications WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM goals WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?', [emp_id])
+            conn.execute('DELETE FROM users WHERE emp_id = ?', [emp_id])
+    finally:
+        conn.close()
+
+
+def test_goal_create_works_and_takes_emp_id_from_the_session(client):
+    """Regression: `POST /api/goals` returned 500 for every request, always.
+
+    The insert was a bare `VALUES` with ten placeholders against a nine-column
+    table. The seed used an explicit column list, so the seed worked and the
+    create path did not — and no test or probe flow created a goal, so nothing
+    noticed. This is the test that would have caught it.
+    """
+    _set_admin_session(client, 99820)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99819)
+        goal_id = _new_goal(client, title='Ship the thing', weight=5, target_date='2027-01-31')
+        row = _goal_row(goal_id)
+        assert row[0] == 'EMP920', row
+        assert row[1] == 'Ship the thing'
+        assert row[3] == 'Active', row
+
+        # CC-10: the body cannot name somebody else.
+        forged = client.post('/api/goals', json={'title': 'not mine', 'emp_id': 'EMP001'})
+        assert forged.status_code == 400, forged.get_json()
+        assert 'yourself' in str(forged.get_json()).lower(), forged.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM goals WHERE title = 'not mine'"
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_goal_create_validates_its_payload(client):
+    """CC-12: no unknown keys, and the weight is bounded."""
+    _set_admin_session(client, 99821)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99820)
+        assert client.post('/api/goals', json={'title': 'x', 'nope': 1}).status_code == 400
+        assert client.post('/api/goals', json={'title': 'x', 'weight': 0}).status_code == 400
+        assert client.post('/api/goals', json={'title': 'x', 'weight': 99}).status_code == 400
+        assert client.post('/api/goals', json={'title': 'x', 'weight': 'heavy'}).status_code == 400
+        assert client.post('/api/goals', json={'title': '   '}).status_code == 400
+        assert client.post('/api/goals', json={'title': 'x', 'target_date': '31/01/2027'}).status_code == 400
+        conn = get_db()
+        try:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM goals WHERE emp_id = 'EMP920'"
+            ).fetchone()[0] == 0, 'a rejected goal must not be written'
+        finally:
+            conn.close()
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_no_authenticated_user_can_edit_another_employees_goal(client):
+    """The write was `@login_required` with no ownership check at all.
+
+    Goal ids are sequential integers, so the list being correctly scoped was no
+    protection: any user could rewrite any goal in the company by guessing.
+    """
+    _set_admin_session(client, 99822)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99821)
+        goal_id = _new_goal(client, title='Victim goal')
+        _login_as(client, 'EMP921', 'Employee', 99820)
+        refused = client.put(f'/api/goals/{goal_id}', json={'title': 'HIJACKED'})
+        assert refused.status_code == 403, refused.get_json()
+        assert 'own goals' in str(refused.get_json()).lower(), refused.get_json()
+        assert _goal_row(goal_id)[1] == 'Victim goal'
+
+        # The peer cannot see it in their own list either, so they cannot even
+        # learn the id from the API.
+        assert goal_id not in {g['id'] for g in client.get('/api/goals').get_json()}
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_an_edit_may_not_set_status_or_rating(client):
+    """`status` was editable, which was a way to skip rating entirely."""
+    _set_admin_session(client, 99823)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99822)
+        goal_id = _new_goal(client)
+        for field, value in (('status', 'Completed'), ('rating', 5)):
+            refused = client.put(f'/api/goals/{goal_id}', json={field: value})
+            assert refused.status_code == 400, (field, refused.get_json())
+            assert 'rating flow' in str(refused.get_json()), refused.get_json()
+        row = _goal_row(goal_id)
+        assert row[2] is None and row[3] == 'Active', row
+        # ...and the real fields still work.
+        ok = client.put(f'/api/goals/{goal_id}', json={'title': 'refined', 'weight': 3})
+        assert ok.status_code == 200, ok.get_json()
+        assert ok.get_json()['fields'] == ['title', 'weight']
+        assert _goal_row(goal_id)[1] == 'refined'
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_the_owner_and_their_manager_may_edit(client):
+    _set_admin_session(client, 99824)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99823)
+        goal_id = _new_goal(client, title='original')
+        assert client.put(f'/api/goals/{goal_id}', json={'title': 'by owner'}).status_code == 200
+        _login_as(client, 'EMP001', 'Admin', 99822)
+        assert client.put(f'/api/goals/{goal_id}', json={'title': 'by manager'}).status_code == 200
+        assert _goal_row(goal_id)[1] == 'by manager'
+        # An edit that changes nothing is a 400, not a silent success.
+        assert client.put(f'/api/goals/{goal_id}', json={}).status_code == 400
+        assert client.put('/api/goals/999999999', json={'title': 'ghost'}).status_code == 404
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_a_goal_is_rated_by_the_manager_not_by_its_owner(client):
+    """FR-PERF-01: "rating 1-5 by manager (not self)". Nothing enforced either half."""
+    _set_admin_session(client, 99825)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99824)
+        goal_id = _new_goal(client)
+
+        # An employee cannot reach the rating route at all (it is admin-gated),
+        # and a peer certainly cannot rate it.
+        _login_as(client, 'EMP921', 'Employee', 99823)
+        assert client.put(f'/api/goals/{goal_id}/rate', json={'rating': 5}).status_code == 403
+
+        # The self-rating rule is the half the SRS calls out, so it needs a
+        # subject who *can* reach the route: an admin who filed their own goal.
+        _login_as(client, 'EMP001', 'Admin', 99822)
+        own = _new_goal(client, title='Admin own goal')
+        assert _goal_row(own)[0] == 'EMP001'
+        self_rated = client.put(f'/api/goals/{own}/rate', json={'rating': 5})
+        assert self_rated.status_code == 403, self_rated.get_json()
+        assert 'your own goal' in str(self_rated.get_json()), self_rated.get_json()
+        assert _goal_row(own)[2] is None, 'the admin rated their own goal'
+
+        # ...and the reporting manager can. An HR user rather than an admin, so
+        # the manager branch is not just the admin branch wearing a hat.
+        _create_policy_user(client, 'EMP922', role='HR')
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET manager_emp_id = 'EMP922' WHERE emp_id = 'EMP920'")
+        finally:
+            conn.close()
+        _login_as(client, 'EMP922', 'HR', 99821)
+        rated = client.put(f'/api/goals/{goal_id}/rate', json={'rating': 5})
+        assert rated.status_code == 200, rated.get_json()
+        assert rated.get_json() == {'message': 'Goal rated', 'rating': 5, 'status': 'Completed'}
+        row = _goal_row(goal_id)
+        assert row[2] == 5 and row[3] == 'Completed', row
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921', 'EMP922')
+
+
+def test_a_goal_can_be_rated_only_once(client):
+    """Completed is terminal, and the write is conditional on Active."""
+    _set_admin_session(client, 99826)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99825)
+        goal_id = _new_goal(client)
+        _login_as(client, 'EMP001', 'Admin', 99824)
+        assert client.put(f'/api/goals/{goal_id}/rate', json={'rating': 5}).status_code == 200
+        again = client.put(f'/api/goals/{goal_id}/rate', json={'rating': 2})
+        assert again.status_code == 409, again.get_json()
+        assert 'already Completed' in str(again.get_json()), again.get_json()
+        assert _goal_row(goal_id)[2] == 5, 'the refused re-rating overwrote the rating'
+        for bad in (0, 6, 'five', None):
+            assert client.put(f'/api/goals/{goal_id}/rate', json={'rating': bad}).status_code == 400
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
+
+def test_rating_a_goal_is_audited_and_notifies_the_owner(client):
+    _set_admin_session(client, 99827)
+    try:
+        _seed_goal_users(client)
+        _login_as(client, 'EMP920', 'Employee', 99826)
+        goal_id = _new_goal(client)
+        _login_as(client, 'EMP001', 'Admin', 99825)
+        assert client.put(f'/api/goals/{goal_id}/rate', json={'rating': 4}).status_code == 200
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT action, \"before\", \"after\" FROM audit_log "
+                "WHERE action = 'GOAL_RATE' AND CAST(entity_id AS VARCHAR) = ?",
+                [str(goal_id)],
+            ).fetchone()
+            notified = conn.execute(
+                "SELECT COUNT(*) FROM notifications WHERE emp_id = 'EMP920' "
+                "AND type = 'GOAL_RATED'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert row is not None, 'the rating was not audited'
+        assert json.loads(row[1])['status'] == 'Active'
+        assert json.loads(row[2]) == {'status': 'Completed', 'rating': 4}
+        assert notified == 1, 'the owner was not told'
+    finally:
+        _cleanup_goal_rows('EMP920', 'EMP921')
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):

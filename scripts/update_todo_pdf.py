@@ -40,6 +40,17 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-29", "FR-PERF-01 goals: POST /api/goals had never worked - a bare INSERT INTO goals "
+     "VALUES with ten placeholders against a nine-column table, so every goal creation returned 500 "
+     "on every backend. The seed used an explicit column list, which is why the seed worked and the "
+     "create path did not, and no test or probe flow created a goal. PUT /api/goals/<id> was "
+     "@login_required with no ownership check, so any authenticated user could rewrite any goal by "
+     "guessing a sequential id, and could set status to skip rating. The rating enforced neither "
+     "half of the SRS rule, and @admin_required excluded the reporting manager the requirement "
+     "names - the same gate bug as the expense slice. goals.py now owns EDITABLE_FIELDS (no status, "
+     "no rating), the edit ownership rule, and a rating that requires the reporting manager or "
+     "HR/Admin and refuses the owner, with a conditional write on Active. A new reporting-line gate "
+     "admits managers. Matrix is now 50 IMPLEMENTED / 42 PARTIAL / 11 NOT_STARTED / 1 RETIRED."),
     ("2026-09-29", "FR-AUTH-10 password policy: a 10-character minimum (Appendix A-01 calls 6 a "
      "defect) plus a breach-corpus check, enforced wherever a password is set, with no complexity "
      "rules and no expiry by design per NIST SP 800-63B - a test parses the module's AST to keep "
@@ -222,9 +233,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "152 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "157 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "157 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "160 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "165 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "165 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

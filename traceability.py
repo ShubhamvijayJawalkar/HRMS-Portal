@@ -307,12 +307,22 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'nightly job revokes access on the LWD.'),
 
     # ── FR-PERF: goals and reviews ──────────────────────────────────────
-    'FR-PERF-01': ('M', 'R', 'PARTIAL', ('/api/goals', '/api/goals/<int:gid>/rate'),
-                   'CRUD, a 1-5 rating and transition to Completed all ship. The rating '
-                   'is not restricted to the manager, so an employee can rate their own goal.'),
+    'FR-PERF-01': ('M', 'R', 'IMPLEMENTED', ('/api/goals', '/api/goals/<int:gid>', '/api/goals/<int:gid>/rate'),
+                   'CRUD plus a 1-5 rating that transitions the goal to Completed, all in '
+                   'goals.py. POST /api/goals had never worked (a bare VALUES with ten '
+                   'placeholders against a nine-column table, so every create was a 500) '
+                   'and now uses an explicit column list and takes emp_id from the session. '
+                   'PUT /api/goals/<id> was @login_required with no ownership check, so any '
+                   'authenticated user could rewrite any goal by guessing a sequential id; '
+                   'it is now owner/manager/HR and cannot set status or rating, which is how '
+                   'the rating flow used to be skipped. Rating is by the reporting manager or '
+                   'HR/Admin and never the owner (the SRS calls that out), through a new '
+                   'reporting-line gate because @admin_required excluded the role the '
+                   'requirement names. Completed is terminal and the write is conditional.'),
     'FR-PERF-02': ('M', 'R', 'PARTIAL', ('/api/performance-reviews', '/api/performance-reviews/<int:rid>/submit'),
                    'Cycle create/list is HR/Admin-gated. The submit path does not require '
-                   'the submitter to be the assigned reviewer.'),
+                   'the submitter to be the assigned reviewer, so any user who can reach it '
+                   'can submit somebody else\'s review, and the write is unconditional.'),
 
     # ── FR-EXP: expenses ────────────────────────────────────────────────
     'FR-EXP-01': ('M', 'R', 'PARTIAL', ('/api/expense-categories',),
