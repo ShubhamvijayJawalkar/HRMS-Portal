@@ -2340,7 +2340,7 @@ _ROUTE_MODULES = {
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
     'admin_leaves_page': 'leaves', 'export_leaves': 'leaves',
-    'approve_leave': 'leaves', 'reject_leave': 'leaves',
+    'approve_leave': 'leaves', 'reject_leave': 'leaves', 'cancel_leave': 'leaves',
     'live_monitoring': 'breaks', 'get_break_summary': 'breaks',
     'get_disposed_breaks': 'breaks', 'admin_breaks': 'breaks',
     'admin_dispose_break': 'breaks', 'approve_break': 'breaks', 'reject_break': 'breaks',
@@ -7493,6 +7493,58 @@ def reject_leave(leave_id):
     audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_REJECTED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been rejected.', '/leaves')
     return jsonify({'message': 'Leave rejected'}), 200
+
+
+@app.route('/api/v1/leaves/<int:leave_id>/cancel', methods=['POST'])
+@app.route('/api/leaves/<int:leave_id>/cancel', methods=['POST'])
+@login_required
+def cancel_leave(leave_id):
+    """Cancel a leave request (FR-LEA-05).
+
+    "Cancel: Pending only, or Approved with a future start date (with the same
+    reserved/used reversal), by owner or admin." There was no cancel route at all,
+    which had a concrete consequence: a Pending request reserves days against the
+    employee's balance and nothing could ever give them back, so a leave request
+    that changed its mind silently reduced their remaining leave for the year.
+
+    The decision *and* the ledger reversal are `leave_policy.cancel`'s, so a caller
+    cannot check one and apply the other — the hazard here is releasing days that
+    approval has already moved into `used_days`, and that is decided and performed
+    in one function.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT leave_id, emp_id, leave_type, start_date, end_date, status "
+            'FROM leave_requests WHERE leave_id = ?', [leave_id],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Leave request not found'}), 404
+        actor = policy.current_actor(conn)
+        is_admin = actor.get('role') in policy.ADMIN_ROLES
+        try:
+            action = leave_policy.cancel(conn, actor.get('emp_id'), row, is_admin)
+        except leave_policy.LeaveError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+    finally:
+        conn.close()
+    # `release` returns a reservation; `unconsume` takes approved days back out of
+    # usage. The action is in the response and the audit row because "how much of my
+    # leave did this give back" is the question an employee actually has.
+    audit_log(
+        session['emp_id'], 'LEAVE_CANCEL',
+        f'Leave {leave_id} cancelled ({action} of {leave_policy.days_between(row[3], row[4])} day(s))',
+        entity='leave_requests', entity_id=leave_id,
+        before={'status': row[5]}, after={'status': 'Cancelled', 'ledger': action},
+    )
+    if row[0] == session['emp_id']:
+        add_notification(
+            row[0], 'LEAVE_CANCELLED',
+            f'Your {row[2]} leave ({row[3]} to {row[4]}) was cancelled.', '/leaves', 'Leaves',
+        )
+    return jsonify({
+        'message': 'Leave cancelled', 'status': 'Cancelled', 'ledger': action,
+    }), 200
 
 
 @app.route('/api/v1/leave-balance')

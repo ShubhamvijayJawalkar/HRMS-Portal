@@ -1030,6 +1030,41 @@ idempotent across two runs, and the CC-01 checker plus the read-only preflight b
 pass on that database. The matrix is now **52 IMPLEMENTED / 40 PARTIAL / 11
 NOT_STARTED / 1 RETIRED**.
 
+### 14.16 Leave cancellation (implemented)
+
+FR-LEA-05 is one sentence: "Cancel: Pending only, or Approved with a future start
+date (with the same reserved/used reversal), by owner or admin." There was no
+cancel route at all, and the consequence was not abstract — a Pending leave
+request reserved days against the employee's balance and nothing could ever give
+them back, so a request that changed its mind silently reduced their remaining
+leave for the rest of the year.
+
+The decision and the reversal are `leave_policy.cancel`'s, together, because the
+ledger effect differs by the state being reversed and getting it wrong is silent
+and permanent: a Pending request releases the reservation, an Approved one has to
+take the days back out of `used_days`, because approval already moved them there.
+Releasing in that case would leave the balance understated with no way to detect
+it. `used_days` is decremented with a `CASE ... ELSE 0` floor, so a corrected
+ledger matters more than an exactly-symmetric one.
+
+The day count is deliberately the same expression the apply, approve and reject
+paths use, so a cancellation reverses exactly what the reservation took out. That
+expression counts calendar days and ignores weekends and holidays — the FR-LEA-09
+approximation the matrix records as open — and a more accurate count here would
+desynchronise the reversal from the thing it undoes.
+
+A latent test-isolation bug surfaced while validating: `_cleanup_leave_rows`
+deleted the user before the rows referencing it, so a login's `user_sessions` row
+raised a foreign-key error, the user survived, and the *next* test that reused the
+id failed with "Employee ID already exists" somewhere unrelated.
+
+Validation: **178 DuckDB unit tests passed / 6 skipped**, **183 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **97/97 GET + 49/49 write** and is
+idempotent across two runs, and the CC-01 checker plus the read-only preflight both
+pass on that database. The matrix is now **53 IMPLEMENTED / 39 PARTIAL / 11
+NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

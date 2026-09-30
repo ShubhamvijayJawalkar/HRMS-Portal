@@ -40,6 +40,17 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-30", "FR-LEA-05 leave cancellation: the SRS asks for one sentence and there was no "
+     "cancel route at all, so a Pending leave request reserved days against the employee's balance "
+     "and nothing could ever give them back - a request that changed its mind silently reduced "
+     "their remaining leave for the year. The decision and the reversal are leave_policy.cancel's, "
+     "together, because the ledger effect differs by state: Pending releases the reservation, "
+     "Approved takes the days back out of used_days, and releasing in that case would leave the "
+     "balance understated with no way to detect it. The day count is the same expression the "
+     "apply and approve paths use, so the reversal matches the reservation it undoes. Also fixed a "
+     "latent test-isolation bug: the leave cleanup deleted the user before the rows referencing it, "
+     "so the user survived a foreign-key error and the next test to reuse the id failed somewhere "
+     "unrelated. Matrix is now 53 IMPLEMENTED / 39 PARTIAL / 11 NOT_STARTED / 1 RETIRED."),
     ("2026-09-30", "FR-TKT-03/04 tickets: FR-TKT-03 asks for defence in depth on the visibility "
      "rule, and the list and detail view had it - but the two write paths did not. An unrelated "
      "employee's list was empty, the detail view returned 403, and POST /api/tickets/<id>/comment "
@@ -257,9 +268,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "172 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "177 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "177 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "178 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "183 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "183 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

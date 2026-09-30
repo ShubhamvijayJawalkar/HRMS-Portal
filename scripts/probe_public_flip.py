@@ -415,6 +415,13 @@ def _cleanup_lifecycle_probe_residue(pc) -> set[Path]:
 PROBE_PASSWORD = "jade-marlin-quilt-77"
 
 
+def _leave_casual(cl, tok):
+    """EMP002's Casual balance, read through the API rather than the database."""
+    import json as _json
+    rows = _json.loads(cl.get("/api/leave-balance").data or b"[]")
+    return next(r for r in rows if r["leave_type"] == "Casual")
+
+
 def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     """Fire the core state-changing flows against ``public`` exactly as the
     legacy browser tests do; bucket OK (2xx) vs guarded (4xx, route served and
@@ -739,6 +746,40 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             ).fetchone()
         return 200 if row == ("Reopened", None) else 409
     run("tickets(visibility + chain + reopen)", ticket_lifecycle)
+    # ── FR-LEA-05: cancelling gives the reservation back ─────────────────────
+    # There was no cancel route, so a Pending request reserved days that nothing
+    # could ever release. This applies, cancels, and reads the ledger back to
+    # prove the days came home.
+    def leave_cancel():
+        days = 3
+        start = (today + timedelta(days=40)).isoformat()
+        end = (today + timedelta(days=40 + days - 1)).isoformat()
+        applied = _post(cl, tok, "/api/leaves",
+                        {"leave_type": "Casual", "start_date": start,
+                         "end_date": end, "reason": "public write probe"})
+        if applied.status_code != 201:
+            return applied.status_code
+        lid = (applied.get_json() or {}).get("leave_id")
+        if not lid:
+            return 409
+        # Read *after* the apply, and assert the *delta* rather than a global zero:
+        # an earlier flow in this run holds a reservation of its own, so
+        # `reserved_days == 0` afterwards would be measuring somebody else's leave.
+        held = _leave_casual(cl, tok)
+        if held["reserved_days"] < days:
+            return 409
+        cancelled = _post(cl, tok, f"/api/leaves/{lid}/cancel", {})
+        if cancelled.status_code != 200:
+            return cancelled.status_code
+        if (cancelled.get_json() or {}).get("ledger") != "release":
+            return 409
+        after = _leave_casual(cl, tok)
+        ok = (after["reserved_days"] == held["reserved_days"] - days
+              and after["remaining"] == held["remaining"] + days)
+        return 200 if ok else 409
+    run("leaves(cancel releases the reservation)", leave_cancel)
+
+
 
 
 

@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 172 on DuckDB, 177 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 178 on DuckDB, 183 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (172 on DuckDB, 177 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (178 on DuckDB, 183 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -1014,6 +1014,47 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 - DuckDB is 172 passed / 6 skipped; PostgreSQL 177 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends; probe 97/97 GET + 48/48 write, with
   CC-01 and the preflight green, and the probe is idempotent across two runs.
+
+## FR-LEA-05 leave cancellation: the route did not exist (`leave_policy.cancel`)
+- The SRS is one sentence: *"Cancel: Pending only, or Approved with a future
+  start date (with the same reserved/used reversal), by owner or admin."* There
+  was no cancel route at all, and the consequence was not abstract: **a Pending
+  leave request reserved days against the employee's balance and nothing could
+  ever give them back.** A request that changed its mind silently reduced that
+  employee's remaining leave for the rest of the year, with no way out.
+- The decision and the reversal live together in `leave_policy.cancel`, because
+  **the ledger effect differs by the state being reversed** and getting it wrong
+  is silent and permanent:
+  - `Pending` — the days are sitting in `reserved`, so cancel **releases** them.
+  - `Approved` — approval already moved them out of `reserved` into `used_days`,
+    so cancel has to take them back out of `used_days`. Releasing here would
+    leave the balance permanently understated with no way to detect it.
+  - `used_days` is decremented with a `CASE ... ELSE 0` floor, because a corrected
+    ledger matters more than an exactly-symmetric one.
+- The day count is deliberately the *same* expression the apply, approve and
+  reject paths use, so a cancellation reverses exactly what the reservation took
+  out. That expression counts calendar days and ignores weekends and holidays,
+  which is the FR-LEA-09 approximation the matrix records as open; a more
+  accurate count here would desynchronise the reversal from the thing it undoes.
+  That reasoning is written into the module so nobody "improves" it later.
+- Owner or admin, a 409 for a double cancel / a rejected request / a leave that has
+  already started, and the ledger action is returned in the response and recorded
+  in the audit row — *"how much of my leave did this give back"* is the question an
+  employee actually has.
+- **A latent test-isolation bug found while validating.** `_cleanup_leave_rows`
+  deleted the user before the rows referencing it, so a login's `user_sessions` row
+  raised a foreign-key error and the user survived. The *next* test that reused
+  the id then failed with "Employee ID already exists" in a completely unrelated
+  place. The helper now clears the referencing tables first, and the cancellation
+  fixtures use ids no other suite claims.
+- 6 new unit tests and a probe flow
+  (`leaves(cancel releases the reservation)`) that applies, cancels and reads the
+  v2.0 ledger back — **49/49 write flows**, idempotent across two runs.
+- The matrix moves FR-LEA-05 to `IMPLEMENTED`
+  (**53 IMPLEMENTED / 39 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- DuckDB is 178 passed / 6 skipped; PostgreSQL 183 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends; probe 97/97 GET + 49/49 write, with
+  CC-01 and the preflight green.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

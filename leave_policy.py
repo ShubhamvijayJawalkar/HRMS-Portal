@@ -253,6 +253,102 @@ def consume(conn, emp_id, leave_type, days, year=None) -> None:
     )
 
 
+SETTLED_STATUSES = frozenset({'Rejected', 'Cancelled'})
+
+# ── cancellation (FR-LEA-05) ─────────────────────────────────────────────
+#
+# "Cancel: Pending only, or Approved with a future start date (with the same
+# reserved/used reversal), by owner or admin."
+#
+# The ledger effect differs by the state being reversed, and that is the whole
+# reason this is a decision function rather than a flag:
+#
+#   Pending  -> the days are sitting in ``reserved``, so cancel releases them.
+#   Approved -> approval already moved them out of ``reserved`` into
+#               ``used_days``, so cancel has to take them back out of
+#               ``used_days`` instead. Releasing here would leave the balance
+#               permanently understated, which is the bug this shape prevents.
+#
+# The day count is deliberately the *same* expression the apply, approve and
+# reject paths use, so a cancellation reverses exactly what the original
+# reservation took out. That expression counts calendar days and ignores weekends
+# and holidays, which is the FR-LEA-09 approximation the traceability matrix
+# records as open; a more accurate count here would desynchronise the reversal
+# from the reservation it is undoing.
+CANCELLABLE_STATUSES = frozenset({'Pending', 'Approved'})
+
+
+class LeaveError(ValueError):
+    """A leave request change is not permitted."""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def days_between(start, end) -> int:
+    """The day count every leave path uses, so a reversal is symmetrical."""
+    return (end - start).days + 1
+
+
+def check_cancel(actor_emp_id, request_row, is_admin, as_of=None) -> str:
+    """May this request be cancelled, and what does the ledger need?
+
+    ``request_row`` is ``(leave_id, emp_id, leave_type, start_date, end_date,
+    status)``. Returns ``'release'`` for a Pending request or ``'unconsume'`` for
+    an Approved one.
+
+    Raises ``LeaveError``: 403 for somebody else's request, 409 for a state or a
+    start date that cannot be cancelled.
+    """
+    _leave_id, emp_id, _leave_type, start_date, _end_date, status = request_row
+    if actor_emp_id != emp_id and not is_admin:
+        raise LeaveError('You can only cancel your own leave requests', 403)
+    if status not in CANCELLABLE_STATUSES:
+        if status == 'Rejected':
+            raise LeaveError('This request was already rejected', 409)
+        raise LeaveError(f'A {status.lower()} leave request cannot be cancelled', 409)
+    if status == 'Approved':
+        if start_date <= (as_of or date.today()):
+            raise LeaveError(
+                'An approved leave can only be cancelled before it starts', 409)
+        return 'unconsume'
+    return 'release'
+
+
+def cancel(conn, actor_emp_id, request_row, is_admin, as_of=None) -> str:
+    """Validate a cancellation and reverse the ledger. Returns the action taken.
+
+    The decision and the reversal live together so a caller cannot check one and
+    apply the other: the whole hazard here is releasing when the days are already
+    used, and that is decided and performed in one function.
+    """
+    action = check_cancel(actor_emp_id, request_row, is_admin, as_of)
+    _leave_id, emp_id, leave_type, start_date, end_date, status = request_row
+    days = days_between(start_date, end_date)
+    year = start_date.year
+    if action == 'release':
+        release(conn, emp_id, leave_type, days, year)
+    else:
+        # Take the days back out of `used_days`, and never below zero: a
+        # corrected ledger matters more than an exactly-symmetric one.
+        conn.execute(
+            "UPDATE leave_balance SET used_days = CASE WHEN used_days >= ? "
+            'THEN used_days - ? ELSE 0 END '
+            'WHERE emp_id = ? AND leave_type = ? AND year = ?',
+            [days, days, emp_id, leave_type, year],
+        )
+    result = conn.execute(
+        "UPDATE leave_requests SET status = 'Cancelled', updated_at = ? "
+        "WHERE leave_id = ? AND status = ?",
+        [datetime.now(), request_row[0], status],
+    )
+    if result.rowcount == 0:
+        raise LeaveError(
+            'The request changed while you were cancelling it; reload and retry', 409)
+    return action
+
+
 def validate_assignment(payload) -> dict:
     """Validate a leave-policy assignment payload (CC-12: no unknown keys)."""
     allowed = {

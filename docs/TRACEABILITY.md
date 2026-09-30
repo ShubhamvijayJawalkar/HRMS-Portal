@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 52 | 50% |
-| `PARTIAL` | 40 | 38% |
+| `IMPLEMENTED` | 53 | 51% |
+| `PARTIAL` | 39 | 38% |
 | `NOT_STARTED` | 11 | 11% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (52)
+### IMPLEMENTED (53)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -61,6 +61,7 @@ rather than quietly invalidating this document.
 | `FR-JOB-01` | H | C | — | Nightly finalisation classifies every active employee in the required priority order, groups per shift date so night shifts finalize correctly, replaces the target date transactionally, and recomputes on regularization approval. |
 | `FR-JOB-04` | H | C | `/api/admin/offboarding/revoke` | The nightly job closes sessions, clears permissions, disables login and marks the employee Inactive on their last working day. |
 | `FR-LEA-04` | H | C | `/api/leaves/<int:leave_id>/approve` | Not the applicant, conditional update, used_days incremented and the reservation consumed. |
+| `FR-LEA-05` | M | C | `/api/leaves/<int:leave_id>/reject`<br>`/api/leaves/<int:leave_id>/cancel` | Reject is conditional and releases the reservation. Cancel now exists: Pending only, or Approved before it starts, by owner or admin (leave_policy.check_cancel), and the ledger reversal differs by state - a Pending request releases the reservation, an Approved one takes the days back out of used_days, which is why the decision and the reversal are one function (leave_policy.cancel). Cancelling twice or a settled request is a 409, a started leave is a 409, and the action taken is in the response and the audit row. |
 | `FR-LEA-06` | H | C | `/api/leave-balance` | total/used/reserved/remaining derived per type per year, with the source reported so a number can be traced to a policy or a default. |
 | `FR-LEA-08` | H | C | `/api/users/<emp_id>/leave-policy`<br>`/api/accrual/run` | Effective-dated per employee, entitlement derived and accrued month by month from the rate, capped by the carry-forward cap, the ledger posted by cron, on demand, or from the admin UI. |
 | `FR-NOT-02` | M | R | `/api/notifications/read` | Sets is_read and keeps the row, so a read notification does not vanish. |
@@ -87,7 +88,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (40)
+### PARTIAL (39)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -116,7 +117,6 @@ rather than quietly invalidating this document.
 | `FR-LEA-01` | M | R | `/api/leaves` | Filters and the scope split ship. Missing: delegated-manager visibility. |
 | `FR-LEA-02` | M | C | `/api/leaves` | Dates are swapped if reversed and the session is recorded. Working-day deduction ignores holidays — FR-LEA-09 asks for one shared function and there is none. |
 | `FR-LEA-03` | M | N | `/api/leaves/export` | Excel export ships, synchronously. The async variant for large ranges is not implemented. |
-| `FR-LEA-05` | M | C | `/api/leaves/<int:leave_id>/reject` | Reject is conditional and releases the reservation. Cancel is not implemented at all — there is no cancel route. |
 | `FR-NOT-01` | M | C | `/api/notifications` | Last-50 list with an unread count. Delivery is a direct SMTP call on the request thread rather than an outbox enqueue, so a slow provider can block the request that triggered it. |
 | `FR-ONB-04` | H | C | `/api/preboarding/<token>/documents/<doc_type>`<br>`/api/onboarding-checklist/<int:item_id>/review` | Upload, review, and mandatory rejection notes all ship. The shared pipeline only checks the file extension (FR-DOC-02 is partial). |
 | `FR-REG-01` | M | R | `/api/regularization` | Filters and the company-wide/self split ship, the split decided by policy.can_view_all. Delegated reports are not included. |

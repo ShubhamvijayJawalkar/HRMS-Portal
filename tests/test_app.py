@@ -2878,6 +2878,184 @@ def test_document_downloads_are_audited(client):
         finally:
             conn.close()
 
+
+# ── FR-LEA-05 cancellation: the route did not exist ──────────────────────
+
+def _future_leave(client, days=3, reason='trip'):
+    start = date.today() + timedelta(days=40)
+    return client.post('/api/leaves', json={
+        'leave_type': 'Casual',
+        'start_date': start.isoformat(),
+        'end_date': (start + timedelta(days=days - 1)).isoformat(),
+        'reason': reason,
+    }).get_json()['leave_id']
+
+
+def _past_leave(client, days=2, reason='already taken'):
+    start = date.today() - timedelta(days=days)
+    return client.post('/api/leaves', json={
+        'leave_type': 'Casual',
+        'start_date': start.isoformat(),
+        'end_date': (date.today() - timedelta(days=1)).isoformat(),
+        'reason': reason,
+    }).get_json()['leave_id']
+
+
+def _casual_balance(client):
+    rows = client.get('/api/leave-balance').get_json()
+    return next(r for r in rows if r['leave_type'] == 'Casual')
+
+
+def test_cancelling_a_pending_leave_gives_the_reservation_back(client):
+    """There was no cancel route, so a reservation could never be released."""
+    _set_admin_session(client, 99790)
+    try:
+        _create_policy_user(client, 'EMP986', role='Employee')
+        _login_as(client, 'EMP986', 'Employee', 99789)
+        leave_id = _future_leave(client)
+        before = _casual_balance(client)
+        assert before['reserved_days'] == 3, before
+        assert before['remaining'] == 9, before
+
+        cancelled = client.post(f'/api/leaves/{leave_id}/cancel')
+        assert cancelled.status_code == 200, cancelled.get_json()
+        # `release`, not `unconsume`: the days were reserved, not used.
+        assert cancelled.get_json() == {
+            'message': 'Leave cancelled', 'status': 'Cancelled', 'ledger': 'release',
+        }
+        after = _casual_balance(client)
+        assert after['reserved_days'] == 0, after
+        assert after['remaining'] == 12, after
+        conn = get_db()
+        try:
+            status = conn.execute(
+                'SELECT status FROM leave_requests WHERE leave_id = ?', [leave_id],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == 'Cancelled'
+    finally:
+        _cleanup_leave_rows('EMP986')
+
+
+def test_cancelling_approved_future_leave_takes_the_days_back_out_of_used(client):
+    """The ledger effect differs by state, and getting it wrong understates the balance."""
+    _set_admin_session(client, 99791)
+    try:
+        _create_policy_user(client, 'EMP987', role='Employee')
+        _login_as(client, 'EMP987', 'Employee', 99790)
+        leave_id = _future_leave(client, reason='will not need it')
+        _login_as(client, 'EMP001', 'Admin', 99789)
+        assert client.post(f'/api/leaves/{leave_id}/approve').status_code == 200
+
+        _login_as(client, 'EMP987', 'Employee', 99788)
+        after_approval = _casual_balance(client)
+        assert after_approval['used_days'] == 3, after_approval
+        assert after_approval['reserved_days'] == 0, after_approval
+
+        cancelled = client.post(f'/api/leaves/{leave_id}/cancel')
+        assert cancelled.status_code == 200, cancelled.get_json()
+        assert cancelled.get_json()['ledger'] == 'unconsume'
+        after = _casual_balance(client)
+        assert after['used_days'] == 0, after
+        assert after['remaining'] == 12, after
+    finally:
+        _cleanup_leave_rows('EMP987')
+
+
+def test_a_leave_that_has_already_started_cannot_be_cancelled(client):
+    """FR-LEA-05: "Approved with a future start date" only."""
+    _set_admin_session(client, 99792)
+    try:
+        _create_policy_user(client, 'EMP988', role='Employee')
+        _login_as(client, 'EMP988', 'Employee', 99791)
+        leave_id = _past_leave(client)
+        _login_as(client, 'EMP001', 'Admin', 99790)
+        assert client.post(f'/api/leaves/{leave_id}/approve').status_code == 200
+        _login_as(client, 'EMP988', 'Employee', 99789)
+        refused = client.post(f'/api/leaves/{leave_id}/cancel')
+        assert refused.status_code == 409, refused.get_json()
+        assert 'before it starts' in str(refused.get_json()), refused.get_json()
+        assert _casual_balance(client)['used_days'] == 2, 'the started leave was released'
+    finally:
+        _cleanup_leave_rows('EMP988')
+
+
+def test_cancelling_twice_or_a_settled_request_is_refused(client):
+    _set_admin_session(client, 99793)
+    try:
+        _create_policy_user(client, 'EMP989', role='Employee')
+        _login_as(client, 'EMP989', 'Employee', 99792)
+        leave_id = _future_leave(client)
+        assert client.post(f'/api/leaves/{leave_id}/cancel').status_code == 200
+        again = client.post(f'/api/leaves/{leave_id}/cancel')
+        assert again.status_code == 409, again.get_json()
+        assert 'cancelled' in str(again.get_json()), again.get_json()
+        # And the reservation is not released twice.
+        assert _casual_balance(client)['reserved_days'] == 0
+
+        # A rejected request is settled too.
+        other = _future_leave(client, reason='rejected one')
+        _login_as(client, 'EMP001', 'Admin', 99791)
+        assert client.post(f'/api/leaves/{other}/reject').status_code == 200
+        _login_as(client, 'EMP989', 'Employee', 99790)
+        rejected = client.post(f'/api/leaves/{other}/cancel')
+        assert rejected.status_code == 409, rejected.get_json()
+        assert 'rejected' in str(rejected.get_json()), rejected.get_json()
+    finally:
+        _cleanup_leave_rows('EMP989')
+
+
+def test_only_the_owner_or_an_admin_may_cancel(client):
+    _set_admin_session(client, 99794)
+    try:
+        _create_policy_user(client, 'EMP992', role='Employee')
+        _create_policy_user(client, 'EMP993', role='Employee')
+        _login_as(client, 'EMP992', 'Employee', 99793)
+        leave_id = _future_leave(client)
+        _login_as(client, 'EMP993', 'Employee', 99792)
+        refused = client.post(f'/api/leaves/{leave_id}/cancel')
+        assert refused.status_code == 403, refused.get_json()
+        assert 'your own' in str(refused.get_json()), refused.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT status FROM leave_requests WHERE leave_id = ?', [leave_id],
+            ).fetchone()[0] == 'Pending'
+        finally:
+            conn.close()
+
+        # An admin may, and it is attributed to them.
+        _login_as(client, 'EMP001', 'Admin', 99791)
+        assert client.post(f'/api/leaves/{leave_id}/cancel').status_code == 200
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT actor, \"after\" FROM audit_log WHERE action = 'LEAVE_CANCEL' "
+                'AND CAST(entity_id AS VARCHAR) = ?', [str(leave_id)],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'the cancellation was not audited'
+        assert row[0] == 'EMP001', row
+        assert json.loads(row[1]) == {'status': 'Cancelled', 'ledger': 'release'}
+    finally:
+        _cleanup_leave_rows('EMP992', 'EMP993')
+
+
+def test_cancelling_uses_the_same_day_count_as_the_reservation(client):
+    """A reversal that counts days differently desynchronises the balance."""
+    import leave_policy
+
+    start = date(2026, 3, 2)
+    end = date(2026, 3, 6)
+    # Inclusive of both endpoints, matching the apply path.
+    assert leave_policy.days_between(start, end) == 5
+    # A single-day leave is one day, not zero.
+    assert leave_policy.days_between(start, start) == 1
+    # Only these two states are cancellable.
+    assert leave_policy.CANCELLABLE_STATUSES == frozenset({'Pending', 'Approved'})
+
 # ── FR-USR-04 background import jobs ──────────────────────────────────────
 
 def test_user_import_queues_a_job_and_reports_the_outcome(client):
@@ -3785,6 +3963,16 @@ def _cleanup_leave_rows(emp_id, leave_type=None, year=None):
     year = year or datetime.now().year
     conn = get_db()
     try:
+        # A login writes a `user_sessions` row, and `users` is still referenced by
+        # it, so deleting the user first raised a foreign-key error and left it in
+        # place — which then made the *next* test that reused the id fail with
+        # "Employee ID already exists". Everything that points at the employee goes
+        # first.
+        for table in ('user_sessions', 'attendance_days', 'breaks'):
+            try:
+                conn.execute(f'DELETE FROM {table} WHERE emp_id = ?', [emp_id])
+            except Exception:
+                pass  # a table this backend does not have
         if leave_type:
             conn.execute(
                 "DELETE FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",

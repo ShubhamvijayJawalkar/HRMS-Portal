@@ -227,9 +227,16 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-LEA-04': ('H', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/approve',),
                   'Not the applicant, conditional update, used_days incremented and the '
                   'reservation consumed.'),
-    'FR-LEA-05': ('M', 'C', 'PARTIAL', ('/api/leaves/<int:leave_id>/reject',),
-                  'Reject is conditional and releases the reservation. Cancel is not '
-                  'implemented at all — there is no cancel route.'),
+    'FR-LEA-05': ('M', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/reject',
+                                             '/api/leaves/<int:leave_id>/cancel'),
+                   'Reject is conditional and releases the reservation. Cancel '
+                   'now exists: Pending only, or Approved before it starts, by owner or admin '
+                   '(leave_policy.check_cancel), and the ledger reversal differs by state - a '
+                   'Pending request releases the reservation, an Approved one takes the days '
+                   'back out of used_days, which is why the decision and the reversal are one '
+                   'function (leave_policy.cancel). Cancelling twice or a settled request is a '
+                   '409, a started leave is a 409, and the action taken is in the response and '
+                   'the audit row.'),
     'FR-LEA-06': ('H', 'C', 'IMPLEMENTED', ('/api/leave-balance',),
                   'total/used/reserved/remaining derived per type per year, with the '
                   'source reported so a number can be traced to a policy or a default.'),
