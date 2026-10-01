@@ -33,6 +33,7 @@ from flask_limiter.util import get_remote_address
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.utils import secure_filename
 
+import mfa
 from security import (
     check_password,
     hash_password,
@@ -863,6 +864,27 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id),
             UNIQUE (emp_id, category)
+        )
+    ''')
+
+    # ── MFA credentials (FR-AUTH-11) ──────────────────────────────────
+    # This table was in the canonical schema from the baseline with an encrypted
+    # secret column and **no code anywhere that read or wrote it** — the
+    # "schema without routes" shape the traceability pass exists to catch. Adding
+    # the compat DDL makes the feature runnable on both shapes.
+    # `enabled` is INTEGER here and BOOLEAN on v2.0 `public`; the adapter rewrites
+    # the flag, so the routes write one value and both backends answer alike.
+    # No-op on v2.0 `public`, which owns the identity key and the partial state.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS mfa_credentials (
+            cred_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            secret_encrypted VARCHAR NOT NULL,
+            enabled INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            UNIQUE (emp_id)
         )
     ''')
 
@@ -2787,23 +2809,77 @@ def login():
     if row[4] in ('Blocked', 'Inactive', 'Pre-hire', 'Archived'):
         return jsonify({'error': 'Account is blocked'}), 403
 
+    # FR-AUTH-11: for a role in mfa.MANDATORY_ROLES, and for anyone who has
+    # opted in, the password is only half the credential. From here login is a
+    # two-step flow: the password step parks the identity in
+    # `session['mfa_pending']` and deliberately does NOT set `session['emp_id']`,
+    # so `login_required` and every role gate refuse this session everywhere
+    # until the second factor is presented. Nothing else has to remember to
+    # check, which is the point.
+    conn = get_db()
+    try:
+        enrolled = mfa.is_enrolled(conn, row[0])
+    finally:
+        conn.close()
+    mandatory = mfa.requires_enrolment(row[2])
+    if enrolled or mandatory:
+        # Signing in as a second account has to end the first one. The browser
+        # keeps the session cookie across a sign-in, so without this the previous
+        # employee's identity is *still* in the session while the second factor is
+        # being asked for — and `_mfa_subject()` prefers `session['emp_id']`, so the
+        # enrolment and the challenge would both act on the wrong person. It is
+        # also what "log in" means: signing in as someone else is not additive.
+        #
+        # This is not hypothetical. The browser suite signs in as EMP001, then as a
+        # second administrator, in the same browser context; the second sign-in
+        # tried to enrol the *first* employee and was refused with a 409, which
+        # surfaced as a timeout on a wait for a secret that was never going to
+        # appear.
+        _end_current_session()
+        step = 'challenge' if enrolled else 'enrol'
+        mfa.start_pending(
+            session, row[0], row[1], row[2], step, row[6] or '',
+        )
+        audit_log(
+            row[0], 'MFA_REQUIRED',
+            f'Password accepted for {row[1]}; awaiting {step}',
+            entity='Auth', entity_id=row[0],
+        )
+        return jsonify({
+            'message': 'Password accepted; a second factor is required',
+            'mfa_required': 'challenge_required' if enrolled else 'enrol_required',
+            'mandatory': mandatory,
+            'redirect': '/dashboard',
+        }), 200
+
+    return _complete_login(row[0], row[1], row[2], row[6] or '')
+
+
+def _complete_login(emp_id, name, role, department):
+    """Establish the authenticated session and record the attendance row.
+
+    Shared by the one-step login and by the two-step MFA path, so the second
+    factor cannot quietly skip anything the first step does — the session id
+    allocation, the shift-date resolution and the audit row are all here
+    exactly once.
+    """
     conn = get_db()
     session_id = _next_generated_id(conn, 'user_sessions', 'session_id')
-    session['emp_id'] = row[0]
-    session['name'] = row[1]
-    session['role'] = row[2]
-    session['department'] = row[6] or ''
+    session['emp_id'] = emp_id
+    session['name'] = name
+    session['role'] = role
+    session['department'] = department
     session['session_id'] = session_id
 
     now = datetime.now()
-    shift_date = _get_shift_date_for_dt(row[0], now, conn)
+    shift_date = _get_shift_date_for_dt(emp_id, now, conn)
     conn.execute(
         "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) VALUES (?, ?, ?, ?)",
-        [session_id, row[0], now, shift_date]
+        [session_id, emp_id, now, shift_date]
     )
     conn.close()
 
-    audit_log(row[0], 'LOGIN', f'User {row[1]} logged in', entity='Auth', entity_id=row[0])
+    audit_log(emp_id, 'LOGIN', f'User {name} logged in', entity='Auth', entity_id=emp_id)
     return jsonify({'message': 'Login successful', 'redirect': '/dashboard'}), 200
 
 
@@ -2838,6 +2914,312 @@ def logout():
         audit_log(emp_id, 'LOGOUT', 'User logged out', entity='Auth', entity_id=emp_id)
     session.clear()
     return redirect(url_for('login'))
+
+
+# ── FR-AUTH-11 multi-factor authentication ──────────────────────────────────
+# The rules that decide *whether* a code is acceptable live in `mfa.py`; these
+# are the routes. `_mfa_subject()` is the one place that resolves "who is this
+# request acting as", because a user reaching /api/mfa/enrol may be fully logged
+# in (opting in) or half-authenticated (a mandatory role being made to enrol
+# before they get a session) and both are legitimate.
+
+#: The session keys that constitute an authenticated identity. Popped by
+#: `_end_current_session` so that signing in as somebody else does not leave the
+#: previous employee's session in place. `csrf_token` is deliberately not here:
+#: it is not an identity, and dropping it would make the very next write — the
+#: challenge itself — fail CSRF for no reason.
+_IDENTITY_SESSION_KEYS = ('emp_id', 'name', 'role', 'department', 'session_id')
+
+
+def _end_current_session():
+    """Drop the current identity, closing its `user_sessions` row first.
+
+    Called when a new sign-in replaces an existing one. The row is closed with
+    its `logout_time` so the abandoned session's hours are recorded rather than
+    left open forever, which is the same accounting `/logout` performs — an
+    abandoned browser tab is a logout for attendance purposes either way.
+    """
+    emp_id = session.get('emp_id')
+    session_id = session.get('session_id')
+    if emp_id and session_id:
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT login_time FROM user_sessions WHERE session_id = ? '
+                'AND emp_id = ? AND logout_time IS NULL',
+                [session_id, emp_id],
+            ).fetchone()
+            if row:
+                logout_time = datetime.now()
+                hours = round((logout_time - row[0]).total_seconds() / 3600, 2)
+                conn.execute(
+                    'UPDATE user_sessions SET logout_time = ?, total_hours = ? '
+                    'WHERE session_id = ?',
+                    [logout_time, hours, session_id],
+                )
+        finally:
+            conn.close()
+        audit_log(emp_id, 'LOGOUT', 'Session replaced by a new sign-in',
+                  entity='Auth', entity_id=emp_id)
+    for key in _IDENTITY_SESSION_KEYS:
+        session.pop(key, None)
+    session.pop('mfa_pending', None)
+
+
+def _mfa_subject():
+    """(emp_id, name, pending_state) for an MFA route, or (None, None, None).
+
+    A parked login wins over a full session. It should be impossible for both to
+    be set — `_end_current_session` clears the old identity before parking the new
+    one — but if both were ever present, the identity *under authentication* is
+    the one whose second factor is being presented, and the other would let a
+    request answer for an employee who is not the one signing in.
+    """
+    state = mfa.pending(session)
+    if state:
+        return state['emp_id'], state.get('name') or '', state
+    if 'emp_id' in session:
+        return session['emp_id'], session.get('name') or '', None
+    state = mfa.pending(session)
+    if state:
+        return state['emp_id'], state.get('name') or '', state
+    return None, None, None
+
+
+def _mfa_unauthorised():
+    return jsonify({
+        'error': 'Authentication required',
+        'mfa_required': 'login',
+    }), 401
+
+
+@app.route('/api/mfa/status')
+def mfa_status():
+    """Is the caller enrolled, and is it compulsory for their role?"""
+    emp_id, _, _ = _mfa_subject()
+    if not emp_id:
+        return _mfa_unauthorised()
+    conn = get_db()
+    try:
+        return jsonify(mfa.status_for(conn, emp_id)), 200
+    finally:
+        conn.close()
+
+
+@app.route('/api/mfa/enrol', methods=['POST'])
+def mfa_enrol():
+    """Step 1 of enrolment: mint a secret and store it *disabled*.
+
+    The secret is returned once and is not usable until `confirm` proves the
+    authenticator holds it.
+    """
+    emp_id, name, _ = _mfa_subject()
+    if not emp_id:
+        return _mfa_unauthorised()
+    conn = get_db()
+    try:
+        try:
+            out = mfa.begin_enrolment(conn, emp_id, name)
+        except mfa.EnrolmentConflict as exc:
+            return jsonify({'error': str(exc)}), 409
+        except RuntimeError as exc:  # no/unusable MFA_ENCRYPTION_KEY
+            logger.error('MFA enrolment refused for %s: %s', emp_id, exc)
+            return jsonify({'error': str(exc)}), 503
+    finally:
+        conn.close()
+    audit_log(
+        emp_id, 'MFA_ENROL_STARTED',
+        f'Unconfirmed MFA enrolment created for {emp_id}', entity='Auth', entity_id=emp_id,
+    )
+    return jsonify({
+        'secret': out['secret'],
+        'uri': out['uri'],
+        'qr_url': '/api/mfa/qr',
+        'message': 'Scan the code, then confirm with the 6-digit code your app shows.',
+    }), 200
+
+
+@app.route('/api/mfa/qr')
+def mfa_qr():
+    """The provisioning URI as a PNG.
+
+    Rendered from the stored (encrypted) secret rather than from the enrolment
+    response so that reloading the enrolment page works, and so the URI is not
+    duplicated into the page twice.
+    """
+    emp_id, _, _ = _mfa_subject()
+    if not emp_id:
+        return _mfa_unauthorised()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT secret_encrypted, enabled FROM mfa_credentials WHERE emp_id = ?",
+            [emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or row[1]:
+        # Already confirmed: there is nothing to enrol into, and re-serving the
+        # QR would put a live bearer secret back on the wire for no reason.
+        return jsonify({'error': 'No enrolment in progress'}), 404
+    name = session.get('name') or emp_id
+    try:
+        uri = mfa.provisioning_uri(emp_id, name, mfa.decrypt_secret(row[0]))
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 503
+    return send_file(
+        BytesIO(mfa.qr_png(uri)), mimetype='image/png',
+        max_age=0, download_name=f'mfa-{emp_id}.png',
+    )
+
+
+@app.route('/api/mfa/confirm', methods=['POST'])
+def mfa_confirm():
+    """Step 2 of enrolment: prove possession, then go live."""
+    emp_id, _, state = _mfa_subject()
+    if not emp_id:
+        return _mfa_unauthorised()
+    code = (request.get_json(silent=True) or {}).get('code', '')
+    conn = get_db()
+    try:
+        ok = mfa.confirm_enrolment(conn, emp_id, code)
+    except RuntimeError as exc:
+        return jsonify({'error': str(exc)}), 503
+    finally:
+        conn.close()
+    if not ok:
+        attempts, locked = mfa.note_wrong_code(session)
+        if locked:
+            return jsonify({
+                'error': 'Too many incorrect codes. Start the sign-in again.',
+                'mfa_required': 'login',
+            }), 429
+        logger.info(
+            'MFA confirmation refused for %s (attempt %d of %d)',
+            emp_id, attempts, mfa.MAX_CHALLENGE_ATTEMPTS,
+        )
+        return jsonify({'error': 'That code is not correct'}), 401
+
+    mfa.clear_pending(session)
+    audit_log(emp_id, 'MFA_ENABLED', 'MFA enrolment confirmed', entity='Auth', entity_id=emp_id)
+
+    # A mandatory role enrols *during* login, so confirming possession of both
+    # factors completes that sign-in. An already-logged-in optional user is
+    # simply told they are done.
+    if state and state.get('step') == 'enrol':
+        return _complete_login(emp_id, state.get('name'), state.get('role'),
+                               state.get('department') or '')
+    return jsonify({'message': 'Multi-factor authentication is now active'}), 200
+
+
+@app.route('/api/mfa/challenge', methods=['POST'])
+def mfa_challenge():
+    """Second step for an enrolled user: the code from their authenticator."""
+    state = mfa.pending(session)
+    if not state:
+        return _mfa_unauthorised()
+    if state.get('step') != 'challenge':
+        return jsonify({'error': 'No second-factor challenge is pending'}), 409
+    code = (request.get_json(silent=True) or {}).get('code', '')
+    emp_id = state['emp_id']
+    conn = get_db()
+    try:
+        ok = mfa.verify_challenge(conn, emp_id, code)
+    finally:
+        conn.close()
+    if not ok:
+        attempts, locked = mfa.note_wrong_code(session)
+        if locked:
+            audit_log(emp_id, 'MFA_CHALLENGE_LOCKED',
+                      'MFA challenge abandoned after too many incorrect codes',
+                      entity='Auth', entity_id=emp_id)
+            return jsonify({
+                'error': 'Too many incorrect codes. Start the sign-in again.',
+                'mfa_required': 'login',
+            }), 429
+        logger.info(
+            'MFA challenge refused for %s (attempt %d of %d)',
+            emp_id, attempts, mfa.MAX_CHALLENGE_ATTEMPTS,
+        )
+        return jsonify({'error': 'That code is not correct'}), 401
+
+    mfa.clear_pending(session)
+    audit_log(emp_id, 'MFA_VERIFIED', 'Second factor accepted', entity='Auth', entity_id=emp_id)
+    return _complete_login(emp_id, state.get('name'), state.get('role'),
+                           state.get('department') or '')
+
+
+@app.route('/api/mfa/disable', methods=['POST'])
+def mfa_disable():
+    """Turn one's own second factor off.
+
+    Refused for a role where MFA is mandatory: an Admin could otherwise make
+    themselves unbreakable-to-themselves and permanently outside the control
+    the policy exists to impose. Those users go through the Admin reset, which
+    is audited.
+    """
+    emp_id, _, _ = _mfa_subject()
+    if not emp_id:
+        return _mfa_unauthorised()
+    conn = get_db()
+    try:
+        st = mfa.status_for(conn, emp_id)
+        if st['mandatory']:
+            return jsonify({
+                'error': 'Multi-factor authentication is required for your role '
+                         'and can only be reset by an administrator.',
+            }), 409
+        removed = mfa.disable(conn, emp_id)
+    finally:
+        conn.close()
+    if removed:
+        audit_log(emp_id, 'MFA_DISABLED', 'MFA turned off by the user',
+                  entity='Auth', entity_id=emp_id)
+    return jsonify({'message': 'Multi-factor authentication is off', 'removed': removed}), 200
+
+
+@app.route('/api/admin/users/<emp_id>/mfa/reset', methods=['POST'])
+@admin_required
+def admin_reset_mfa(emp_id):
+    """Support recovery: drop an employee's second factor so they can re-enrol.
+
+    This is a social-engineering target by construction — "I lost my phone" is
+    what an attacker asks for right after stealing a password. Two things follow
+    and are implemented rather than assumed: the response is identical whether or
+    not the target had MFA enabled, so it cannot be used to discover who is
+    protected; and the action is audited with the before/after state.
+    """
+    conn = get_db()
+    try:
+        target = conn.execute(
+            "SELECT role, status FROM users WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        if not target:
+            return jsonify({'error': 'Employee not found'}), 404
+        # A blocked or archived account is not an MFA question; the block already
+        # decides who may sign in, and clearing the factor here would suggest
+        # otherwise to an admin reading the audit trail.
+        if target[1] in ('Blocked', 'Inactive', 'Archived'):
+            return jsonify({'error': 'Account is not active'}), 409
+        before = mfa.is_enrolled(conn, emp_id)
+        mfa.reset(conn, emp_id)
+    finally:
+        conn.close()
+    audit_log(
+        emp_id, 'MFA_RESET',
+        f'Admin reset MFA (was_enrolled={before}) for {emp_id}',
+        entity='Auth', entity_id=emp_id,
+        before={'mfa_enrolled': before}, after={'mfa_enrolled': False},
+    )
+    add_notification(
+        emp_id, 'MFA_RESET',
+        'Your multi-factor authentication was reset by an administrator. '
+        'You will be asked to enrol again the next time you sign in.',
+    )
+    return jsonify({
+        'message': f'MFA reset for {emp_id}. They will re-enrol at next sign-in.',
+        'emp_id': emp_id,
+    }), 200
 
 
 @app.route('/dashboard')

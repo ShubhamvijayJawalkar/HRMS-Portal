@@ -125,11 +125,46 @@
                     </form>
                 </div>
             </div>
+            <!-- FR-AUTH-11: self-service enrolment for roles MFA is not compulsory
+                 for. A role where it *is* compulsory never reaches this page with
+                 no factor — the login flow makes them enrol first — so the button
+                 here is the opt-in path, and it is replaced with a "turn off"
+                 control once a factor exists. -->
+            <div class="card mt-4">
+                <div class="card-header"><h5 class="mb-0">Two-Factor Authentication</h5></div>
+                <div class="card-body">
+                    <p class="text-muted" id="mfaStateLine" style="font-size:13px;">Checking...</p>
+
+                    <div id="mfaEnrolBox" style="display:none">
+                        <div class="text-center mb-3">
+                            <img id="mfaQr" alt="Authenticator QR code" style="width:170px;height:170px;border:1px solid var(--border);border-radius:12px;padding:8px;">
+                            <p class="text-muted mt-2 mb-1" style="font-size:13px;">
+                                Scan it with your authenticator app, or enter this key by hand:
+                            </p>
+                            <div id="mfaSecret" style="font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all;background:#F8FAFC;border:1.5px dashed var(--border);border-radius:10px;padding:8px 10px;user-select:all;"></div>
+                        </div>
+                    </div>
+
+                    <form id="mfaForm">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="mb-2">
+                            <input type="text" id="mfaCode" class="form-control" placeholder="6-digit code from your app"
+                                   maxlength="6" inputmode="numeric" autocomplete="one-time-code" style="letter-spacing:6px;">
+                        </div>
+                        <div class="d-flex gap-2">
+                            <button type="button" class="btn btn-primary btn-sm" id="mfaStartBtn">Set up authenticator</button>
+                            <button type="submit" class="btn btn-success btn-sm" id="mfaConfirmBtn" style="display:none;">Confirm and turn on</button>
+                            <button type="button" class="btn btn-outline-danger btn-sm" id="mfaDisableBtn" style="display:none;">Turn off</button>
+                        </div>
+                    </form>
+                    <div id="mfaMsg" style="margin-top:15px;display:none;"></div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
 <script>
-document.addEventListener('DOMContentLoaded', () => { loadProfile(); loadDependents(); document.getElementById('profileForm').addEventListener('submit', updateProfile); document.getElementById('passwordForm').addEventListener('submit', changePassword); document.getElementById('dependentForm').addEventListener('submit', addDependent); });
+document.addEventListener('DOMContentLoaded', () => { loadProfile(); loadDependents(); loadMfaStatus(); document.getElementById('profileForm').addEventListener('submit', updateProfile); document.getElementById('passwordForm').addEventListener('submit', changePassword); document.getElementById('dependentForm').addEventListener('submit', addDependent); });
 async function loadProfile() {
     const r = await fetch('/api/profile'); const d = await r.json();
     document.getElementById('profEmpId').value = d.emp_id; document.getElementById('profName').value = d.name;
@@ -179,6 +214,76 @@ async function addDependent(e) {
 }
 async function deleteDep(id) { await fetch(`/api/dependents/${id}`, { method: 'DELETE' }); loadDependents(); }
 function esc(t) { const m={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}; return (t||'').replace(/[&<>"']/g,c=>m[c]); }
+
+// ── FR-AUTH-11 two-factor self-service ────────────────────────────────────
+function mfaSay(text, ok) {
+    const el = document.getElementById('mfaMsg');
+    el.style.display = 'block';
+    el.className = ok ? 'text-success' : 'text-danger';
+    el.textContent = text;
+}
+async function loadMfaStatus() {
+    const r = await fetch('/api/mfa/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const line = document.getElementById('mfaStateLine');
+    const start = document.getElementById('mfaStartBtn');
+    const confirm = document.getElementById('mfaConfirmBtn');
+    const disable = document.getElementById('mfaDisableBtn');
+    const box = document.getElementById('mfaEnrolBox');
+    if (d.enrolled) {
+        line.textContent = 'A second factor is active. You will be asked for a code from your '
+            + 'authenticator app each time you sign in.';
+        box.style.display = 'none';
+        start.style.display = 'none';
+        confirm.style.display = 'none';
+        // A role for which MFA is compulsory cannot turn it off here — the server
+        // refuses with a 409 naming the administrator reset, and that message is
+        // shown rather than the control being hidden, so the rule is explained
+        // instead of the button simply missing.
+        disable.style.display = d.mandatory ? 'none' : 'inline-block';
+        return;
+    }
+    line.textContent = d.mandatory
+        ? 'Your role requires a second factor. You will be asked to set one up the next time you sign in.'
+        : 'Add a second step to sign-in using an authenticator app.';
+    start.style.display = 'inline-block';
+    confirm.style.display = 'none';
+    disable.style.display = 'none';
+    box.style.display = 'none';
+}
+document.getElementById('mfaStartBtn').addEventListener('click', async () => {
+    const r = await fetch('/api/mfa/enrol', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { mfaSay(d.error || 'Could not start enrolment.', false); return; }
+    document.getElementById('mfaSecret').textContent = d.secret;
+    document.getElementById('mfaQr').src = d.qr_url + '?t=' + Date.now();
+    document.getElementById('mfaEnrolBox').style.display = 'block';
+    document.getElementById('mfaStartBtn').style.display = 'none';
+    document.getElementById('mfaConfirmBtn').style.display = 'inline-block';
+    document.getElementById('mfaCode').focus();
+});
+document.getElementById('mfaForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = document.getElementById('mfaCode').value.replace(/\D/g, '');
+    if (code.length !== 6) { mfaSay('Enter the six digits shown in your app.', false); return; }
+    const r = await fetch('/api/mfa/confirm', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { mfaSay(d.error || 'That code was not accepted.', false); return; }
+    document.getElementById('mfaCode').value = '';
+    mfaSay('Two-factor authentication is now active.', true);
+    await loadMfaStatus();
+});
+document.getElementById('mfaDisableBtn').addEventListener('click', async () => {
+    const r = await fetch('/api/mfa/disable', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { mfaSay(d.error || 'Could not turn the second factor off.', false); return; }
+    mfaSay('Two-factor authentication is off.', true);
+    await loadMfaStatus();
+});
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

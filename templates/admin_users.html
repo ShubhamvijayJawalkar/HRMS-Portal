@@ -470,7 +470,16 @@ function loadUsers(page) {
             const piiAction = u.emp_id === myEmpId || !canRevealPii ? '' : `<button class="btn btn-outline-warning btn-sm" onclick="revealPii('${u.emp_id}','${esc(u.name)}')" title="Personal data (audited)"><i class="bi bi-eye"></i></button>`;
             const policyAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-info btn-sm" onclick="openLeavePolicy('${u.emp_id}')" title="Leave policy"><i class="bi bi-calendar2-week"></i></button>`;
             const anonAction = (u.status !== 'Archived' || !canAnonymise) ? '' : `<button class="btn btn-outline-danger btn-sm" onclick="openAnonymise('${u.emp_id}','${esc(u.name)}')" title="Anonymise (irreversible, two-person)"><i class="bi bi-shield-exclamation"></i></button>`;
-            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${anonAction}${accessAction}${archiveAction}</div>`;
+            // FR-AUTH-11 recovery. Shown for active/onboarding accounts only,
+            // because a blocked or archived account cannot sign in to be locked
+            // out of — the server refuses those with a 409, so the button would
+            // only ever produce an error. It deliberately does NOT say whether the
+            // target has a second factor: the reset route does not disclose that
+            // either, so the UI cannot be used to find out who is protected.
+            const mfaAction = ['Active', 'Onboarding'].includes(u.status)
+                ? `<button class="btn btn-outline-warning btn-sm" onclick="resetMfa('${u.emp_id}','${esc(u.name)}')" title="Reset two-factor (audited)"><i class="bi bi-phone"></i></button>`
+                : '';
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${mfaAction}${anonAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -761,6 +770,20 @@ async function savePermissions() {
     bootstrap.Modal.getInstance(document.getElementById('permissionsModal')).hide();
     const changes = res.changes;
     showMsg(`Permissions saved for ${res.emp_id} (added: ${changes.added.length}, removed: ${changes.removed.length}, changed: ${changes.changed.length})`, 'success');
+}
+
+// FR-AUTH-11: an administrator resetting someone's second factor. Confirm()
+// rather than an inline button because this is the action an attacker asks for
+// right after stealing a password — "I lost my phone" — so it should cost a
+// deliberate click, and the audit row records who pressed it.
+async function resetMfa(empId, name) {
+    if (!confirm(`Reset two-factor authentication for ${name} (${empId})?\n\n`
+        + 'They will be asked to enrol a new authenticator the next time they sign in. '
+        + 'This is recorded in the audit log.')) return;
+    const r = await fetch(`/api/admin/users/${empId}/mfa/reset`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Could not reset two-factor authentication', 'error'); return; }
+    showMsg(d.message || `Two-factor reset for ${empId}`, 'success');
 }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

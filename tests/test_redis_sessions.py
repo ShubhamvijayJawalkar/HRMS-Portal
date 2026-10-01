@@ -89,7 +89,44 @@ def _csrf(c, method, url, **kwargs):
 
 
 def _login(c, emp_id, password=PASSWORD):
-    return c.post('/login', json={'emp_id': emp_id, 'password': password})
+    """Sign in, walking the FR-AUTH-11 second factor when the account has one.
+
+    The admin this file authenticates as is an Admin, and MFA is compulsory for
+    that role, so a bare password leaves the session parked and every assertion
+    below about the *server-side* session store would be reading a cookie that
+    was never issued. Walking the real flow keeps this file testing what it exists
+    to test.
+    """
+    import pyotp
+
+    import mfa as _mfa
+
+    r = c.post('/login', json={'emp_id': emp_id, 'password': password})
+    if not (r.is_json and r.get_json().get('mfa_required')):
+        return r
+
+    step = r.get_json()['mfa_required']
+    if step == 'enrol_required':
+        started = _csrf(c, 'post', '/api/mfa/enrol')
+        if started.status_code != 200:
+            return started
+        # A first-time enrolment finishes at `/confirm`, which also completes the
+        # sign-in. Answering at `/challenge` here is a 409 — the parked step is
+        # `enrol`, not `challenge`.
+        endpoint = '/api/mfa/confirm'
+    else:
+        endpoint = '/api/mfa/challenge'
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = ?', [emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise AssertionError(f'{emp_id} needs a second factor but has no credential')
+    code = pyotp.TOTP(_mfa.decrypt_secret(row[0])).now()
+    return _csrf(c, 'post', endpoint, json={'code': code})
 
 
 def _sid(c):

@@ -28,15 +28,23 @@ that the control is meaningless. The taxonomy is therefore fixed *here* and the
 derivation is the only place a notification type is turned into a category.
 
 **A recorded deviation.** The SRS names six categories and the app emits events
-outside them, so the set is the six plus two documented extras:
+outside them, so the set is the six plus three documented extras:
 
 * ``Performance`` — goal ratings and submitted reviews (FR-PERF). Nothing in the
   SRS covers them, but forcing a goal rating into ``General`` would lump it with
   genuinely uncategorisable events.
 * ``Holiday`` — optional-holiday opt-in decisions (FR-HOL-03).
+* ``Security`` — account-credential events: an administrator resetting an
+  employee's second factor (FR-AUTH-11). It is a real extra rather than a fourth
+  routing of MFA to ``General`` because the notification is *functionally
+  required*, not decorative: an employee whose MFA has been reset must be told,
+  or their next sign-in silently demands an enrolment they cannot explain. Being
+  able to see "just the credential events" on its own switch is the useful
+  property; the audit trail, not the notification, is what guarantees the event
+  is recorded.
 
 Forcing those into one of the six would be worse than naming them, and the extra
-two are reported alongside the six everywhere the taxonomy is exposed, so the
+three are reported alongside the six everywhere the taxonomy is exposed, so the
 deviation is visible rather than buried.
 
 **``Tickets-SLA`` is kept even though nothing produces it yet.** FR-TKT-01
@@ -57,7 +65,7 @@ from __future__ import annotations
 
 # The SRS's six, in its order, then the two documented extras.
 SRS_CATEGORIES = ('Onboarding', 'Leaves', 'Expenses', 'Tickets', 'Payroll', 'Tickets-SLA')
-EXTRA_CATEGORIES = ('Performance', 'Holiday')
+EXTRA_CATEGORIES = ('Performance', 'Holiday', 'Security')
 CATEGORIES = SRS_CATEGORIES + EXTRA_CATEGORIES
 
 # The catch-all for an event with no better home. It is deliberately *not*
@@ -71,7 +79,7 @@ CHANNELS = ('in_app', 'email')
 # The canonical table in the v1.0 order, the SRS order, then the extras. Ordered
 # so the preference payload is stable for a UI and for a test.
 _PREFERRED_ORDER = ('Leaves', 'Expenses', 'Tickets', 'Tickets-SLA', 'Payroll',
-                    'Onboarding', 'Performance', 'Holiday')
+                    'Onboarding', 'Performance', 'Holiday', 'Security')
 
 # Explicit type -> category mapping, longest-prefix-wins. Written out rather than
 # inferred from substrings because substring inference is what produced 'Leave'
@@ -99,6 +107,10 @@ _PREFIX_RULES = (
     # exists to remove.
     ('OFFBOARD', 'Onboarding'),
     ('PAYROLL', 'Payroll'),
+    # Credential events (FR-AUTH-11): an admin resetting someone's second factor
+    # has to be *told to them*, or the next sign-in demands an enrolment they
+    # cannot explain and they conclude they have been hacked.
+    ('MFA', 'Security'),
     # Deliberately NO break or punch rule, though the earlier substring derivation
     # produced a `BREAK -> Leave` mapping and the category `'Leave'` is not even in
     # the taxonomy. Break decisions are attendance events the SRS gives no category
@@ -129,6 +141,7 @@ _EXACT = {
     'HOLIDAY_OPTIN_REJECTED': 'Holiday',
     'PAYROLL': 'Payroll',
     'PAYSLIP': 'Payroll',
+    'MFA_RESET': 'Security',
 }
 
 
@@ -271,6 +284,7 @@ KNOWN_TYPES = (
     'TICKET_ASSIGNED', 'TICKET_UPDATED',
     'GOAL_RATED', 'REVIEW_SUBMITTED',
     'HOLIDAY_OPTIN_REQUESTED',
+    'MFA_RESET',
     # outbox.py
     'PAYROLL', 'ONBOARDING',
 )

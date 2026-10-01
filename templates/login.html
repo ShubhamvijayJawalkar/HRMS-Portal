@@ -69,6 +69,13 @@
         .role-badge.employee { background: #EFF6FF; color: var(--accent); }
         .pulse { animation: pulse 2s infinite; }
         @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.7; } }
+        /* ── FR-AUTH-11 second factor ──────────────────────────────────────── */
+        #mfaStep { display: none; }
+        #mfaStep .code-input { letter-spacing: 8px; font-size: 20px; font-weight: 700; text-align: center; }
+        #mfaSecret { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; background: var(--background); border: 1.5px dashed var(--border); border-radius: 10px; padding: 10px 12px; user-select: all; }
+        #mfaQr { width: 190px; height: 190px; border: 1px solid var(--border); border-radius: 12px; padding: 8px; background: #fff; }
+        .step-back { color: var(--text-muted); font-size: 13px; text-decoration: none; cursor: pointer; background: none; border: none; }
+        .step-back:hover { color: var(--text); text-decoration: underline; }
     </style>
 </head>
 <body>
@@ -109,6 +116,47 @@
             <div class="success-message" id="successMsg"></div>
         </form>
 
+        <!-- FR-AUTH-11: the second step of sign-in. Shown in place of the password
+             form once the server has accepted the password and asked for a
+             factor. It is one panel because a first-time enrolment and a routine
+             challenge are the same gesture — "type the six digits your
+             authenticator shows" — differing only in whether a QR is shown first. -->
+        <div id="mfaStep">
+            <h2>Second Factor</h2>
+            <p class="subtitle" id="mfaSubtitle">Enter the 6-digit code from your authenticator app</p>
+
+            <div id="mfaEnrolBox" style="display:none" class="mb-3 text-center">
+                <img id="mfaQr" alt="Authenticator QR code">
+                <p class="text-muted mt-3 mb-2" style="font-size:13px">
+                    Scan this with your authenticator app, or enter the key by hand:
+                </p>
+                <div id="mfaSecret"></div>
+            </div>
+
+            <form id="mfaForm" autocomplete="off">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="mb-3">
+                    <label for="mfaCode" class="form-label">Authenticator code</label>
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-phone"></i></span>
+                        <input type="text" id="mfaCode" class="form-control code-input"
+                               placeholder="000000" maxlength="6" inputmode="numeric"
+                               autocomplete="one-time-code" required>
+                    </div>
+                </div>
+                <button type="submit" class="btn-login" id="mfaBtn">
+                    <span id="mfaBtnText">Verify</span>
+                    <span id="mfaBtnSpinner" class="spinner-border spinner-border-sm d-none" role="status"></span>
+                </button>
+                <div class="text-center mt-3">
+                    <button type="button" class="step-back" id="mfaBack">
+                        <i class="bi bi-arrow-left me-1"></i>Back
+                    </button>
+                </div>
+                <div class="error-message" id="mfaErrorMsg"></div>
+            </form>
+        </div>
+
 
     </div>
 </div>
@@ -130,11 +178,130 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
         const response = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: empId, password: password }) });
         const data = await response.json();
         if (!response.ok) { errorMsg.textContent = data.error || 'Login failed'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); return; }
+        // FR-AUTH-11: a 200 here does not mean "signed in". For an account with a
+        // second factor the response says which one it wants, and the session is
+        // still parked — so branch on it before treating it as success.
+        if (data.mfa_required) {
+            btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none');
+            localStorage.setItem('userName', empId);
+            await beginMfa(data.mfa_required === 'enrol_required' ? 'enrol' : 'challenge');
+            return;
+        }
         localStorage.setItem('userName', data.name || empId);
         successMsg.textContent = 'Login successful! Redirecting...';
         successMsg.style.display = 'block';
         setTimeout(() => { window.location.href = data.redirect; }, 800);
     } catch (error) { errorMsg.textContent = 'Connection error. Please try again.'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); }
+});
+
+// ── FR-AUTH-11: the second step ───────────────────────────────────────────
+// Two server-chosen steps, and the endpoint that finishes each is named
+// explicitly rather than derived from the step name: enrolment is confirmed
+// with `POST /api/mfa/confirm`, while an existing factor is checked with
+// `POST /api/mfa/challenge`. Building the URL as '/api/mfa/' + step pointed the
+// enrolment submit back at `/api/mfa/enrol`, which *mints a new secret* — so the
+// code the user had just read stopped matching and the page navigated on
+// without ever verifying anything. Which endpoint answers is not a naming
+// coincidence, so it is spelled out.
+const MFA_STEPS = {
+    enrol: { confirmUrl: '/api/mfa/confirm' },
+    challenge: { confirmUrl: '/api/mfa/challenge' },
+};
+let mfaStep = null;
+
+async function beginMfa(step) {
+    mfaStep = step;
+    document.getElementById('loginForm').style.display = 'none';
+    document.getElementById('mfaStep').style.display = 'block';
+    document.getElementById('mfaErrorMsg').style.display = 'none';
+    const enrolBox = document.getElementById('mfaEnrolBox');
+    if (step === 'enrol') {
+        enrolBox.style.display = 'block';
+        document.getElementById('mfaSubtitle').textContent =
+            'Your role requires a second factor. Set it up now.';
+        // The secret is written to the database *before* the code is confirmed, so
+        // the QR can be re-fetched if this page is reloaded mid-enrolment.
+        const r = await fetch('/api/mfa/enrol', { method: 'POST' });
+        if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            failMfa(d.error || 'Could not start enrolment.');
+            return;
+        }
+        const d = await r.json();
+        document.getElementById('mfaSecret').textContent = d.secret;
+        document.getElementById('mfaQr').src = d.qr_url + '?t=' + Date.now();
+        document.getElementById('mfaBtnText').textContent = 'Confirm and sign in';
+    } else {
+        enrolBox.style.display = 'none';
+        document.getElementById('mfaSubtitle').textContent =
+            'Enter the 6-digit code from your authenticator app';
+        document.getElementById('mfaBtnText').textContent = 'Verify';
+    }
+    document.getElementById('mfaCode').focus();
+}
+
+function failMfa(message) {
+    const el = document.getElementById('mfaErrorMsg');
+    el.textContent = message;
+    el.style.display = 'block';
+    document.getElementById('mfaCode').value = '';
+    document.getElementById('mfaCode').focus();
+}
+
+document.getElementById('mfaForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = document.getElementById('mfaCode').value.replace(/\D/g, '');
+    const errorMsg = document.getElementById('mfaErrorMsg');
+    const btn = document.getElementById('mfaBtn');
+    const btnText = document.getElementById('mfaBtnText');
+    const spinner = document.getElementById('mfaBtnSpinner');
+    errorMsg.style.display = 'none';
+    if (code.length !== 6) { failMfa('Enter the six digits shown in your app.'); return; }
+    btn.disabled = true; btnText.textContent = 'Verifying...'; spinner.classList.remove('d-none');
+    try {
+        // One endpoint per step, named in `MFA_STEPS`: confirming a new factor
+        // also completes this sign-in (the password already passed), while a
+        // challenge verifies an existing one. Both answer with `redirect` on
+        // success. The step must be one the server chose — a hand-crafted POST to
+        // `/api/mfa/challenge` with no parked login is refused there, so an
+        // unknown step here cannot reach a code check it should not.
+        const step = MFA_STEPS[mfaStep];
+        if (!step) { failMfa('Something went wrong. Sign in again.'); return; }
+        const response = await fetch(step.confirmUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: code }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            // A locked-out challenge has thrown the parked login away, so there is
+            // nothing to retry — say so rather than looping the user on a code
+            // that can never be accepted.
+            if (response.status === 429) {
+                btn.disabled = true;
+                errorMsg.textContent = data.error || 'Too many attempts. Sign in again.';
+                errorMsg.style.display = 'block';
+                setTimeout(() => { window.location.reload(); }, 2500);
+                return;
+            }
+            failMfa(data.error || 'That code was not accepted.');
+            return;
+        }
+        btnText.textContent = 'Signed in';
+        setTimeout(() => { window.location.href = data.redirect || '/dashboard'; }, 400);
+    } catch (error) {
+        failMfa('Connection error. Please try again.');
+    } finally {
+        btn.disabled = false;
+        spinner.classList.add('d-none');
+        if (btnText.textContent === 'Verifying...') btnText.textContent = 'Verify';
+    }
+});
+
+document.getElementById('mfaBack').addEventListener('click', () => {
+    // Back means "start over": the parked password step is discarded by reloading,
+    // which is the honest reset — there is no way to un-answer a correct code.
+    window.location.reload();
 });
 
 async function showForgotPassword() {

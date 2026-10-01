@@ -128,11 +128,28 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    "default of 'pass123' is gone: a user created without a password gets a "
                    'generated compliant one, returned once. The rejection message is generic, '
                    'so it is not an oracle for confirming a guess.'),
-    'FR-AUTH-11': ('M', 'N', 'NOT_STARTED', (),
-                   'No MFA. mfa_credentials exists in the canonical schema with an '
-                   'encrypted secret, but nothing reads or writes it: no enrolment, '
-                   'no challenge, no gate. This is the largest single gap found by the '
-                   'traceability pass.'),
+    'FR-AUTH-11': ('M', 'N', 'IMPLEMENTED',
+                   ('/api/mfa/enrol', '/api/mfa/confirm', '/api/mfa/challenge',
+                    '/api/mfa/status', '/api/mfa/qr', '/api/mfa/disable',
+                    '/api/admin/users/<emp_id>/mfa/reset'),
+                   'mfa.py: TOTP (RFC 6238) for Admin/Super Admin/HR/Finance and '
+                   'self-service opt-in for everyone else. Two-phase enrolment — the '
+                   'row is written with enabled=0 and only a valid code promotes it, '
+                   'so a stolen password cannot enrol an attacker\'s own authenticator '
+                   'against the account. The password step parks the identity in '
+                   'session["mfa_pending"] and deliberately does NOT set session["emp_id"], '
+                   'so a half-authenticated session is refused by every existing gate by '
+                   'construction rather than by each route remembering to check. Five '
+                   'wrong codes abandon the parked login (429); one step of clock drift '
+                   'is tolerated; the pending state expires after ten minutes. Secrets are '
+                   'Fernet-encrypted under a dedicated MFA_ENCRYPTION_KEY and the feature '
+                   'refuses with 503 rather than storing them in the clear — key '
+                   'separation from SECRET_KEY, mirroring ANONYMISATION_SALT. Recovery is '
+                   'an audited admin reset only, which is the weaker of the two answers '
+                   'the SRS allows: there are no recovery codes, so the mitigation is that '
+                   'the reset answers identically whether or not the target was enrolled '
+                   '(so it cannot be used to find out who is protected) and writes a '
+                   'before/after audit row. A mandatory role cannot disable its own factor.'),
     'FR-AUTH-12': ('M', 'C', 'IMPLEMENTED', ('/api/csrf-token',),
                    'Double-submit on every mutating /api request; a fetch wrapper '
                    'attaches the header and native forms carry the hidden field. '

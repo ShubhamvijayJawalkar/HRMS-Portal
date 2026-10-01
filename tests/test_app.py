@@ -22,6 +22,10 @@ os.environ.setdefault(
     'DATABASE_URL',
     'postgresql+psycopg://postgres:postgres@localhost:55432/hrms',
 )
+# FR-AUTH-11: encrypts authenticator secrets at rest. A fixed non-production
+# value; the MFA routes return 503 without it rather than storing secrets in
+# the clear, so the suite must supply one to exercise them.
+os.environ.setdefault('MFA_ENCRYPTION_KEY', '3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=')
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['FLASK_DEBUG'] = '0'
 # The app's global "200 per minute" limit is meant for production traffic. A
@@ -29,6 +33,14 @@ os.environ['FLASK_DEBUG'] = '0'
 # the CSRF-token fetch surfaces much later as a bogus "CSRF token missing or
 # invalid" on an unrelated assertion, so lift it for tests.
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
+# The login route carries its own tighter limit (20/minute by default), and this
+# suite never lifted it — the browser suite always has. A full run makes ~230
+# logins inside a couple of minutes, all from 127.0.0.1 and therefore all in one
+# bucket, so the limit was being hit. It surfaced as an unexplained `401` on an
+# MFA challenge hundreds of lines from the request that tripped it, because the
+# parked login state was never created. The same reason as the line above:
+# production limits are not what these tests are measuring.
+os.environ.setdefault('LOGIN_RATE_LIMIT', '100000 per minute')
 # `HRMS_DISABLE_SCHEDULER=1` is available for a fully deterministic run; the
 # suite keeps the scheduler on so the job-registration tests stay meaningful, and
 # the import tests below tolerate the dispatcher picking a job up first.
@@ -43,8 +55,10 @@ db_backend.reset_schema()
 # The env must be set above before `app` is imported: it decides the schema and
 # the schema is dropped/recreated here, so these two imports are intentionally
 # late (E402).
+import pyotp  # noqa: E402
 import pytest  # noqa: E402
 
+import mfa  # noqa: E402
 from app import (  # noqa: E402
     _next_generated_id,
     app,
@@ -90,9 +104,55 @@ def client():
             yield c
 
 
+def _stored_mfa_secret(emp_id):
+    """Decrypt an enrolled employee's authenticator secret for a challenge."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row, f'{emp_id} has no MFA credential to challenge against'
+    return mfa.decrypt_secret(row[0])
+
+
+def login_as(client, emp_id='EMP001', password='pass123', **kwargs):
+    """POST /login and complete the second factor when the account has one.
+
+    EMP001 is an Admin, so FR-AUTH-11 makes a second factor compulsory for it and
+    a bare login no longer establishes a session. Rather than exempting the
+    suite from MFA — a test-only bypass of a security control hides exactly the
+    regressions the control exists to catch — the harness walks the real flow.
+    The first call enrols (the seeded admin has no credential), later ones
+    challenge. Accounts whose role is not mandatory, such as the seeded
+    EMP002, still take the single-step path, which keeps a one-step login
+    covered too.
+    """
+    resp = client.post(
+        '/login', json={'emp_id': emp_id, 'password': password}, **kwargs
+    )
+    assert resp.status_code == 200, resp.get_json()
+    data = resp.get_json()
+    step = data.get('mfa_required')
+    if not step:
+        return data
+    if step == 'enrol_required':
+        enrol = client.post('/api/mfa/enrol')
+        assert enrol.status_code == 200, enrol.get_json()
+        secret = enrol.get_json()['secret']
+        done = client.post('/api/mfa/confirm', json={'code': pyotp.TOTP(secret).now()})
+    else:
+        secret = _stored_mfa_secret(emp_id)
+        done = client.post('/api/mfa/challenge',
+                           json={'code': pyotp.TOTP(secret).now()})
+    assert done.status_code == 200, done.get_json()
+    return done.get_json()
+
+
 @pytest.fixture
 def auth_client(client):
-    client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+    login_as(client, 'EMP001', 'pass123')
     return client
 
 
@@ -121,10 +181,19 @@ def test_login_invalid_emp(client):
 
 
 def test_login_admin_success(client):
+    """FR-AUTH-11: an Admin's password alone is no longer a session.
+
+    The seeded admin has no credential, so the first sign-in is told to enrol.
+    The assertion that matters is the negative one below: the response must not
+    say the login succeeded.
+    """
     resp = client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
     data = resp.get_json()
     assert resp.status_code == 200
-    assert data.get('redirect') == '/dashboard'
+    assert data['mfa_required'] == 'enrol_required'
+    assert data['mandatory'] is True
+    # No session was established: the dashboard still refuses.
+    assert client.get('/api/profile').status_code == 401
 
 
 # ── Authentication Tests ────────────────────────────────────────
@@ -311,7 +380,7 @@ def test_csrf_guard_enforced_and_accepts_valid_token(client):
 
 def test_csrf_bootstrap_first_request_allowed(client):
     """A session with no token yet has nothing to protect — first request passes."""
-    raw = app.test_client()
+    raw = _fresh_client()
     r = raw.post('/login', json={'emp_id': 'nobody', 'password': 'x'})
     assert r.status_code == 401  # Invalid Employee ID, not 403
 
@@ -325,8 +394,7 @@ def test_login_rehashes_legacy_bcrypt_to_argon2(client):
     conn.close()
     assert check_password('pass123', legacy)
 
-    r = client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
-    assert r.status_code == 200, r.get_json()
+    login_as(client, 'EMP001', 'pass123')
 
     conn = get_db()
     upgraded = conn.execute("SELECT password FROM users WHERE emp_id = 'EMP001'").fetchone()[0]
@@ -652,18 +720,36 @@ def test_change_password(client):
 
 def test_active_users_endpoint_filters_inactive_employees(client):
     conn = get_db()
-    conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = ?", ['EMP002'])
-    conn.commit()
-    conn.close()
-    with client.session_transaction() as sess:
-        sess['emp_id'] = 'EMP001'
-        sess['name'] = 'Admin'
-        sess['role'] = 'Admin'
-        sess['session_id'] = 99998
-    resp = client.get('/api/users?active=1')
-    assert resp.status_code == 200
-    data = resp.get_json()
-    assert all(item['status'] == 'Active' for item in data['data'])
+    try:
+        original = conn.execute(
+            "SELECT status FROM users WHERE emp_id = ?", ['EMP002'],
+        ).fetchone()[0]
+        conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = ?", ['EMP002'])
+    finally:
+        conn.close()
+    try:
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP001'
+            sess['name'] = 'Admin'
+            sess['role'] = 'Admin'
+            sess['session_id'] = 99998
+        resp = client.get('/api/users?active=1')
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert all(item['status'] == 'Active' for item in data['data'])
+    finally:
+        # Restore in a `finally`. Leaving the *seeded* employee Blocked was
+        # harmless only while no later test signed in as EMP002; FR-AUTH-11 does,
+        # and it failed as an unexplained 401 four hundred lines away from here.
+        # A test that mutates shared fixture state and does not put it back is a
+        # trap for the next person who writes a test, not just untidy.
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE users SET status = ? WHERE emp_id = ?", [original, 'EMP002'],
+            )
+        finally:
+            conn.close()
 
 
 
@@ -3624,15 +3710,31 @@ def test_a_holiday_can_be_edited_and_the_edit_is_audited(client):
 
         conn = get_db()
         try:
-            row = conn.execute(
-                'SELECT action, "before", "after" FROM audit_log WHERE action = '
-                "'HOLIDAY_UPDATE' AND CAST(entity_id AS VARCHAR) = ?", [str(hid)],
-            ).fetchone()
+            # Every update, ordered by the key — not `fetchone()` on an unordered
+            # query. There are three HOLIDAY_UPDATE rows by now (the rename, and
+            # the later date move, plus whichever the copy/other tests added for
+            # this same entity), and an unordered fetchone() returns whichever the
+            # heap happens to offer first. It passed on one run and failed on the
+            # next purely because the rows moved on disk when unrelated audit
+            # traffic changed, which is the definition of a test that is not
+            # testing anything. Ordering by log_id makes the sequence itself the
+            # assertion, which is stronger than picking one row.
+            rows = conn.execute(
+                'SELECT "before", "after" FROM audit_log WHERE action = '
+                "'HOLIDAY_UPDATE' AND CAST(entity_id AS VARCHAR) = ? "
+                'ORDER BY log_id', [str(hid)],
+            ).fetchall()
         finally:
             conn.close()
-        assert row is not None, 'the edit was not audited'
-        assert json.loads(row[2])['name'] == 'Probe Renamed', row
-        assert json.loads(row[1])['name'] == 'Probe Edit Me', row
+        assert rows, 'the edit was not audited'
+        before, after = json.loads(rows[0][0]), json.loads(rows[0][1])
+        assert before['name'] == 'Probe Edit Me', rows[0]
+        assert after['name'] == 'Probe Renamed', rows[0]
+        # The later update moved only the date: the name is untouched, which is
+        # the partial-update behaviour asserted above in the response.
+        last_after = json.loads(rows[-1][1])
+        assert last_after['name'] == 'Probe Renamed', rows[-1]
+        assert last_after['date'] == _far_date(500), rows[-1]
     finally:
         _cleanup_holidays('Probe Renamed', 'Probe Edit Me')
 
@@ -5587,9 +5689,8 @@ def test_idempotency_keys_expired_cleaned_by_job(client):
 
 def test_audit_log_expanded_fields(client):
     """CC-13: LOGIN audits actor/entity/entity_id and honours X-Request-ID."""
-    resp = client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'},
-                       headers={'X-Request-ID': 'trace-abc-123'})
-    assert resp.status_code == 200, resp.get_json()
+    login_as(client, 'EMP001', 'pass123',
+             headers={'X-Request-ID': 'trace-abc-123'})
     conn = get_db()
     row = conn.execute(
         "SELECT actor, entity, entity_id, request_id FROM audit_log "
@@ -6563,6 +6664,380 @@ def test_lifecycle_scheduler_job_registered():
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
     assert app_module.scheduler.get_job('import-dispatch') is not None
     assert app_module.scheduler.get_job('outbox-dispatch') is not None
+
+
+# ── FR-AUTH-11 multi-factor authentication ────────────────────────────────
+# The traceability pass found `mfa_credentials` in the canonical schema with an
+# encrypted secret column and **no code anywhere that read or wrote it** — no
+# enrolment, no challenge, no gate. These tests are for the gate, because the
+# gate is the requirement: a table and a helper module are not MFA.
+#
+# The seeded admin (EMP001) is an Admin, so FR-AUTH-11 makes a second factor
+# compulsory for it and `login_as` walks the real flow on every use rather than
+# exempting the suite from the control.
+
+
+def _fresh_client():
+    """A second test client, CSRF-wrapped like the `client` fixture's.
+
+    Most MFA tests need more than one actor — a half-authenticated session, a
+    non-admin, a fresh login — and `_attach_csrf` only wraps the fixture's
+    client. Wrapping here rather than passing the header by hand keeps every
+    write in these tests honest about CSRF instead of quietly depending on which
+    requests happen to be GETs.
+    """
+    return _attach_csrf(app.test_client())
+
+
+def _mfa_row(emp_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT secret_encrypted, enabled FROM mfa_credentials WHERE emp_id = ?',
+            [emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _clear_mfa(*emp_ids):
+    if not emp_ids:
+        return
+    placeholders = ','.join('?' for _ in emp_ids)
+    conn = get_db()
+    try:
+        conn.execute(
+            f'DELETE FROM mfa_credentials WHERE emp_id IN ({placeholders})',
+            list(emp_ids),
+        )
+    finally:
+        conn.close()
+
+
+def _enrol(c):
+    """Start an enrolment and return the plaintext secret."""
+    resp = c.post('/api/mfa/enrol')
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json()['secret']
+
+
+def test_mfa_enrolment_stores_an_encrypted_secret_and_is_not_usable_until_confirmed(client):
+    """The row exists after `enrol` so `confirm` is stateless, but it grants nothing.
+
+    The half-proved state has to be inert, or an attacker holding a stolen
+    password could enrol their own authenticator against someone else's account
+    and then log in. `enabled = 0` is what makes the row a draft rather than a
+    credential.
+    """
+    login_as(client, 'EMP001', 'pass123')
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM mfa_credentials WHERE emp_id = ?', ['EMP001'])
+    finally:
+        conn.close()
+
+    secret = _enrol(client)
+    stored, enabled = _mfa_row('EMP001')
+    assert stored and stored != secret, 'the secret is stored in the clear'
+    assert mfa.decrypt_secret(stored) == secret
+
+    # Draft, not credential: the status route reports not-enrolled, and a login
+    # still asks for an enrolment rather than a challenge.
+    assert client.get('/api/mfa/status').get_json()['enrolled'] is False
+    fresh = _fresh_client()
+    resp = fresh.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+    assert resp.get_json()['mfa_required'] == 'enrol_required'
+
+
+def test_mfa_status_reports_whether_enrolment_is_compulsory(client):
+    """A mandatory role and an ordinary one must get different answers."""
+    login_as(client, 'EMP001', 'pass123')
+    admin_status = client.get('/api/mfa/status').get_json()
+    assert admin_status['mandatory'] is True
+    assert admin_status['role'] == 'Admin'
+
+    # EMP002 is a plain Employee: same route, and no compulsion.
+    with _fresh_client() as opt:
+        opt.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+        # EMP002 must not already be enrolled from an earlier test.
+        st = opt.get('/api/mfa/status').get_json()
+        assert st['mandatory'] is False
+        assert st['role'] == 'Employee'
+        assert st['enrolled'] is False
+
+
+def test_mfa_wrong_confirmation_code_does_not_enable_the_credential(client):
+    """A wrong code leaves the enrolment a draft; a right one promotes it."""
+    login_as(client, 'EMP001', 'pass123')
+    # `login_as` enrols the seeded admin on first use, so a test that wants to
+    # drive enrolment itself has to start from "no credential" explicitly rather
+    # than depend on which test ran before it.
+    _clear_mfa('EMP001')
+    secret = _enrol(client)
+
+    assert client.post('/api/mfa/confirm', json={'code': '000000'}).status_code == 401
+    assert _mfa_row('EMP001')[1] == 0, 'a wrong code enabled the credential'
+
+    assert client.post(
+        '/api/mfa/confirm', json={'code': pyotp.TOTP(secret).now()}
+    ).status_code == 200
+    assert _mfa_row('EMP001')[1] == 1
+
+
+def test_mfa_challenge_is_required_for_every_subsequent_login(client):
+    """The gate, on the path that matters: an enrolled admin is stopped."""
+    login_as(client, 'EMP001', 'pass123')
+    client.get('/logout')
+
+    fresh = _fresh_client()
+    resp = fresh.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+    assert resp.status_code == 200
+    assert resp.get_json()['mfa_required'] == 'challenge_required'
+
+    # A half-authenticated session reaches nothing. Probed on a client of its
+    # own, separate from the one that presents the code, because a gate denial
+    # calls `session.clear()` — which also throws away the parked password step.
+    # (That coupling is safe rather than merely inconvenient: the worst case is a
+    # user with a stale tab who has to sign in again.)
+    with _fresh_client() as probe:
+        probe.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+        assert probe.get('/api/profile').status_code == 401
+        assert probe.get('/dashboard').status_code in (302, 401)
+        assert probe.get('/api/users').status_code == 401
+
+    secret = _stored_mfa_secret('EMP001')
+    assert fresh.post(
+        '/api/mfa/challenge', json={'code': pyotp.TOTP(secret).now()}
+    ).status_code == 200
+    assert fresh.get('/api/profile').status_code == 200
+
+
+def test_mfa_five_wrong_challenge_codes_abandon_the_login(client):
+    """A 6-digit code is 10^6; with no attempt cap that is a real attack, not a
+    theoretical one. Five attempts, then the pending login is thrown away."""
+    login_as(client, 'EMP001', 'pass123')
+    client.get('/logout')
+
+    # One session for all five attempts, because that is how the attack works —
+    # an attacker reuses the parked password step, they do not re-authenticate.
+    attacker = _fresh_client()
+    attacker.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
+
+    codes = []
+    for _ in range(mfa.MAX_CHALLENGE_ATTEMPTS):
+        codes.append(attacker.post('/api/mfa/challenge',
+                                   json={'code': '000000'}).status_code)
+    assert codes[:-1] == [401] * (mfa.MAX_CHALLENGE_ATTEMPTS - 1), codes
+    assert codes[-1] == 429, codes
+
+    # The pending state is gone, so the locked-out session cannot keep guessing
+    # with the same parked password step.
+    assert attacker.post(
+        '/api/mfa/challenge', json={'code': '000000'}
+    ).status_code == 401
+    assert attacker.get('/api/profile').status_code == 401
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM audit_log WHERE action = 'MFA_CHALLENGE_LOCKED' "
+            'AND emp_id = ?', ['EMP001'],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row, 'the abandoned challenge was not audited'
+
+
+def test_mfa_pending_login_state_expires(client):
+    """A parked password step must not outlive the interaction.
+
+    It holds the right to complete a login, so an abandoned tab left open on a
+    shared machine is a live credential until the cookie itself expires.
+    """
+    from datetime import timedelta
+
+    from flask import session as flask_session
+
+    with app.test_request_context('/'):
+        fresh = {
+            'emp_id': 'EMP002', 'step': 'challenge', 'attempts': 0,
+            'started': datetime.now().isoformat(),
+        }
+        flask_session['mfa_pending'] = fresh
+        assert mfa.pending(flask_session) == fresh
+
+        flask_session['mfa_pending'] = dict(
+            fresh, started=(datetime.now() - mfa.PENDING_TTL - timedelta(seconds=1)).isoformat()
+        )
+        assert mfa.pending(flask_session) is None
+
+        # A malformed timestamp is treated as expired rather than trusted.
+        flask_session['mfa_pending'] = dict(fresh, started='not-a-date')
+        assert mfa.pending(flask_session) is None
+
+
+def test_mfa_a_mandatory_role_cannot_disable_its_own_second_factor(client):
+    """Otherwise an admin could put themselves permanently outside the control.
+
+    The escape route is the audited Admin reset, and even that re-imposes the
+    enrolment at the next sign-in because the *role* is what makes it mandatory.
+    """
+    login_as(client, 'EMP001', 'pass123')
+    resp = client.post('/api/mfa/disable')
+    assert resp.status_code == 409, resp.get_json()
+    assert _mfa_row('EMP001') is not None, 'the credential was dropped anyway'
+
+
+def test_mfa_an_ordinary_employee_can_enrol_and_turn_the_factor_off(client):
+    """Self-service opt-in for everyone else, and a clean way back out."""
+    _clear_mfa('EMP002')
+    try:
+        with _fresh_client() as opt:
+            opt.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+            # No compulsion, so no enrolment gate on this login.
+            secret = _enrol(opt)
+            assert opt.post(
+                '/api/mfa/confirm', json={'code': pyotp.TOTP(secret).now()}
+            ).status_code == 200
+            assert opt.get('/api/mfa/status').get_json()['enrolled'] is True
+
+            assert opt.post('/api/mfa/disable').status_code == 200
+            assert opt.get('/api/mfa/status').get_json()['enrolled'] is False
+
+            conn = get_db()
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM audit_log WHERE action = 'MFA_DISABLED' "
+                    'AND emp_id = ?', ['EMP002'],
+                ).fetchone()
+            finally:
+                conn.close()
+            assert row, 'turning the factor off left no trace'
+    finally:
+        _clear_mfa('EMP002')
+
+
+def test_mfa_re_enrolment_is_refused_while_a_working_credential_exists(client):
+    """Silently replacing a live secret would be a denial of service that needs
+    nothing but a stolen password — the target's next login would demand a code
+    from an authenticator the attacker controls."""
+    login_as(client, 'EMP001', 'pass123')
+    resp = client.post('/api/mfa/enrol')
+    assert resp.status_code == 409, resp.get_json()
+    assert _stored_mfa_secret('EMP001'), 'the working secret was destroyed'
+
+
+def test_mfa_refuses_to_run_without_an_encryption_key(client):
+    """A missing key must be a refusal, not a fallback to plaintext storage."""
+    login_as(client, 'EMP001', 'pass123')
+    previous = os.environ.pop('MFA_ENCRYPTION_KEY', None)
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM mfa_credentials WHERE emp_id = ?', ['EMP001'])
+    finally:
+        conn.close()
+    try:
+        resp = client.post('/api/mfa/enrol')
+        assert resp.status_code == 503, resp.get_json()
+        assert 'MFA_ENCRYPTION_KEY' in resp.get_json()['error']
+        assert _mfa_row('EMP001') is None, 'a secret was stored without a key'
+    finally:
+        if previous:
+            os.environ['MFA_ENCRYPTION_KEY'] = previous
+
+
+def test_mfa_admin_reset_is_admin_only_and_does_not_reveal_who_is_protected(client):
+    """The reset is a social-engineering target by construction.
+
+    "I lost my phone" is what an attacker asks for right after stealing a
+    password, so two things matter beyond the role check: an employee cannot do
+    it, and the response is identical whether or not the target actually had MFA
+    on — otherwise it is a way to discover who is protected.
+    """
+    login_as(client, 'EMP001', 'pass123')
+
+    with _fresh_client() as as_employee:
+        as_employee.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+        denied = as_employee.post('/api/admin/users/EMP001/mfa/reset')
+        assert denied.status_code == 403, denied.get_json()
+
+    # Two resets of different targets: one enrolled, one not. Same shape.
+    _clear_mfa('EMP002')
+    protected = client.post('/api/admin/users/EMP001/mfa/reset')
+    unprotected = client.post('/api/admin/users/EMP002/mfa/reset')
+    assert protected.status_code == 200, protected.get_json()
+    assert unprotected.status_code == 200, unprotected.get_json()
+    assert sorted(protected.get_json()) == sorted(unprotected.get_json()), (
+        'the reset response distinguishes enrolled from unenrolled, so it can be '
+        'used to enumerate who is protected'
+    )
+
+    assert _mfa_row('EMP001') is None, 'the reset did not drop the credential'
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT details, \"before\", \"after\" FROM audit_log "
+            "WHERE action = 'MFA_RESET' AND emp_id = 'EMP001' ORDER BY log_id DESC",
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row, 'an administrator reset a second factor and it left no audit row'
+    assert json.loads(row[1]) == {'mfa_enrolled': True}, row
+    assert json.loads(row[2]) == {'mfa_enrolled': False}, row
+
+
+def test_mfa_admin_reset_refuses_a_blocked_account(client):
+    """The block already decides who may sign in; clearing a factor here would
+    suggest otherwise to an admin reading the trail."""
+    _cleanup_user_contract_rows('EMP980')
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department) VALUES ('EMP980', 'Locked Out', "
+            "'emp980@example.com', 'Employee', 'x', 'Blocked', 0, 'IT')"
+        )
+    finally:
+        conn.close()
+    try:
+        login_as(client, 'EMP001', 'pass123')
+        resp = client.post('/api/admin/users/EMP980/mfa/reset')
+        assert resp.status_code == 409, resp.get_json()
+        # A missing employee is a 404, not a 409.
+        assert client.post(
+            '/api/admin/users/EMP99998/mfa/reset'
+        ).status_code == 404
+    finally:
+        _cleanup_user_contract_rows('EMP980')
+
+
+def test_mfa_verification_tolerates_one_step_of_clock_drift():
+    """A phone and a server straddling a 30s boundary must not read as a wrong
+    code — that trains people to type the next code instead."""
+    secret = mfa.generate_secret()
+    now = int(datetime.now().timestamp())
+    live = pyotp.TOTP(secret).at(now)
+    assert mfa.verify_code(secret, live) is True
+    assert mfa.verify_code(secret, pyotp.TOTP(secret).at(now - 30)) is True
+    assert mfa.verify_code(secret, pyotp.TOTP(secret).at(now + 30)) is True
+    # Two steps either side is genuinely wrong and must stay refused.
+    assert mfa.verify_code(secret, pyotp.TOTP(secret).at(now - 90)) is False
+    # Malformed input is refused without consuming an attempt downstream.
+    assert mfa.verify_code(secret, '12345') is False
+    assert mfa.verify_code(secret, 'abcdef') is False
+    assert mfa.verify_code(secret, '') is False
+    assert mfa.verify_code(secret, None) is False
+
+
+def test_mfa_mandatory_roles_are_the_privileged_ones():
+    """The set is a deliberate choice, so it is asserted rather than implied:
+    MFA is worth most where one password reaches the whole company."""
+    assert mfa.MANDATORY_ROLES == {'Admin', 'Super Admin', 'HR', 'Finance'}
+    for role in mfa.MANDATORY_ROLES:
+        assert mfa.requires_enrolment(role) is True
+    for role in ('Employee', 'Team Leader'):
+        assert mfa.requires_enrolment(role) is False
+    assert mfa.requires_enrolment(None) is False
 
 
 if __name__ == '__main__':

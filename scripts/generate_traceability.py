@@ -52,41 +52,53 @@ rather than quietly invalidating this document.
 {groups}
 ## What the gaps have in common
 
-The `NOT_STARTED` rows are not random; they cluster in four places.
+Nine `NOT_STARTED` rows remain, and they cluster in four places.
 
-**Authentication hardening** — the session, hashing, CSRF and rate-limit work of
-Phase 3a is done, but the account-level defences are not. `FR-AUTH-03` (no
-consecutive-failure lock, so only the IP rate limit stops a password spray),
-`FR-AUTH-10` (no minimum length, no breached-password check) and `FR-AUTH-11`
-(no MFA at all) are all absent. MFA is the largest single gap this pass found:
-`mfa_credentials` sits in the canonical schema with an encrypted-secret column
-and **no code anywhere that reads or writes it** — no enrolment, no challenge,
-no gate.
+**One account-level defence is still absent** — `FR-AUTH-03`: there is no
+consecutive-failure counter and no timed lock, so a password *spray* across many
+accounts is stopped only by the per-IP login rate limit, which a distributed
+attacker never touches. The session, hashing, CSRF, MFA and password-policy work
+of Phase 3a and FR-AUTH-10/11 is done; this is the one that is not. It needs a
+`failed_attempts`/`locked_until` pair, so it is a migration.
 
-**Schema without routes** — `approval_delegations` (FR-LEA-08a),
-`notification_preferences` (FR-NOT-03) and `holiday_optins` (FR-HOL-03) have
-their tables and constraints in the canonical schema and no endpoint. The v2.0
-target was designed for capabilities the service layer has not caught up with,
-which is exactly the kind of drift a traceability matrix is for: without one,
-these read as done.
+**Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
+table and its no-overlap exclusion constraint in the canonical schema and no
+endpoint, so a manager going on leave has no way to delegate. This was the shape
+of three rows before the matrix caught them, and `notification_preferences` and
+`holiday_optins` were both fixed this way — the v2.0 target was designed for
+capabilities the service layer had not caught up with, which is exactly the kind
+of drift a traceability matrix is for.
 
-**Synchronous exports** — `FR-LEA-03`, `FR-REG-04` and `FR-RPT-02` all export
-inline, so a wide report blocks the request that asked for it. The background-job
-machinery the outbox and the CSV importer already prove is available; nothing
-reuses it for exports yet.
+**Missing endpoints, not missing logic** — `FR-USR-07` (no bulk user
+create/archive endpoint), `FR-LEA-07` (no manual leave grant) and `FR-REG-04`
+(no regularization export). Each is a route over rules that already exist
+elsewhere: the single-employee archive, the policy-derived balance, and the
+report export family.
 
-**Business rules left to the client** — `FR-EXP-03` has no state machine and no
-self-approval block, so an employee can approve their own expense claim.
-`FR-PERF-01` lets an employee rate their own goal. These are the class of gap
-that looks harmless in a demo and is not.
+**Inconsistency by duplication** — `FR-LEA-09` asks for one working-day and
+holiday-deduction function. There isn't one: leave day counting, payroll LOP and
+the reports each approximate it differently. So the same absence is deducted in
+three places and the three disagree, which is the specific failure the
+requirement exists to prevent.
 
-Two `PARTIAL` rows are security properties rather than features, and are worth
-reading before any deployment decision:
+**Deployment, not code** — `FR-JOB-05` (no scheduler leader election, so a
+multi-pod deployment runs every cron job once per pod), `FR-JOB-03` (no
+quarterly job opening the next review cycle) and `FR-ANL-04` (analytics weights
+are literals in the handler).
 
-* **FR-DOC-02** validates the file **extension**, not the content. There is no
-  malware scan. A renamed executable passes the allow-list.
-* **FR-DOC-03** serves downloads directly rather than by presigned URL, and does
-  not audit the read, so document access leaves no trail.
+The `PARTIAL` rows are worth reading before any deployment decision, because
+several are security properties rather than features:
+
+* **FR-AUTH-01** — the login rate limit is per remote address, not per account.
+* **FR-AUTH-09** — the reset token is stored unhashed, and expires in 1 h where
+  the SRS asks for 24 h.
+* **FR-AUTH-13** — `/api/credentials` has no 5-minute re-authentication, and a
+  credential read is not audited.
+* **FR-DOC-02** — uploads are validated by magic number for the claimed
+  extension and reject the EICAR marker, but there is no real scanner and no
+  per-category size cap.
+* **FR-DOC-03** — downloads are served directly rather than by presigned URL.
+  The read *is* audited now.
 """
 
 CLOSING = """
@@ -94,18 +106,26 @@ CLOSING = """
 
 Roughly in order of (risk x effort):
 
-1. **FR-DOC-02 content sniffing** — small, and it closes the "renamed .exe
-   passes" hole. No new dependency needed: read the first bytes and check the
-   magic number, which is what "sniffed from content" means in practice.
-2. **FR-EXP-03 self-approval block** — one ownership check, mirroring what
-   `approve_leave` already does. Closes an approval-integrity gap.
-3. **FR-AUTH-10 password policy** — a minimum length and a small offline
-   breached-password corpus. The schema needs nothing.
-4. **FR-AUTH-03 account lockout** — needs a failure counter and a `locked_until`
-   column, so a migration.
-5. **FR-AUTH-11 MFA** — the largest item: enrolment flow, encrypted secret
-   handling, a TOTP challenge on the login route, and recovery codes. The schema
-   is already there, which is the only reason it is worth doing.
+1. **FR-AUTH-03 account lockout** — a consecutive-failure counter and a
+   `locked_until` column. The one absent account-level defence, and the only
+   `NOT_STARTED` row with a security weight rather than a convenience one.
+2. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
+   the token. One line in the write and one in the read; it turns a database read
+   into a usable credential.
+3. **FR-LEA-09 one day-counting function** — three implementations currently
+   disagree about how many days a leave spans, and the payroll figure is the one
+   that costs an employee money.
+4. **FR-LEA-08a approval delegation** — the schema is already there and correct;
+   this is a route and an audit action.
+5. **FR-AUTH-13 re-authentication for credential reads** — a five-minute
+   freshness check plus the audit row.
+6. **FR-USR-07 / FR-LEA-07 batch and manual-grant routes** — both are thin
+   wrappers over rules that already exist elsewhere.
+
+The `PARTIAL` rows that need a decision rather than code are worth more than
+several of these: `FR-NOT-03`'s `email` preference is stored and reported but
+**nothing sends email**, and widening `ALL_SCOPE_ROLES` beyond Admin/Super Admin
+is a product decision that changes who sees which company-wide lists.
 """
 
 

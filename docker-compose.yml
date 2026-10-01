@@ -65,6 +65,8 @@ services:
       # Required only to anonymise an employee (FR-USR); without it the
       # anonymisation routes refuse to run rather than use a weak mapping.
       ANONYMISATION_SALT: ${ANONYMISATION_SALT:-}
+      # Encrypts authenticator secrets at rest (FR-AUTH-11); MFA returns 503 without it.
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       PORT: 10000
     depends_on:
       migrate:

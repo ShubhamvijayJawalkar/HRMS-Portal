@@ -12,6 +12,9 @@ os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
+# FR-AUTH-11: encrypts authenticator secrets at rest. Fixed non-production
+# value; MFA returns 503 without it rather than storing secrets in the clear.
+os.environ.setdefault('MFA_ENCRYPTION_KEY', '3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=')
 os.environ['APP_DB_SCHEMA'] = 'legacy'
 
 import db_backend
@@ -21,12 +24,74 @@ db_backend.reset_schema()
 import threading  # noqa: E402
 import time  # noqa: E402
 
+import pyotp  # noqa: E402
 import pytest  # noqa: E402
+from playwright.sync_api import TimeoutError as PlaywrightTimeout  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from app import app  # noqa: E402
+from app import app, get_db  # noqa: E402
 
 BASE_URL = 'http://localhost:8787'
+
+
+def _stored_secret(emp_id):
+    """Decrypt an enrolled employee's authenticator secret for a challenge."""
+    import mfa
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = ?', [emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row, f'{emp_id} has no MFA credential to challenge against'
+    return mfa.decrypt_secret(row[0])
+
+
+def _login(page, emp_id='EMP001', password='pass123'):
+    """Sign in, walking the FR-AUTH-11 second factor when the account has one.
+
+    The seeded admin is an Admin, so a second factor is compulsory for it and a
+    bare password no longer reaches the dashboard. Rather than exempt the browser
+    suite from the control, this drives the real panel: on the first sign-in it
+    enrols (reading the secret the page itself displays and minting a code from
+    it) and on later ones it challenges. That also means the login page's MFA
+    panel is exercised by every test rather than by one dedicated test.
+
+    The Employee accounts the suite also uses have no factor and take the
+    single-step path, so both shapes stay covered.
+    """
+    page.goto(BASE_URL + '/login')
+    page.fill('#empId', emp_id)
+    page.fill('#password', password)
+    page.click('button[type="submit"]')
+
+    panel = page.locator('#mfaStep')
+    try:
+        panel.wait_for(state='visible', timeout=5000)
+    except PlaywrightTimeout:
+        page.wait_for_url(BASE_URL + '/dashboard')
+        return
+
+    # An enrolment shows the secret on the page; a challenge only shows a box, and
+    # the secret has to come from the stored (encrypted) credential.
+    #
+    # The wait on the *text*, not on the box becoming visible: the panel reveals the
+    # enrolment area first and fills the secret only after `/api/mfa/enrol` returns,
+    # so reading it on visibility alone yields an empty string and mints a code from
+    # no secret at all.
+    if page.locator('#mfaEnrolBox').is_visible():
+        page.wait_for_function(
+            "() => document.getElementById('mfaSecret').textContent.trim().length > 0",
+            timeout=10000,
+        )
+        secret = page.locator('#mfaSecret').inner_text().strip()
+    else:
+        secret = _stored_secret(emp_id)
+    page.fill('#mfaCode', pyotp.TOTP(secret).now())
+    page.click('#mfaBtn')
+    page.wait_for_url(BASE_URL + '/dashboard')
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
@@ -63,26 +128,17 @@ def test_login_page(page):
     assert page.title() == 'HRMS - Login'
 
 def test_admin_login(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_url(BASE_URL + '/dashboard')
     assert page.url == BASE_URL + '/dashboard'
 
 def test_employee_login(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_url(BASE_URL + '/dashboard')
     assert page.url == BASE_URL + '/dashboard'
 
 def test_admin_sees_user_tab(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(2000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(2000)
@@ -94,20 +150,14 @@ def test_admin_sees_user_tab(page):
     assert page.text_content('#pageInfo').startswith('Page')
 
 def test_employee_cannot_access_admin_users(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(2000)
     page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_timeout(3000)
     assert page.url == BASE_URL + '/dashboard', f'Expected redirect to dashboard but got {page.url}'
 
 def test_admin_create_user(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(1000)
@@ -127,10 +177,7 @@ def test_admin_create_user(page):
 
 def test_admin_edits_user_permissions(page):
     """FR-USR-09: the permissions modal reads defaults and stores an override."""
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(1500)
@@ -170,10 +217,7 @@ def test_admin_edits_user_permissions(page):
 
 def test_admin_pii_reveal_is_audited(page):
     """FR-USR-15: the PII reveal is a real, audited capability."""
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
     page.wait_for_timeout(1500)
@@ -193,10 +237,7 @@ def test_admin_pii_reveal_is_audited(page):
 
 def test_admin_assigns_a_leave_policy(page):
     """FR-LEA-08: the policy modal changes the derived entitlement."""
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     # A dedicated employee: the policy must not change the balances the leave
     # tests depend on.
@@ -259,10 +300,7 @@ def test_admin_assigns_a_leave_policy(page):
     # The employee sees the derived entitlement on their own balance endpoint.
     page.goto(BASE_URL + '/logout')
     page.wait_for_timeout(1000)
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP904')
-    page.fill('#password', 'jade-marlin-quilt-77')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP904', 'jade-marlin-quilt-77')
     page.wait_for_timeout(3000)
     balances = page.evaluate("fetch('/api/leave-balance').then(r => r.json())")
     annual = next(b for b in balances if b['leave_type'] == 'Annual')
@@ -273,10 +311,7 @@ def test_admin_assigns_a_leave_policy(page):
 
 def test_admin_import_users_runs_as_a_background_job(page):
     """FR-USR-04: the upload is queued, polled, and reported as a job."""
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/import-users')
     page.wait_for_timeout(1500)
@@ -321,14 +356,6 @@ def test_admin_import_users_runs_as_a_background_job(page):
 # it on any interactive path. Test *fixtures* created through the API get a
 # compliant password and log in with the matching one.
 FIXTURE_PASSWORD = 'jade-marlin-quilt-77'
-
-
-def _login(page, emp_id, password='pass123'):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', emp_id)
-    page.fill('#password', password)
-    page.click('button[type="submit"]')
-    page.wait_for_timeout(3000)
 
 
 def test_admin_anonymises_an_archived_user_with_two_people(page):
@@ -409,10 +436,7 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
     assert rows, 'the erasure was not audited'
 
 def test_breaks_tab_shows_on_user_dashboard(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
@@ -420,10 +444,7 @@ def test_breaks_tab_shows_on_user_dashboard(page):
     assert btns.count() >= 1
 
 def test_can_start_and_end_break(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
@@ -445,10 +466,7 @@ def test_can_start_and_end_break(page):
     assert 'No active break' in txt, f'Expected "No active break" but got "{txt}"'
 
 def test_login_hours_display(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
     total = page.locator('#totalLoginHours')
     # The widget renders "0h" / "7.5h" (toFixed(1)+'h'); parse the numeric part.
@@ -457,10 +475,7 @@ def test_login_hours_display(page):
     assert val >= 0, f'Login hours should be >= 0, got {val}'
 
 def test_end_break_self_heal(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
     page.click('#breaktab')
     page.wait_for_timeout(2000)
@@ -472,10 +487,7 @@ def test_end_break_self_heal(page):
     assert 'No active break' in txt or 'Break' in txt
 
 def test_break_daily_limit_enforced(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/dashboard')
     page.wait_for_timeout(2000)
@@ -506,10 +518,7 @@ def test_break_daily_limit_enforced(page):
     assert result['status'] == 201, f'Second break should be allowed until daily limit reached, got {result}'
 
 def test_today_login_sessions_table(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/dashboard')
     page.wait_for_timeout(2000)
@@ -518,10 +527,7 @@ def test_today_login_sessions_table(page):
     assert count >= 0
 
 def test_holidays_page_loads_for_admin(page):
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/admin/holidays')
     page.wait_for_timeout(2000)
@@ -532,10 +538,7 @@ def test_holidays_page_loads_for_admin(page):
 def test_can_submit_regularization(page):
     from datetime import date, timedelta
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/regularization', wait_until='commit')
     page.wait_for_timeout(2000)
@@ -552,10 +555,7 @@ def test_can_apply_leave(page):
     from datetime import date, timedelta
     future = (date.today() + timedelta(days=10)).isoformat()
     future2 = (date.today() + timedelta(days=11)).isoformat()
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP002')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/leaves')
     page.wait_for_timeout(3000)
@@ -593,10 +593,7 @@ def test_can_apply_leave(page):
 def test_ats_offer_and_preboarding_browser_flow(page):
     """The guarded hire path and token-scoped document page work in a browser."""
     marker = f'browser-lifecycle-{int(time.time() * 1000)}@example.com'
-    page.goto(BASE_URL + '/login')
-    page.fill('#empId', 'EMP001')
-    page.fill('#password', 'pass123')
-    page.click('button[type="submit"]')
+    _login(page, 'EMP001', 'pass123')
     page.wait_for_url(BASE_URL + '/dashboard')
     result = page.evaluate('''async (marker) => {
         const post = async (url, body) => {

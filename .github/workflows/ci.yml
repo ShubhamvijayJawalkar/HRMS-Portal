@@ -47,6 +47,10 @@ jobs:
       APP_DB_SCHEMA: legacy
       # Disposable validation database: the demo seed is what the suites expect.
       HRMS_ALLOW_DEMO_SEED: "1"
+      # FR-AUTH-11: encrypts authenticator secrets at rest. MFA returns 503
+      # without it rather than storing them in the clear, so it is a fixed
+      # non-production value here and never a real secret in a log.
+      MFA_ENCRYPTION_KEY: "3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE="
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/hrms
 
     steps:
@@ -134,7 +138,11 @@ jobs:
           DATABASE_URL=postgresql://postgres:postgres@localhost:5432/hrms_probe \
             python scripts/check_cc_rules.py
           echo "--- public-flip probe ---"
+          # The probe signs in as an Admin, and MFA is compulsory for that role,
+          # so it walks the second factor rather than bypassing it. It needs the
+          # encryption key to do so — MFA refuses with 503 without it, by design.
           DATABASE_URL=$PROBE_URL APP_DB_SCHEMA=public \
+            MFA_ENCRYPTION_KEY="3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=" \
             python scripts/probe_public_flip.py
 
       - name: Build Docker image

@@ -1342,3 +1342,119 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
 - **The unit suite went from ~31 minutes to 67 seconds.** The DuckDB run was the slow one; PostgreSQL always was the fast path.
 - Also removed: generated `uploads/` (6.5 MB of payslip PDFs), `reports/` (256 KB of preflight/migration JSON — nothing references it) and the `__pycache__`/cache directories. Repo working size 53 MB → 17 MB.
 - **The last open browser flake is fixed.** `test_break_daily_limit_enforced` waited a fixed **1000 ms** after clicking start while its sibling `test_can_start_and_end_break` waited **2000 ms** for the same `.endBreakBtn`, which appears only after a `POST /api/start-break` round-trip plus re-render — so it failed in full runs and passed alone. Both now `wait_for(state='visible', timeout=10000)`. A fixed sleep is an upper bound; the element appearing is the signal. Browser suite 21/21 in 2m51s (threaded server, no serialisation).
+
+## FR-AUTH-11 multi-factor authentication (the last `NOT_STARTED` auth row)
+- **The traceability pass found the shape of this one:** `mfa_credentials` was in
+  the canonical schema with an encrypted-secret column and **no code anywhere that
+  read or wrote it** — no enrolment, no challenge, no gate. A table with a
+  constraint and no reader reads as done, which is the whole reason the matrix
+  exists. It was the largest single gap the pass found.
+- **`mfa.py` owns the rules; the routes only render them.** TOTP (RFC 6238,
+  SHA-1/6 digits/30s), Fernet encryption under a dedicated `MFA_ENCRYPTION_KEY`,
+  the pending-login state machine, and the two guards — `EnrolmentConflict` and
+  `ChallengeLocked`. Key separation from `SECRET_KEY` mirrors `ANONYMISATION_SALT`,
+  and a missing key is a **503 refusal**, never a fallback to plaintext storage.
+- **Enrolment is two-phase, and that is the security property.** `POST
+  /api/mfa/enrol` writes the row with `enabled = 0` and returns the secret; only
+  `POST /api/mfa/confirm` with a valid code promotes it. So the draft is inert: a
+  stolen password cannot enrol an attacker's own authenticator against the account
+  and then sign in. The QR is served from the stored secret so a reloaded page
+  still works — and refused with a 404 once confirmed, because re-serving a live
+  bearer secret for no reason is strictly worse.
+- **A half-authenticated session is refused everywhere *by construction*, not by
+  remembering.** The password step parks the identity in `session['mfa_pending']`
+  and deliberately does **not** set `session['emp_id']`, which is what
+  `login_required` and every role gate key off. There is no per-route check to
+  forget, and no new code path that could accidentally be left ungated.
+  `_complete_login()` was extracted so the one-step and two-step paths cannot
+  diverge on session-id allocation, shift-date resolution or the `LOGIN` audit row.
+- **Re-enrolment while enabled is refused (409).** Silently replacing a working
+  secret is a denial of service needing nothing but a stolen password: the target's
+  next login would demand a code from an authenticator the attacker controls.
+  Optional factors have `POST /api/mfa/disable` to leave deliberately; a
+  **mandatory role cannot disable its own factor**, or an admin could put
+  themselves permanently outside the control.
+- **`MANDATORY_ROLES = {Admin, Super Admin, HR, Finance}`** — MFA is worth most
+  where one password reaches the whole company. Everyone else may opt in from their
+  profile. The set is asserted by a test, so changing it is a code change and the
+  build says so.
+- **Five wrong codes abandon the parked login (429)** and the attempt is audited.
+  A 6-digit code is 10^6 guesses; `valid_window = 1` absorbs one step of clock
+  drift (a phone and server straddling a 30s boundary must not train people to
+  type the next code), and the pending state expires after `PENDING_TTL = 10 min`.
+- **Recovery is an audited Admin reset only** — no recovery codes. That is the
+  weaker of the two answers the SRS allows, and the trade-off is recorded rather
+  than hidden: the reset answers **identically whether or not the target was
+  enrolled**, so it cannot be used to find out who is protected, and it writes a
+  before/after audit row (`{'mfa_enrolled': true}` → `false`) plus an `MFA_RESET`
+  notification. An employee attempting it gets 403; a blocked or archived target
+  gets 409, because the block already decides who may sign in.
+- **A bug in my own patch, caught by the browser suite and worth recording.** The
+  login page built the finishing endpoint as `'/api/mfa/' + step`, which pointed
+  the enrolment submit back at `/api/mfa/enrol` — an endpoint that **mints a new
+  secret**. So the code the user had just read stopped matching and the page
+  navigated on without verifying anything. The endpoint for each step is now named
+  explicitly (`MFA_STEPS`), because which route answers is not a naming
+  coincidence.
+- **A second real bug, found only because the browser suite logs in as two
+  accounts.** Signing in as a second employee in the same browser **kept the first
+  account's session**: the cookie survives, so `session['emp_id']` was still the
+  previous employee while the second factor was being asked for — and `_mfa_subject`
+  prefers `session['emp_id']`, so the enrolment and the challenge both acted on the
+  wrong person. It surfaced as a 409 and then a timeout waiting for a secret that
+  was never going to appear. Fixed by `_end_current_session()` at the password step
+  (which also closes the abandoned `user_sessions` row so its hours are accounted),
+  and `_mfa_subject` now prefers a parked login over a full session. **Signing in as
+  somebody else is not additive**, and no test suite had asserted that until the
+  browser suite happened to do two logins in one context.
+- **`MFA_RESET` needed a category, and the taxonomy test said so.** It derives to
+  `General`, which the app's emitted-types test rejects as an accidental
+  fall-through. Rather than route a security event into the catch-all, `Security`
+  is a **third documented extra** alongside `Performance` and `Holiday`: an employee
+  whose factor was reset must be *told*, or their next sign-in silently demands an
+  enrolment they cannot explain and they conclude they have been attacked.
+- **Test-harness consequences, both recorded as the defects they are:**
+  `LOGIN_RATE_LIMIT` was never lifted in the unit suite (the browser suite always
+  lifted it) and a full run makes ~230 logins from one IP, so it tripped and
+  surfaced as an unexplained 401 on an MFA challenge hundreds of lines away from
+  the request that caused it. And an **existing test blocked the seeded EMP002 and
+  never restored it** — harmless until FR-AUTH-11 signed in as EMP002, then an
+  unexplained 401 in a test 400 lines away. Both are now fixed; a test that mutates
+  shared fixture state and does not put it back is a trap for whoever writes the
+  next one.
+- **A deliberately ambiguous test was corrected rather than left passing.** The
+  holiday-edit audit assertion used `fetchone()` on an unordered query for a table
+  holding three `HOLIDAY_UPDATE` rows, and passed or failed depending on heap order
+  — unrelated audit traffic moved it. It now orders by `log_id` and asserts the
+  first and last edits, which is a stronger test than picking one arbitrary row.
+- **No Alembic revision and no schema change.** `mfa_credentials` already exists on
+  v2.0 `public` (identity PK, `BOOLEAN enabled`, `uq_mfa_emp`); only the
+  compatibility DDL was added to `init_db`. `cred_id` is allocated through
+  `_next_generated_id` because the compat column is a bare `INTEGER PRIMARY KEY`
+  with no default — and `enabled` is written as `int`, since the SQL literal `TRUE`
+  is rejected outright by PostgreSQL on the INTEGER column.
+- 14 new unit tests and the browser suite's `_login()` helper, which **drives the
+  real panel** rather than exempting the suite from the control: the login page's
+  MFA step is now exercised by every browser test. `scripts/probe_public_flip.py`'s
+  `_login()` does the same — the probe signs in as an Admin too, and without it the
+  probe's whole authenticated GET sweep would have run on a parked half-session and
+  reported every route as broken. `tests/test_redis_sessions.py` needed it as well,
+  which is a good sign: the *session* store tests were asserting on a cookie that
+  MFA meant was never issued.
+- **The probe needed a second correction, and it was the same shape.** The GET
+  sweep runs *after* a completed login, and `/api/mfa/qr` answers 404 once an
+  enrolment is confirmed — correctly, because re-serving a live bearer secret after
+  the fact is strictly worse. So the one genuinely unmeasurable route is recorded in
+  `EXPECTED_GET_404` **with its reason**, and the route is asserted at the moment it
+  does apply: `_login` fetches the QR while the enrolment is in progress. A probe
+  that quietly filtered the 404 would have reported green without checking it.
+- Matrix moves FR-AUTH-11 to `IMPLEMENTED` (**57 IMPLEMENTED / 37 PARTIAL /
+  9 NOT_STARTED / 1 RETIRED**). `scripts/generate_traceability.py`'s prose was
+  rewritten at the same time: it still described MFA, the password policy and the
+  expense state machine as open, and **a generated document that is wrong about the
+  code is worse than no document**. The `_write_flows` note in the ToDo PDF says the
+  same.
+- Verified in this order rather than all at once: unit **231 passed / 1 skipped**,
+  browser **21/21**, Redis session store **10/10**, and on a fresh `alembic`-created
+  v2.0 `public` database the read-only preflight, the CC-01 checker and the probe —
+  **109/109 GET + 52/52 write**, run twice to confirm it is still idempotent.

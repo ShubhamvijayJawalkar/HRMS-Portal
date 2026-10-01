@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 56 | 54% |
+| `IMPLEMENTED` | 57 | 55% |
 | `PARTIAL` | 37 | 36% |
-| `NOT_STARTED` | 10 | 10% |
+| `NOT_STARTED` | 9 | 9% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (56)
+### IMPLEMENTED (57)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -55,6 +55,7 @@ rather than quietly invalidating this document.
 | `FR-AUTH-07` | M | N | `/dashboard` | Admin vs self dashboard chosen by policy.sees_admin_surface(); unauthenticated gets 302 for a page and 401 for JSON. |
 | `FR-AUTH-08` | M | N | `/api/forgot-password` | Always 202 with the same message, so the endpoint cannot be used to enumerate accounts. |
 | `FR-AUTH-10` | M | N | `/api/users`<br>`/api/change-password`<br>`/api/reset-password` | passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) and a breach-corpus check, enforced at every point a password is set. The corpus is a bundled offline list, extended optionally by the HIBP k-anonymity range API; leet variants and known-password-plus-suffix are caught too. Deliberately no complexity rules and no expiry, per NIST SP 800-63B, and a test parses the module to keep them out. The old shared default of 'pass123' is gone: a user created without a password gets a generated compliant one, returned once. The rejection message is generic, so it is not an oracle for confirming a guess. |
+| `FR-AUTH-11` | M | N | `/api/mfa/enrol`<br>`/api/mfa/confirm`<br>`/api/mfa/challenge`<br>`/api/mfa/status`<br>`/api/mfa/qr`<br>`/api/mfa/disable`<br>`/api/admin/users/<emp_id>/mfa/reset` | mfa.py: TOTP (RFC 6238) for Admin/Super Admin/HR/Finance and self-service opt-in for everyone else. Two-phase enrolment — the row is written with enabled=0 and only a valid code promotes it, so a stolen password cannot enrol an attacker's own authenticator against the account. The password step parks the identity in session["mfa_pending"] and deliberately does NOT set session["emp_id"], so a half-authenticated session is refused by every existing gate by construction rather than by each route remembering to check. Five wrong codes abandon the parked login (429); one step of clock drift is tolerated; the pending state expires after ten minutes. Secrets are Fernet-encrypted under a dedicated MFA_ENCRYPTION_KEY and the feature refuses with 503 rather than storing them in the clear — key separation from SECRET_KEY, mirroring ANONYMISATION_SALT. Recovery is an audited admin reset only, which is the weaker of the two answers the SRS allows: there are no recovery codes, so the mitigation is that the reset answers identically whether or not the target was enrolled (so it cannot be used to find out who is protected) and writes a before/after audit row. A mandatory role cannot disable its own factor. |
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | Double-submit on every mutating /api request; a fetch wrapper attaches the header and native forms carry the hidden field. Asserted end to end with server-side sessions too. |
 | `FR-DOC-01` | M | R | `/api/documents` | Scoped to the owner unless HR/Admin. |
 | `FR-EXP-03` | M | C | `/api/expenses`<br>`/api/expenses/<int:eid>/status` | Strict transition table in expenses.py: Pending -> Approved/Rejected by the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only (Appendix A-11), Rejected and Paid final. Self-approval blocked, a rejection reason required, every write a conditional UPDATE with a before/after audit, and the list reports the actions the caller may actually take. Finance holds the expenses module because the SRS names it for Paid; the list stays scoped to own + reports, so that grants reach rather than company-wide visibility. |
@@ -133,13 +134,12 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (10)
+### NOT_STARTED (9)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
 | `FR-ANL-04` | M | C | `/api/analytics/attrition-risk` | The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing them needs a code change and redeploy. |
 | `FR-AUTH-03` | M | N | — | No consecutive-failure counter and no timed account lock. Only the IP rate limit stands between an attacker and a password spray. |
-| `FR-AUTH-11` | M | N | — | No MFA. mfa_credentials exists in the canonical schema with an encrypted secret, but nothing reads or writes it: no enrolment, no challenge, no gate. This is the largest single gap found by the traceability pass. |
 | `FR-JOB-03` | S | R | — | No quarterly job opens the next performance review cycle. |
 | `FR-JOB-05` | H | C | — | No leader election. The scheduler starts in the gunicorn master, which is the usual single-instance answer, but a multi-pod deployment would run every cron job once per pod. |
 | `FR-LEA-07` | H | C | — | No manual grant route and no LEAVE_GRANT audit action. An admin cannot add days to an employee; only the policy and the accrual job can. |
@@ -156,55 +156,75 @@ rather than quietly invalidating this document.
 
 ## What the gaps have in common
 
-The `NOT_STARTED` rows are not random; they cluster in four places.
+Nine `NOT_STARTED` rows remain, and they cluster in four places.
 
-**Authentication hardening** — the session, hashing, CSRF and rate-limit work of
-Phase 3a is done, but the account-level defences are not. `FR-AUTH-03` (no
-consecutive-failure lock, so only the IP rate limit stops a password spray),
-`FR-AUTH-10` (no minimum length, no breached-password check) and `FR-AUTH-11`
-(no MFA at all) are all absent. MFA is the largest single gap this pass found:
-`mfa_credentials` sits in the canonical schema with an encrypted-secret column
-and **no code anywhere that reads or writes it** — no enrolment, no challenge,
-no gate.
+**One account-level defence is still absent** — `FR-AUTH-03`: there is no
+consecutive-failure counter and no timed lock, so a password *spray* across many
+accounts is stopped only by the per-IP login rate limit, which a distributed
+attacker never touches. The session, hashing, CSRF, MFA and password-policy work
+of Phase 3a and FR-AUTH-10/11 is done; this is the one that is not. It needs a
+`failed_attempts`/`locked_until` pair, so it is a migration.
 
-**Schema without routes** — `approval_delegations` (FR-LEA-08a),
-`notification_preferences` (FR-NOT-03) and `holiday_optins` (FR-HOL-03) have
-their tables and constraints in the canonical schema and no endpoint. The v2.0
-target was designed for capabilities the service layer has not caught up with,
-which is exactly the kind of drift a traceability matrix is for: without one,
-these read as done.
+**Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
+table and its no-overlap exclusion constraint in the canonical schema and no
+endpoint, so a manager going on leave has no way to delegate. This was the shape
+of three rows before the matrix caught them, and `notification_preferences` and
+`holiday_optins` were both fixed this way — the v2.0 target was designed for
+capabilities the service layer had not caught up with, which is exactly the kind
+of drift a traceability matrix is for.
 
-**Synchronous exports** — `FR-LEA-03`, `FR-REG-04` and `FR-RPT-02` all export
-inline, so a wide report blocks the request that asked for it. The background-job
-machinery the outbox and the CSV importer already prove is available; nothing
-reuses it for exports yet.
+**Missing endpoints, not missing logic** — `FR-USR-07` (no bulk user
+create/archive endpoint), `FR-LEA-07` (no manual leave grant) and `FR-REG-04`
+(no regularization export). Each is a route over rules that already exist
+elsewhere: the single-employee archive, the policy-derived balance, and the
+report export family.
 
-**Business rules left to the client** — `FR-EXP-03` has no state machine and no
-self-approval block, so an employee can approve their own expense claim.
-`FR-PERF-01` lets an employee rate their own goal. These are the class of gap
-that looks harmless in a demo and is not.
+**Inconsistency by duplication** — `FR-LEA-09` asks for one working-day and
+holiday-deduction function. There isn't one: leave day counting, payroll LOP and
+the reports each approximate it differently. So the same absence is deducted in
+three places and the three disagree, which is the specific failure the
+requirement exists to prevent.
 
-Two `PARTIAL` rows are security properties rather than features, and are worth
-reading before any deployment decision:
+**Deployment, not code** — `FR-JOB-05` (no scheduler leader election, so a
+multi-pod deployment runs every cron job once per pod), `FR-JOB-03` (no
+quarterly job opening the next review cycle) and `FR-ANL-04` (analytics weights
+are literals in the handler).
 
-* **FR-DOC-02** validates the file **extension**, not the content. There is no
-  malware scan. A renamed executable passes the allow-list.
-* **FR-DOC-03** serves downloads directly rather than by presigned URL, and does
-  not audit the read, so document access leaves no trail.
+The `PARTIAL` rows are worth reading before any deployment decision, because
+several are security properties rather than features:
+
+* **FR-AUTH-01** — the login rate limit is per remote address, not per account.
+* **FR-AUTH-09** — the reset token is stored unhashed, and expires in 1 h where
+  the SRS asks for 24 h.
+* **FR-AUTH-13** — `/api/credentials` has no 5-minute re-authentication, and a
+  credential read is not audited.
+* **FR-DOC-02** — uploads are validated by magic number for the claimed
+  extension and reject the EICAR marker, but there is no real scanner and no
+  per-category size cap.
+* **FR-DOC-03** — downloads are served directly rather than by presigned URL.
+  The read *is* audited now.
 
 ## Next, if you want the numbers to move
 
 Roughly in order of (risk x effort):
 
-1. **FR-DOC-02 content sniffing** — small, and it closes the "renamed .exe
-   passes" hole. No new dependency needed: read the first bytes and check the
-   magic number, which is what "sniffed from content" means in practice.
-2. **FR-EXP-03 self-approval block** — one ownership check, mirroring what
-   `approve_leave` already does. Closes an approval-integrity gap.
-3. **FR-AUTH-10 password policy** — a minimum length and a small offline
-   breached-password corpus. The schema needs nothing.
-4. **FR-AUTH-03 account lockout** — needs a failure counter and a `locked_until`
-   column, so a migration.
-5. **FR-AUTH-11 MFA** — the largest item: enrolment flow, encrypted secret
-   handling, a TOTP challenge on the login route, and recovery codes. The schema
-   is already there, which is the only reason it is worth doing.
+1. **FR-AUTH-03 account lockout** — a consecutive-failure counter and a
+   `locked_until` column. The one absent account-level defence, and the only
+   `NOT_STARTED` row with a security weight rather than a convenience one.
+2. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
+   the token. One line in the write and one in the read; it turns a database read
+   into a usable credential.
+3. **FR-LEA-09 one day-counting function** — three implementations currently
+   disagree about how many days a leave spans, and the payroll figure is the one
+   that costs an employee money.
+4. **FR-LEA-08a approval delegation** — the schema is already there and correct;
+   this is a route and an audit action.
+5. **FR-AUTH-13 re-authentication for credential reads** — a five-minute
+   freshness check plus the audit row.
+6. **FR-USR-07 / FR-LEA-07 batch and manual-grant routes** — both are thin
+   wrappers over rules that already exist elsewhere.
+
+The `PARTIAL` rows that need a decision rather than code are worth more than
+several of these: `FR-NOT-03`'s `email` preference is stored and reported but
+**nothing sends email**, and widening `ALL_SCOPE_ROLES` beyond Admin/Super Admin
+is a product decision that changes who sees which company-wide lists.

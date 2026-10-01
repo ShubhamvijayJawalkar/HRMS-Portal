@@ -97,12 +97,70 @@ def _install_tolerant_boot() -> None:
     db_backend.connect = wrapped
 
 
-def _login(app_mod, emp_id: str):
+def _login(app_mod, dsn, emp_id: str):
+    """Sign in and walk the FR-AUTH-11 second factor when the account has one.
+
+    The probe logs in as an Admin as well as an Employee, and MFA is compulsory
+    for the former, so a bare password leaves the admin client half-authenticated
+    and every admin-scoped flow below reports 401. Walking the real flow rather
+    than exempting the probe is the point: this is exactly the surface a public
+    flip has to keep working.
+
+    An account with no factor takes the one-step path and is untouched by any of
+    this, so the ordinary case costs nothing.
+    """
+    import pyotp
+
     cl = app_mod.test_client()
     tok = cl.get("/api/csrf-token").get_json()["csrf_token"]
     r = cl.post("/login", json={"emp_id": emp_id, "password": "pass123"},
                 headers={"X-CSRF-Token": tok})
-    return cl, tok, r.status_code
+    if r.status_code != 200 or not (r.is_json and r.get_json().get("mfa_required")):
+        return cl, tok, r.status_code
+
+    step = r.get_json()["mfa_required"]
+    if step == "enrol_required":
+        # Mint the secret through the same route the UI uses, then read it back
+        # out of the database: the API deliberately never returns a stored secret
+        # a second time, so this is the only place it is available. The read goes
+        # through psycopg on `dsn` rather than the app's `get_db`, because this
+        # function is handed the Flask *app*, which has no `get_db` attribute.
+        e = cl.post("/api/mfa/enrol", headers={"X-CSRF-Token": tok})
+        if e.status_code != 200:
+            return cl, tok, e.status_code
+        secret = _stored_secret(dsn, emp_id)
+        if secret is None:
+            return cl, tok, 500
+        # The QR is only served while the enrolment is in progress, so this is the
+        # one moment it can be checked against the v2.0 target. After the confirm
+        # below the same route answers 404 by design.
+        if cl.get("/api/mfa/qr").status_code != 200:
+            return cl, tok, 500
+        ok = cl.post("/api/mfa/confirm", json={"code": pyotp.TOTP(secret).now()},
+                     headers={"X-CSRF-Token": tok, "Content-Type": "application/json"})
+    else:
+        secret = _stored_secret(dsn, emp_id)
+        if secret is None:
+            return cl, tok, 500
+        ok = cl.post(
+            "/api/mfa/challenge",
+            json={"code": pyotp.TOTP(secret).now()},
+            headers={"X-CSRF-Token": tok, "Content-Type": "application/json"},
+        )
+    return cl, tok, ok.status_code
+
+
+def _stored_secret(dsn, emp_id: str):
+    """The decrypted authenticator secret for an enrolled employee, or None."""
+    import mfa as _mfa
+
+    with psycopg.connect(dsn, autocommit=True) as pc:
+        row = pc.execute(
+            "SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = %s", [emp_id],
+        ).fetchone()
+    if not row:
+        return None
+    return _mfa.decrypt_secret(row[0])
 
 
 def _post(cl, tok, url, body=None):
@@ -509,7 +567,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             out[name] = ("FAIL", f"{type(exc).__name__}: {str(exc).splitlines()[0][:220]}")
 
     # ── employee flows ─────────────────────────────────────────────
-    cl, tok, lc = _login(app_mod, "EMP002")
+    cl, tok, lc = _login(app_mod, dsn, "EMP002")
     if lc != 200:
         out["login-EMP002"] = ("FAIL", f"login status={lc}")
         return out
@@ -550,12 +608,12 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     run("break-approvals(request Lunch)", lunch_request)
 
     # ── admin flows ────────────────────────────────────────────────
-    cl_a, tok_a, lc_a = _login(app_mod, "EMP001")
+    cl_a, tok_a, lc_a = _login(app_mod, dsn, "EMP001")
     if lc_a != 200:
         out["login-EMP001"] = ("FAIL", f"login status={lc_a}")
         return out
     out["login-EMP001"] = ("OK", "status=200")
-    cl_f, tok_f, lc_f = _login(app_mod, "EMP003")
+    cl_f, tok_f, lc_f = _login(app_mod, dsn, "EMP003")
     if lc_f != 200:
         out["login-EMP003"] = ("FAIL", f"login status={lc_f}")
         return out
@@ -805,7 +863,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         # The holiday is an HR artefact and the opt-in is the employee's, so this
         # flow needs both sessions — which is also the shape of the approval
         # workflow it is checking.
-        hl, htok, hstatus = _login(app_mod, "EMP001")
+        hl, htok, hstatus = _login(app_mod, dsn, "EMP001")
         if hstatus != 200:
             return hstatus
         created = _post(hl, htok, "/api/holidays", {
@@ -875,7 +933,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     # v2.0), a year-to-year copy that skips rather than shifts 29 February, the CSV
     # round trip, and the iCal feed's all-day form.
     def holiday_calendar():
-        hl, htok, hstatus = _login(app_mod, "EMP001")
+        hl, htok, hstatus = _login(app_mod, dsn, "EMP001")
         if hstatus != 200:
             return hstatus
         when = (today + timedelta(days=300)).isoformat()
@@ -975,7 +1033,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     # `General`. This flow reads a notification back and checks the category it
     # carries is a key a preference can actually be stored against.
     def notification_preferences():
-        cl, tok, lc = _login(app_mod, "EMP002")
+        cl, tok, lc = _login(app_mod, dsn, "EMP002")
         if lc != 200:
             return lc
         before = cl.get("/api/notification-preferences").get_json() or {}
@@ -1476,12 +1534,14 @@ def main() -> int:
     global _BOOT
     _BOOT = False
 
-    c = app.test_client()
-    tok = c.get("/api/csrf-token").get_json()["csrf_token"]
-    login = c.post("/login", json={"emp_id": "EMP001", "password": "pass123"},
-                   headers={"X-CSRF-Token": tok})
-    print("login:", login.status_code)
-    if login.status_code != 200:
+    # The GET sweep below runs on this client, so it needs a *fully* authenticated
+    # session. EMP001 is an Admin and FR-AUTH-11 makes a second factor compulsory
+    # for that role, so a bare password parks the login and every route would then
+    # answer 401 — which reads as a broken public flip rather than as a login that
+    # stopped half way. `_login` walks the second factor.
+    c, tok, status = _login(app, dsn, "EMP001")
+    print("login:", status)
+    if status != 200:
         return 1
 
     app.config["PROPAGATE_EXCEPTIONS"] = True
@@ -1510,7 +1570,17 @@ def main() -> int:
         if status != "OK":
             print(f"  {name}: {status}  {detail}")
 
-    fails = [u for u, s in statuses.items() if s != 200]
+    # `/api/mfa/qr` is the one route whose *correct* answer depends on state the
+    # sweep has already left behind: it serves the provisioning image only while an
+    # enrolment is in progress, and answers 404 once confirmed, because re-serving
+    # a live bearer secret after the fact would be strictly worse. The sweep runs
+    # after a completed login, so 404 is the right answer here — recorded with its
+    # reason rather than filtered out silently, and asserted where it *does* apply
+    # (during enrolment, in `_login`).
+    EXPECTED_GET_404 = {
+        "/api/mfa/qr": "only served during an in-progress enrolment; 404 once confirmed",
+    }
+    fails = [u for u, s in statuses.items() if s != 200 and u not in EXPECTED_GET_404]
     wfails = [n for n, (s, _) in write.items() if s != "OK"]
     print(f"\n{len(statuses) - len(fails)}/{len(statuses)} authenticated GET routes served from {schema}")
     print(f"{len(write) - len(wfails)}/{len(write)} core write flows served from {schema}")
