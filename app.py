@@ -33,6 +33,7 @@ from flask_limiter.util import get_remote_address
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.utils import secure_filename
 
+import lockout
 import mfa
 from security import (
     check_password,
@@ -887,6 +888,22 @@ def init_db():
             UNIQUE (emp_id)
         )
     ''')
+
+    # ── FR-AUTH-03 account lockout state ───────────────────────────
+    # Three additive columns on `users`; every existing row is already correct
+    # (0 failures, no lock), so this needs no backfill and moves no data. No-op
+    # on the v2.0 `public` schema, which gets them from Alembic 0009 — the compat
+    # ALTERs exist only so a legacy-shaped database can serve the same login
+    # route. `locked_until` is deliberately not a `status` value: a lockout is a
+    # temporary consequence of failed sign-ins, not a sanctioned account state,
+    # and folding it into `status` would make the two indistinguishable to an
+    # administrator and in the audit trail.
+    for ddl in (
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER DEFAULT 0',
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS last_failed_login TIMESTAMP',
+        'ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP',
+    ):
+        conn.execute(ddl)
 
     # ── Outbox (CC-09 transactional outbox) ────────────────────────
     # No-op on the v2.0 `public` schema (already BIGINT-identity + JSONB);
@@ -2752,8 +2769,77 @@ def get_credentials():
     return jsonify(result), 200
 
 
-@app.route('/login', methods=['GET', 'POST'])
+def _invalid_credentials():
+    """The one response every failed sign-in gets (FR-AUTH-02).
+
+    The body is deliberately the SRS's own ``invalid_credentials`` string and not a
+    sentence about passwords: a message that says "invalid password" confirms the
+    account exists to anyone who gets the "unknown employee" case to differ from
+    it. It is a function rather than a literal repeated at each `return` because the
+    route has six refusal paths and the whole control is that they agree.
+    """
+    return jsonify({'error': 'invalid_credentials'}), 401
+
+
+def _count_failed_login(conn, emp_id, name, email):
+    """Record a failed sign-in, and lock + notify on the attempt that tips it.
+
+    Called only for a genuine wrong password against an account that could
+    otherwise have signed in — not for a blocked account, and not for one already
+    locked out, because counting those would grow a counter behind a refusal that
+    has already happened.
+    """
+    attempts, just_locked = lockout.register_failure(conn, emp_id)
+    audit_log(
+        emp_id, 'LOGIN_FAILED',
+        f'Failed sign-in {attempts}/{lockout.MAX_FAILED_ATTEMPTS} within '
+        f'{int(lockout.FAILURE_WINDOW.total_seconds() // 60)} minutes',
+        entity='Auth', entity_id=emp_id,
+    )
+    if not just_locked:
+        return
+    audit_log(
+        emp_id, 'ACCOUNT_LOCKED',
+        f'Account locked for {int(lockout.LOCK_DURATION.total_seconds() // 60)} '
+        f'minutes after {attempts} consecutive failed sign-ins',
+        entity='Auth', entity_id=emp_id,
+    )
+    # The SRS asks for an email, and it matters more than usual here: without it a
+    # lockout is a silent denial, and the account's owner has no way to tell their
+    # own mistyped password from someone else guessing at it. The in-app
+    # notification is not redundant — `send_email` returns success and only logs
+    # when no SMTP host is configured, so on a deployment without mail this email
+    # is never sent at all, and a lockout the account owner cannot see is a
+    # denial of service with no explanation.
+    add_notification(
+        emp_id, 'ACCOUNT_LOCKED',
+        f'Your account is locked for '
+        f'{int(lockout.LOCK_DURATION.total_seconds() // 60)} minutes after '
+        f'{attempts} consecutive failed sign-in attempts. It unlocks on its own. '
+        'If you do not recognise these attempts, contact your administrator and '
+        'change your password.',
+    )
+    if email:
+        try:
+            send_email(
+                email,
+                'Your HRMS account has been temporarily locked',
+                f'<p>Hello {name or emp_id},</p>'
+                f'<p>There were {attempts} consecutive failed sign-in attempts '
+                f'against your account within '
+                f'{int(lockout.FAILURE_WINDOW.total_seconds() // 60)} minutes, so it '
+                f'is locked for '
+                f'{int(lockout.LOCK_DURATION.total_seconds() // 60)} minutes as a '
+                'protection against a password-guessing attack.</p>'
+                '<p>The lock expires on its own. If you do not recognise these '
+                'attempts, contact your administrator and change your password.</p>',
+            )
+        except Exception:  # a failed notification must not fail the sign-in path
+            logger.exception('Could not send the account-lockout email to %s', emp_id)
+
+
 @limiter.limit(os.getenv('LOGIN_RATE_LIMIT', '20 per minute'))
+@app.route('/login', methods=['GET', 'POST'])
 def login():
     """User login
     ---
@@ -2782,32 +2868,60 @@ def login():
         return jsonify({'error': 'Missing credentials'}), 400
 
     conn = get_db()
-    row = conn.execute(
-        "SELECT emp_id, name, role, password, status, allow_login, department FROM users WHERE emp_id = ?",
-        [emp_id]
-    ).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT emp_id, name, role, password, status, allow_login, department "
+            "FROM users WHERE emp_id = ?",
+            [emp_id],
+        ).fetchone()
 
-    if not row:
-        return jsonify({'error': 'Invalid Employee ID'}), 401
+        # FR-AUTH-02 (enumeration) and FR-AUTH-03 (lockout) in one pass.
+        #
+        # *Every* refusal below is `_invalid_credentials()`: one body, one 401, no
+        # matter whether the account is unknown, the password is wrong, the account
+        # is blocked, archived, pre-hire, has `allow_login` off, or is locked out.
+        # This used to answer two distinct 401 messages plus two **403s** ("Account
+        # is blocked", "Login is not allowed"), which is exactly the state leak
+        # FR-AUTH-02 forbids — and the traceability matrix recorded the row as
+        # IMPLEMENTED, so the gap was invisible. Adding a lockout without fixing
+        # this would have added a *third* distinguishable state.
+        #
+        # The password is always verified before anything else is considered, so
+        # an unknown account and a locked account cost the same time and the
+        # response time says nothing either.
+        if not row:
+            return _invalid_credentials()
 
-    stored_hash = row[3]
-    if not check_password(password, stored_hash):
-        return jsonify({'error': 'Invalid Password'}), 401
+        stored_hash = row[3]
+        password_ok = check_password(password, stored_hash)
 
-    # Phase 3a (CC-06): transparently upgrade legacy bcrypt hashes to Argon2id
-    if needs_rehash(stored_hash):
-        hconn = get_db()
-        hconn.execute(
-            "UPDATE users SET password = ? WHERE emp_id = ?",
-            [hash_password(password), emp_id]
-        )
-        hconn.close()
+        remaining = lockout.lock_remaining(conn, row[0])
+        # A locked account is refused *after* the password check, so a wrong
+        # password on a locked account is refused for being wrong — no state is
+        # disclosed by which reason won, because there is only one reason given.
+        if not password_ok or remaining is not None or not row[5] \
+                or lockout.refusal_state(row[4]):
+            if not password_ok and remaining is None and row[5] \
+                    and not lockout.refusal_state(row[4]):
+                # A real attempt at an account that could otherwise have signed
+                # in: count it, and lock + notify on the one that tips it over.
+                _count_failed_login(conn, row[0], row[1], row[6])
+            return _invalid_credentials()
 
-    if not row[5]:
-        return jsonify({'error': 'Login is not allowed for this user'}), 403
-    if row[4] in ('Blocked', 'Inactive', 'Pre-hire', 'Archived'):
-        return jsonify({'error': 'Account is blocked'}), 403
+        # Phase 3a (CC-06): transparently upgrade legacy bcrypt hashes to Argon2id
+        if needs_rehash(stored_hash):
+            conn.execute(
+                "UPDATE users SET password = ? WHERE emp_id = ?",
+                [hash_password(password), emp_id],
+            )
+
+        # A successful sign-in breaks the failure streak — this is what
+        # "consecutive" means. Without it an employee who typos twice, signs in,
+        # and typos twice more would be locked out by four mistakes spread over a
+        # week.
+        lockout.register_success(conn, row[0])
+    finally:
+        conn.close()
 
     # FR-AUTH-11: for a role in mfa.MANDATORY_ROLES, and for anyone who has
     # opted in, the password is only half the credential. From here login is a
@@ -3219,6 +3333,51 @@ def admin_reset_mfa(emp_id):
     return jsonify({
         'message': f'MFA reset for {emp_id}. They will re-enrol at next sign-in.',
         'emp_id': emp_id,
+    }), 200
+
+
+@app.route('/api/admin/users/<emp_id>/unlock', methods=['POST'])
+@admin_required
+def admin_unlock_account(emp_id):
+    """Clear a FR-AUTH-03 lockout now, without waiting for it to expire.
+
+    A lock expires by itself, so this is a convenience — but it is a real one.
+    "Locked until 23:14" is useless to someone whose shift ended at 18:00, and an
+    administrator who cannot clear it will be tempted to reach for `status =
+    Blocked`, which is a *sanctioned* account state. That would turn a fifteen-minute
+    nuisance into an HR record, so the two are kept apart here.
+
+    `200` even when the account was not locked: the admin asked for the account to
+    be unlocked, and it is. `removed` reports whether there was anything to do, so a
+    UI can distinguish "fixed" from "was never locked" without guessing.
+    """
+    conn = get_db()
+    try:
+        target = conn.execute(
+            'SELECT status FROM users WHERE emp_id = ?', [emp_id]
+        ).fetchone()
+        if not target:
+            return jsonify({'error': 'Employee not found'}), 404
+        before = lockout.status_for(conn, emp_id)
+        was_locked = lockout.unlock(conn, emp_id)
+    finally:
+        conn.close()
+    if was_locked:
+        audit_log(
+            emp_id, 'ACCOUNT_UNLOCKED',
+            f'Admin cleared the sign-in lockout for {emp_id}',
+            entity='Auth', entity_id=emp_id,
+            before=before, after={'locked': False, 'attempts': 0, 'locked_until': None},
+        )
+        add_notification(
+            emp_id, 'ACCOUNT_UNLOCKED',
+            'An administrator cleared the temporary sign-in lock on your account. '
+            'If you do not recognise the failed attempts, please change your password.',
+        )
+    return jsonify({
+        'message': f'{emp_id} is not locked out.',
+        'emp_id': emp_id,
+        'removed': was_locked,
     }), 200
 
 
@@ -9894,6 +10053,16 @@ def get_users():
             'shift_end': r[10] or '',
             'weekly_off_pattern': r[11] or 'Sat,Sun'
         } for r in rows]
+
+    # FR-AUTH-03: an administrator has to be able to *see* a lockout, or the only
+    # way to clear one is to already know it exists — which means waiting for the
+    # employee to complain that they cannot sign in. One query for the page.
+    # `status` is deliberately left alone: a lockout is not an account state.
+    lockouts = lockout.status_for_many(conn, [row['emp_id'] for row in data])
+    for row in data:
+        row.update(lockouts.get(
+            row['emp_id'], {'locked': False, 'attempts': 0, 'locked_until': None},
+        ))
     conn.close()
     return jsonify({
         'total': total, 'page': page, 'per_page': per_page,

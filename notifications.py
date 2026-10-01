@@ -111,6 +111,12 @@ _PREFIX_RULES = (
     # has to be *told to them*, or the next sign-in demands an enrolment they
     # cannot explain and they conclude they have been hacked.
     ('MFA', 'Security'),
+    # Same reasoning for FR-AUTH-03: being locked out by failed sign-ins is a
+    # security event about the *account*, not a business one, and the recipient
+    # needs to know whether it was them or someone else guessing at their
+    # password. A silent lockout is a denial of service with no explanation.
+    ('ACCOUNT_LOCK', 'Security'),
+    ('ACCOUNT_UNLOCK', 'Security'),
     # Deliberately NO break or punch rule, though the earlier substring derivation
     # produced a `BREAK -> Leave` mapping and the category `'Leave'` is not even in
     # the taxonomy. Break decisions are attendance events the SRS gives no category
@@ -285,6 +291,8 @@ KNOWN_TYPES = (
     'GOAL_RATED', 'REVIEW_SUBMITTED',
     'HOLIDAY_OPTIN_REQUESTED',
     'MFA_RESET',
+    'ACCOUNT_LOCKED',
+    'ACCOUNT_UNLOCKED',
     # outbox.py
     'PAYROLL', 'ONBOARDING',
 )

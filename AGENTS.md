@@ -1458,3 +1458,87 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   browser **21/21**, Redis session store **10/10**, and on a fresh `alembic`-created
   v2.0 `public` database the read-only preflight, the CC-01 checker and the probe —
   **109/109 GET + 52/52 write**, run twice to confirm it is still idempotent.
+
+## FR-AUTH-03 account lockout, and the FR-AUTH-02 hole it exposed
+- **The SRS is four numbers** — "10 consecutive failures within 15 minutes locks
+  the account for 15 minutes and notifies the user by email" — and `lockout.py`
+  implements exactly those, with a test asserting them. A lockout whose threshold
+  nobody agreed to is a policy decision hiding in a constant.
+- **Two properties make it a lockout and not a counter.** A successful sign-in
+  breaks the streak (that is what *consecutive* means; without it, four typos
+  spread across a week lock an employee out), and the window slides (ten failures
+  across a month are not ten consecutive failures; a lifetime counter is what trains
+  people to write passwords on sticky notes). The streak is also reset *when the
+  lock is applied*, so unlocking 14 minutes early does not leave nine failures banked
+  and re-lock on the next wrong password.
+- **The consequence every lockout design has, stated rather than hidden:** ten wrong
+  passwords denies an employee access for a quarter of an hour, and anyone who knows an
+  employee ID can therefore trigger it on demand. That is inherent to the
+  requirement. Three things bound it — the lock expires by itself, the account owner
+  is emailed *and* notified in-app, and an administrator can clear it immediately.
+- **A deliberate deviation from the SRS, recorded in the matrix.** Its flow diagram
+  puts the counter in Redis (`failed-attempt counter += 1 (Redis, 15 min window)`)
+  and it is stored in three columns on `users` instead. This app treats Redis as
+  optional — sessions fall back to signed cookies and dev/CI needs no Redis — and a
+  lockout that silently stops existing when Redis is unreachable has **failed open**,
+  not degraded, in exactly the situation an attacker can arrange. It is the same rule
+  that made the FR-AUTH-10 breach corpus offline by default. Alembic `0009` adds the
+  three columns additively, `NOT NULL DEFAULT 0` so no row is out of state and no
+  backfill is needed, and **no index** — nothing queries by `locked_until`, so it
+  would be paid for on every write and used by nothing.
+- **Lockout is not a `status`.** It is deliberately not an enum value: `Blocked` and
+  `Archived` are sanctioned account states an administrator decides, a lockout is a
+  temporary consequence of failed sign-ins. Folding them together would write an HR
+  record against a fifteen-minute nuisance, and would leave an administrator whose
+  colleague is locked out until tomorrow with nothing to do but reach for
+  `status = Blocked`. Hence `POST /api/admin/users/<emp_id>/unlock`, which clears the
+  lock and nothing else — and says so in its confirm dialog, because "unlock" sitting
+  next to the existing "Unblock" button otherwise reads as the same action.
+- **The consequential find: FR-AUTH-02 was recorded as IMPLEMENTED and was not.**
+  Reading the login handler to wire the lockout up showed two distinct 401 messages
+  (`Invalid Employee ID`, `Invalid Password`) and two **403s** (`Account is blocked`,
+  `Login is not allowed`) — the state leak the requirement exists to prevent, and the
+  403 for a blocked account was the worst of them: it told an attacker the ID they
+  guessed was real *and* currently disabled. All six refusal paths now answer the same
+  `401 {"error":"invalid_credentials"}`, the password is verified **before** any state
+  is considered so an unknown account and a locked one cost the same time, and a test
+  asserts all six answers are byte-identical.
+- **An obvious feature was built and then removed, which is the part worth reading.**
+  A "your account is locked, try again in 14 minutes" banner on the login page is the
+  natural thing to add and it is exactly the enumeration channel FR-AUTH-02 forbids.
+  The SRS resolves the tension itself: FR-AUTH-03 pairs the lock with a *notification*,
+  because the login response must not become a status oracle. The locked-out user learns
+  why from the email and the in-app notification instead, and `templates/login.html`
+  says so at the point where the temptation is.
+- **The in-app notification is not redundant with the email.** `send_email` returns
+  success and only logs when no SMTP host is configured, so on a deployment without mail
+  the SRS's email is never sent at all — and a lockout the account owner cannot see is
+  a denial of service with no explanation.
+- **The admin directory now shows the lock**, because an administrator cannot clear
+  one they cannot see, and waiting for the employee to complain is not a control. The
+  Unlock button renders *only* for a locked row (an "unlock" control on every row
+  would be meaningless noise, and its absence would then say nothing), and the row also
+  shows the recent failed-attempt count, which is what tells an admin someone is being
+  targeted right now. `lockout.status_for_many` reads the whole page in one query.
+- **A bug in my own patch, caught by the traceback rather than the assertion.** The two
+  new helpers were inserted between `@app.route('/login')` and `def login()`, so the
+  route decorator bound to `_invalid_credentials` and every sign-in in the suite
+  returned 401. What made it diagnosable was that a *module-global* monkeypatch of
+  `_invalid_credentials` produced no traceback — the decorated function was the helper
+  itself.
+- **The probe gained two write flows and both had to be corrected.** The threshold is
+  read from `lockout.MAX_FAILED_ATTEMPTS` rather than hardcoded, so the flow cannot
+  keep passing after the policy changes. It runs **last**, because it locks EMP002 for
+  real and every flow above signs in as EMP002. It returns 200 for "every assertion
+  held" rather than the 401 the lock legitimately produces, because the harness
+  reserves a 4xx for a guard that *failed* to fire. And the closing sign-in uses
+  `PROBE_PASSWORD`, not the seeded password — the `auth(reset-password)` flow earlier in
+  the run changed it, so a `pass123` sign-in 401s, which is also this flow's own
+  lockout working, and is a thoroughly confusing way to fail.
+- 8 new unit tests. Unit **239 passed / 1 skipped**, browser **21/21**, Redis session
+  store **10/10**, and on a fresh `alembic`-built v2.0 `public` database the preflight,
+  the CC-01 checker and the probe at **109/109 GET + 54/54 write**, run twice for
+  idempotency. Matrix moves FR-AUTH-03 to `IMPLEMENTED`
+  (**58 IMPLEMENTED / 37 PARTIAL / 8 NOT_STARTED / 1 RETIRED**); the generator's prose
+  was rewritten again, since it had started saying "one account-level defence is still
+  absent" about a requirement that is now present.

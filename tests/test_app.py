@@ -58,6 +58,7 @@ db_backend.reset_schema()
 import pyotp  # noqa: E402
 import pytest  # noqa: E402
 
+import lockout  # noqa: E402
 import mfa  # noqa: E402
 from app import (  # noqa: E402
     _next_generated_id,
@@ -6664,6 +6665,341 @@ def test_lifecycle_scheduler_job_registered():
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
     assert app_module.scheduler.get_job('import-dispatch') is not None
     assert app_module.scheduler.get_job('outbox-dispatch') is not None
+
+
+# ── FR-AUTH-03 lockout + FR-AUTH-02 uniform refusals ───────────────────────
+# The SRS is four numbers: "10 consecutive failures within 15 minutes locks the
+# account for 15 minutes and notifies the user by email." They are asserted
+# directly, because a lockout whose threshold nobody agreed to is a policy
+# decision hiding in a constant.
+#
+# The second half of this section is FR-AUTH-02, and it was found by reading the
+# login handler while working on the lockout. It returned two different 401
+# messages and two **403s** ("Account is blocked", "Login is not allowed"), while
+# the traceability matrix recorded the requirement as IMPLEMENTED. Adding a lockout
+# without fixing it would have added a third distinguishable state, so both rows are
+# asserted here against the same helper the route uses.
+
+
+def _fail_login(client, emp_id, password='definitely-wrong'):
+    """One failed sign-in through the real route."""
+    return client.post('/login', json={'emp_id': emp_id, 'password': password})
+
+
+def _lockout_state(emp_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT failed_attempts, locked_until FROM users WHERE emp_id = ?', [emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _clear_lockout(*emp_ids):
+    if not emp_ids:
+        return
+    placeholders = ','.join('?' for _ in emp_ids)
+    conn = get_db()
+    try:
+        conn.execute(
+            f'UPDATE users SET failed_attempts = 0, last_failed_login = NULL, '
+            f'locked_until = NULL WHERE emp_id IN ({placeholders})',
+            list(emp_ids),
+        )
+    finally:
+        conn.close()
+
+
+def _create_lockout_subject(emp_id, role='Employee'):
+    """A throwaway employee to lock out, so the seeded users are never the target.
+
+    Locking a seeded user would be a self-inflicted outage for the rest of the
+    suite, and a test that does that is a test that other people pay for.
+    """
+    _cleanup_user_contract_rows(emp_id)
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department) VALUES (?, ?, ?, ?, ?, 'Active', 1, 'IT')",
+            [emp_id, 'Lockout Subject', f'{emp_id.lower()}@company.com', role,
+             hash_password('correct-horse-battery')],
+        )
+    finally:
+        conn.close()
+
+
+def test_a_lockout_needs_the_srs_numbers_exactly():
+    """10 failures, inside a 15-minute window, for 15 minutes. Asserted, not assumed."""
+    assert lockout.MAX_FAILED_ATTEMPTS == 10
+    assert lockout.FAILURE_WINDOW == timedelta(minutes=15)
+    assert lockout.LOCK_DURATION == timedelta(minutes=15)
+
+
+def test_ten_consecutive_failures_lock_the_account_and_notify(client):
+    """The requirement itself, end to end through the login route."""
+    _create_lockout_subject('EMP970')
+    try:
+        for attempt in range(1, lockout.MAX_FAILED_ATTEMPTS):
+            assert _fail_login(client, 'EMP970').status_code == 401
+            assert _lockout_state('EMP970')[1] is None, f'locked too early ({attempt})'
+
+        # The tenth failure is the one that locks.
+        assert _fail_login(client, 'EMP970').status_code == 401
+        attempts, locked_until = _lockout_state('EMP970')
+        assert locked_until is not None, 'the tenth failure did not lock the account'
+
+        # The remaining time is knowable by the account owner without it appearing
+        # in the login response. `lock_remaining` is what the notification is built
+        # from, and it is deliberately *not* in the 401 body — see the FR-AUTH-02
+        # test for why a locked-out user learns about it by email instead.
+        conn = get_db()
+        try:
+            remaining = lockout.lock_remaining(conn, 'EMP970')
+        finally:
+            conn.close()
+        # Not an exact equality: the lock expires 15 minutes after the failure, and
+        # this assertion runs a moment later, so "the full duration, give or take the
+        # time it took to get here" is the property. Comparing to the exact constant
+        # would fail on a slow machine for no reason.
+        assert lockout.LOCK_DURATION - timedelta(seconds=30) <= remaining \
+            <= lockout.LOCK_DURATION, remaining
+
+        # Notified, as the SRS asks: in-app and by email. `send_email` logs instead
+        # of sending when no SMTP host is set, so the in-app row is the one that is
+        # actually observable here — and it is the one that matters on a deployment
+        # with no mail configured.
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                'SELECT type FROM notifications WHERE emp_id = ?', ['EMP970'],
+            ).fetchall()
+            audits = conn.execute(
+                "SELECT action FROM audit_log WHERE emp_id = ? AND action IN "
+                "('ACCOUNT_LOCKED', 'LOGIN_FAILED')", ['EMP970'],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert ('ACCOUNT_LOCKED',) in [tuple(r) for r in rows], rows
+        assert ('ACCOUNT_LOCKED',) in [tuple(r) for r in audits], audits
+
+        # And the correct password is refused while the lock stands — with the same
+        # body as any other failure, because a lockout that says so is a lockout
+        # that can be used to enumerate accounts.
+        blocked = client.post(
+            '/login', json={'emp_id': 'EMP970', 'password': 'correct-horse-battery'},
+        )
+        assert blocked.status_code == 401
+        assert blocked.get_json() == {'error': 'invalid_credentials'}, blocked.get_json()
+    finally:
+        _cleanup_user_contract_rows('EMP970')
+
+
+def test_a_successful_sign_in_breaks_the_failure_streak(client):
+    """*Consecutive* is the operative word.
+
+    Without this, an employee who fat-fingers their password twice, signs in
+    correctly, and fat-fingers it twice more is locked out by four mistakes spread
+    across a week — which is how people end up locking themselves out of work.
+    """
+    _create_lockout_subject('EMP971')
+    try:
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS - 1):
+            assert _fail_login(client, 'EMP971').status_code == 401
+        assert _lockout_state('EMP971')[1] is None
+
+        # One correct password resets the count.
+        assert client.post(
+            '/login', json={'emp_id': 'EMP971', 'password': 'correct-horse-battery'},
+        ).status_code == 200
+        assert _lockout_state('EMP971') == (0, None)
+
+        # So the next failure starts at 1, and nine more are not enough.
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS):
+            _fail_login(client, 'EMP971')
+        assert _lockout_state('EMP971')[1] is not None
+    finally:
+        _cleanup_user_contract_rows('EMP971')
+
+
+def test_the_window_is_sliding_so_an_old_failure_does_not_count(client):
+    """Ten failures spread over a day are not ten *consecutive* failures.
+
+    A lifetime counter would lock an employee out for trying their password a few
+    times in a month, which trains people to write passwords on sticky notes.
+    """
+    _create_lockout_subject('EMP972')
+    try:
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS - 1):
+            _fail_login(client, 'EMP972')
+        assert _lockout_state('EMP972')[0] == lockout.MAX_FAILED_ATTEMPTS - 1
+
+        # Age the recorded failure past the window.
+        stale = datetime.now() - lockout.FAILURE_WINDOW - timedelta(seconds=1)
+        conn = get_db()
+        try:
+            conn.execute(
+                'UPDATE users SET last_failed_login = ? WHERE emp_id = ?',
+                [stale, 'EMP972'],
+            )
+        finally:
+            conn.close()
+
+        # The next failure starts a fresh count, so it does not lock.
+        assert _fail_login(client, 'EMP972').status_code == 401
+        attempts, locked_until = _lockout_state('EMP972')
+        assert locked_until is None, 'a failure outside the window still counted'
+        assert attempts == 1, attempts
+    finally:
+        _cleanup_user_contract_rows('EMP972')
+
+
+def test_a_lockout_expires_on_its_own(client):
+    """Nobody is permanently locked out of their job by a failed login."""
+    _create_lockout_subject('EMP973')
+    try:
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS):
+            _fail_login(client, 'EMP973')
+        assert _lockout_state('EMP973')[1] is not None
+
+        # Wind the lock back rather than sleeping 15 minutes.
+        conn = get_db()
+        try:
+            conn.execute(
+                'UPDATE users SET locked_until = ? WHERE emp_id = ?',
+                [datetime.now() - timedelta(seconds=1), 'EMP973'],
+            )
+        finally:
+            conn.close()
+
+        assert client.post(
+            '/login', json={'emp_id': 'EMP973', 'password': 'correct-horse-battery'},
+        ).status_code == 200
+    finally:
+        _cleanup_user_contract_rows('EMP973')
+
+
+def test_an_admin_can_clear_a_lockout_without_blocking_the_account(client):
+    """`Blocked` is a sanctioned account state; a lockout is not.
+
+    Without this route an administrator whose colleague is locked out until
+    tomorrow has nothing to do but set `status = Blocked`, which writes an HR record
+    against a fifteen-minute nuisance.
+    """
+    _create_lockout_subject('EMP974')
+    try:
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS):
+            _fail_login(client, 'EMP974')
+        assert _lockout_state('EMP974')[1] is not None
+
+        # An employee cannot do it.
+        with _fresh_client() as as_employee:
+            as_employee.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+            assert as_employee.post(
+                '/api/admin/users/EMP974/unlock'
+            ).status_code == 403
+
+        login_as(client, 'EMP001', 'pass123')
+        resp = client.post('/api/admin/users/EMP974/unlock')
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()['removed'] is True, resp.get_json()
+
+        # The account is usable again, and it was never blocked.
+        assert _lockout_state('EMP974') == (0, None)
+        conn = get_db()
+        try:
+            status = conn.execute(
+                'SELECT status FROM users WHERE emp_id = ?', ['EMP974'],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == 'Active', status
+
+        # Unlocking an account that was not locked is still a 200 — the admin asked
+        # for it not to be locked, and it is not — but `removed` says there was
+        # nothing to do, so a UI does not have to guess.
+        again = client.post('/api/admin/users/EMP974/unlock')
+        assert again.status_code == 200
+        assert again.get_json()['removed'] is False, again.get_json()
+        assert client.post('/api/admin/users/EMP99998/unlock').status_code == 404
+    finally:
+        _cleanup_user_contract_rows('EMP974')
+
+
+def test_every_failed_sign_in_answers_identically(client):
+    """FR-AUTH-02, which the matrix wrongly recorded as IMPLEMENTED.
+
+    Six refusal paths — unknown account, wrong password, blocked, archived,
+    `allow_login` off, and locked out — and the requirement is that a caller cannot
+    tell them apart. It could: two different 401 messages and two 403s. The 403 for a
+    blocked account was the worst of them, because it told an attacker that the
+    employee ID they guessed was real *and* currently disabled.
+    """
+    conn = get_db()
+    try:
+        conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = 'EMP002'")
+        conn.execute("UPDATE users SET status = 'Archived' WHERE emp_id = 'EMP003'")
+        conn.execute("UPDATE users SET allow_login = 0 WHERE emp_id = 'EMP004'")
+    finally:
+        conn.close()
+
+    # EMP005 is enrolled and locked, to cover the sixth path.
+    _create_lockout_subject('EMP975')
+    for _ in range(lockout.MAX_FAILED_ATTEMPTS):
+        _fail_login(client, 'EMP975')
+    assert _lockout_state('EMP975')[1] is not None
+
+    try:
+        cases = {
+            'unknown account': {'emp_id': 'NOBODY-AT-ALL', 'password': 'x'},
+            'wrong password': {'emp_id': 'EMP001', 'password': 'x'},
+            'blocked account': {'emp_id': 'EMP002', 'password': 'pass123'},
+            'archived account': {'emp_id': 'EMP003', 'password': 'pass123'},
+            'allow_login off': {'emp_id': 'EMP004', 'password': 'pass123'},
+            'locked out': {'emp_id': 'EMP975', 'password': 'correct-horse-battery'},
+        }
+        answers = {}
+        for label, body in cases.items():
+            resp = client.post('/login', json=body)
+            answers[label] = (resp.status_code, json.dumps(resp.get_json(), sort_keys=True))
+            assert resp.status_code == 401, f'{label} answered {resp.status_code}'
+
+        assert len(set(answers.values())) == 1, (
+            'the failure modes are distinguishable, so the route leaks which '
+            f'employee IDs exist: {answers}'
+        )
+    finally:
+        _clear_lockout('EMP975')
+        _cleanup_user_contract_rows('EMP975')
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = 'EMP002'")
+            conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = 'EMP003'")
+            conn.execute("UPDATE users SET allow_login = 1 WHERE emp_id = 'EMP004'")
+        finally:
+            conn.close()
+
+
+def test_a_lockout_does_not_count_failures_on_an_account_that_cannot_sign_in(client):
+    """A blocked account's failures would grow a counter behind a refusal that has
+    already happened, and would lock the account a second time for no reason."""
+    conn = get_db()
+    try:
+        conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = 'EMP002'")
+    finally:
+        conn.close()
+    try:
+        for _ in range(lockout.MAX_FAILED_ATTEMPTS + 5):
+            assert _fail_login(client, 'EMP002').status_code == 401
+        assert _lockout_state('EMP002') == (0, None), _lockout_state('EMP002')
+    finally:
+        _clear_lockout('EMP002')
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = 'EMP002'")
+        finally:
+            conn.close()
 
 
 # ── FR-AUTH-11 multi-factor authentication ────────────────────────────────

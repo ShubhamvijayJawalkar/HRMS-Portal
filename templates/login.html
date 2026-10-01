@@ -177,7 +177,24 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     try {
         const response = await fetch('/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ emp_id: empId, password: password }) });
         const data = await response.json();
-        if (!response.ok) { errorMsg.textContent = data.error || 'Login failed'; errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); return; }
+        if (!response.ok) {
+            // One message for every failure, because the server sends one: an unknown
+            // account, a wrong password, a blocked account and a lockout are all the
+            // same 401 (FR-AUTH-02), and saying which one it was here would undo the
+            // control for the people using the browser.
+            //
+            // The locked-out user's own explanation arrives by **email and in-app
+            // notification**, which is where the SRS puts it — FR-AUTH-03 pairs the
+            // lock with a notification precisely because the login response must not
+            // become a status oracle. That was worth being deliberate about: a
+            // "your account is locked, try again in 14 minutes" banner is the obvious
+            // thing to add here, and it is the exact enumeration channel the
+            // requirement forbids.
+            errorMsg.textContent = data.error === 'invalid_credentials'
+                ? 'Invalid employee ID or password.'
+                : (data.error || 'Login failed');
+            errorMsg.style.display = 'block'; btn.disabled = false; btnText.textContent = 'Sign In'; spinner.classList.add('d-none'); return;
+        }
         // FR-AUTH-11: a 200 here does not mean "signed in". For an account with a
         // second factor the response says which one it wants, and the session is
         // still parked — so branch on it before treating it as success.

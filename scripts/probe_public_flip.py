@@ -486,6 +486,12 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     business rule fired) vs failed (5xx/EXC)."""
     from datetime import date, datetime, timedelta
 
+    # FR-AUTH-03's threshold, read from the module rather than repeated here: a
+    # probe flow that hardcoded "10" would keep passing after the policy changed,
+    # which is exactly the drift this script exists to catch.
+    import lockout as _lockout_mod
+    _LOCKOUT_ATTEMPTS = _lockout_mod.MAX_FAILED_ATTEMPTS
+
     out: dict[str, tuple[str, str]] = {}
     today = date.today()
     days_until_monday = (7 - today.weekday()) % 7 or 7
@@ -529,6 +535,14 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM monthly_leave_grants WHERE emp_id = 'EMP002'")
         pc.execute("DELETE FROM leave_policy_assignments WHERE emp_id = 'EMP002'")
         pc.execute("DELETE FROM leave_balance WHERE emp_id = 'EMP002'")
+        # FR-AUTH-03: a previous run that died between the lock and the unlock
+        # would leave EMP002 locked, and the next run's lockout flow would then
+        # start from "already locked" and assert the wrong thing. The flow unlocks
+        # at the end, but a run that fails part way through never gets there.
+        pc.execute(
+            "UPDATE users SET failed_attempts = 0, last_failed_login = NULL, "
+            "locked_until = NULL WHERE emp_id = 'EMP002'"
+        )
         pc.execute(
             "DELETE FROM attendance_days WHERE emp_id = 'EMP002' AND attendance_date = %s",
             [attendance_date],
@@ -1465,6 +1479,74 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             ).fetchone()[0]
         return 200 if n == 1 else 409  # duplicate applied despite replay
     run("idempotency(replay leaves x2)", idem_replay)
+
+    # ── FR-AUTH-03 lockout: the new `users` columns on the v2.0 target ─────────
+    # Last, deliberately. It locks EMP002 for real, and every flow above signs in
+    # as EMP002, so anything after it would fail for the wrong reason.
+    def lockout_lock():
+        # A throwaway client per attempt, because a parked MFA login is not what
+        # this is testing and a reused session would carry state between tries.
+        last = None
+        for _ in range(_LOCKOUT_ATTEMPTS):
+            lc = app_mod.test_client()
+            lt = lc.get("/api/csrf-token").get_json()["csrf_token"]
+            last = lc.post(
+                "/login",
+                json={"emp_id": "EMP002", "password": "definitely-wrong"},
+                headers={"X-CSRF-Token": lt},
+            )
+        # The tenth failure locks, and the body is the uniform FR-AUTH-02 answer —
+        # a distinct "locked" reply here would be an enumeration channel.
+        if last is None or last.status_code != 401 \
+                or last.get_json() != {"error": "invalid_credentials"}:
+            return last.status_code if last else 500
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT failed_attempts, locked_until FROM users WHERE emp_id = 'EMP002'"
+            ).fetchone()
+        if not row or row[1] is None:
+            return 409  # locked_until never written on the v2.0 target
+        # And the correct password is refused while the lock stands.
+        ok = app_mod.test_client()
+        kt = ok.get("/api/csrf-token").get_json()["csrf_token"]
+        refused = ok.post(
+            "/login", json={"emp_id": "EMP002", "password": "pass123"},
+            headers={"X-CSRF-Token": kt},
+        )
+        # 200 means "every assertion in this flow held". Returning the 401 that the
+        # lock legitimately produces would book the flow as *guarded*, which the
+        # summary counts as not-served — the harness reserves a 4xx for "the guard
+        # I expected did not fire", and here it fired exactly as intended.
+        return 200 if refused.status_code == 401 else refused.status_code
+    run("auth(lockout after 10 failures)", lockout_lock)
+
+    def lockout_unlock():
+        r = _post(cl_a, tok_a, "/api/admin/users/EMP002/unlock")
+        if r.status_code != 200:
+            return r.status_code
+        if not (r.get_json() or {}).get("removed"):
+            return 409  # there was no lock to clear, so this flow proved nothing
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT failed_attempts, locked_until FROM users WHERE emp_id = 'EMP002'"
+            ).fetchone()
+        if row[0] or row[1] is not None:
+            return 409  # unlock did not clear the v2.0 columns
+        # The account works again, which is the whole point of clearing it.
+        #
+        # `PROBE_PASSWORD`, not "pass123": the `auth(reset-password)` flow earlier
+        # in this run changed EMP002's password, and the seeded hash is only restored
+        # by the *next* run's cleanup. Signing in with the seeded password here
+        # returns 401 — which is also this flow's own lockout working, so it is a
+        # confusing way to fail.
+        cl2 = app_mod.test_client()
+        lt2 = cl2.get("/api/csrf-token").get_json()["csrf_token"]
+        st = cl2.post(
+            "/login", json={"emp_id": "EMP002", "password": PROBE_PASSWORD},
+            headers={"X-CSRF-Token": lt2},
+        ).status_code
+        return 200 if st == 200 else st
+    run("auth(admin unlock + sign-in again)", lockout_unlock)
 
     return out
 

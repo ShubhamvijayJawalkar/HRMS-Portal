@@ -479,7 +479,17 @@ function loadUsers(page) {
             const mfaAction = ['Active', 'Onboarding'].includes(u.status)
                 ? `<button class="btn btn-outline-warning btn-sm" onclick="resetMfa('${u.emp_id}','${esc(u.name)}')" title="Reset two-factor (audited)"><i class="bi bi-phone"></i></button>`
                 : '';
-            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${mfaAction}${anonAction}${accessAction}${archiveAction}</div>`;
+            // FR-AUTH-03: only rendered when the account is *actually* locked. The
+            // alternative — always showing it — would put an "unlock" control on
+            // every row of the directory, where pressing it on an employee who was
+            // never locked is meaningless, and where its absence would then say
+            // nothing at all. The count of recent failures is shown too, because
+            // "2 of 10 attempts used" is the thing that tells an admin whether
+            // someone is being targeted right now.
+            const unlockAction = u.locked
+                ? `<button class="btn btn-outline-danger btn-sm" onclick="unlockAccount('${u.emp_id}','${esc(u.name)}')" title="Locked out — clear the sign-in lockout"><i class="bi bi-unlock"></i></button>`
+                : '';
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${mfaAction}${unlockAction}${anonAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -487,7 +497,7 @@ function loadUsers(page) {
                 <td>${esc(u.department||'N/A')}</td>
                 <td><span class="role-badge role-${u.role.toLowerCase().replace(' ','-')}">${esc(u.role)}</span></td>
                 <td>${shiftTxt}</td>
-                <td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span></td>
+                <td><span class="status-badge status-${u.status.toLowerCase()}">${u.status}</span>${u.locked ? `<br><span class="status-badge status-blocked" title="${esc(u.locked_until||'')}">Locked</span>` : ''}${!u.locked && u.attempts ? `<br><span class="text-muted" style="font-size:11px">${u.attempts} failed attempt(s)</span>` : ''}</td>
                 <td><span class="permission-badge ${u.allow_login?'permission-allowed':'permission-denied'}">Login: ${u.allow_login?'\u2713':'\u2717'}</span><span class="permission-badge ${u.allow_breaks?'permission-allowed':'permission-denied'}">Breaks: ${u.allow_breaks?'\u2713':'\u2717'}</span></td>
                 <td>${actions}</td>
             </tr>`;
@@ -784,6 +794,22 @@ async function resetMfa(empId, name) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { showMsg(d.error || 'Could not reset two-factor authentication', 'error'); return; }
     showMsg(d.message || `Two-factor reset for ${empId}`, 'success');
+}
+
+// FR-AUTH-03: clearing a sign-in lockout. Not the same thing as unblocking the
+// account — `status` is a sanctioned decision and a lockout is a fifteen-minute
+// consequence of wrong passwords — so this does not touch it, and the confirm says
+// as much, because "unlock" next to an existing "Unblock" button would otherwise
+// read as the same action.
+async function unlockAccount(empId, name) {
+    if (!confirm(`Clear the sign-in lockout on ${name} (${empId})?\n\n`
+        + 'This does NOT unblock the account or change its status. It only resets '
+        + 'the failed-attempt counter. The action is recorded in the audit log.')) return;
+    const r = await fetch(`/api/admin/users/${empId}/unlock`, { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showMsg(d.error || 'Could not clear the lockout', 'error'); return; }
+    showMsg(d.message || `Lockout cleared for ${empId}`, 'success');
+    loadUsers();
 }
 </script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

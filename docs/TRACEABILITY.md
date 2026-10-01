@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 57 | 55% |
+| `IMPLEMENTED` | 58 | 56% |
 | `PARTIAL` | 37 | 36% |
-| `NOT_STARTED` | 9 | 9% |
+| `NOT_STARTED` | 8 | 8% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (57)
+### IMPLEMENTED (58)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -49,7 +49,8 @@ rather than quietly invalidating this document.
 | `FR-ATT-16` | H | R | `/api/admin/breaks`<br>`/api/admin/dispose-break/<int:break_id>` | One console call for active/disposed/summary; dispose ends any Active break with an audited reason. |
 | `FR-ATT-17` | M | C | — | shift_assignments, effective-dated; get_shift/set_shift resolve the model per backend+schema and init_db no longer re-adds the removed columns to v2.0 users. |
 | `FR-AUD-01` | H | C | `/api/audit-log` | actor/action/entity/entity_id/before/after/ip/request_id/created_at on every mutating action, including from a scheduler thread (which used to raise and be swallowed, so those rows never existed). |
-| `FR-AUTH-02` | M | N | `/login` | One response for every failure mode, so an attacker cannot tell an unknown account from a wrong password. |
+| `FR-AUTH-02` | M | N | `/login` | Every refusal is the same 401 {"error":"invalid_credentials"}: unknown account, wrong password, blocked, archived, pre-hire, allow_login=false and locked out are indistinguishable, and the password is verified before any state is considered so the response time says nothing either. This row previously claimed IMPLEMENTED while the route answered two different 401 messages and two 403s ("Account is blocked", "Login is not allowed") - the state leak the requirement exists to prevent. Found by reading the handler while building FR-AUTH-03. |
+| `FR-AUTH-03` | M | N | `/login`<br>`/api/admin/users/<emp_id>/unlock` | lockout.py, to the SRS numbers: 10 consecutive failures inside a 15-minute window lock the account for 15 minutes and notify the user by email (plus in-app, because send_email only logs when no SMTP host is configured, and a lockout nobody can see is a silent denial). A successful sign-in breaks the streak - without that, four typos spread over a week lock an employee out - and the window is sliding, so ten failures across a month are not ten consecutive failures. An admin can clear a lockout immediately without touching users.status, because a lockout is a temporary consequence of failed sign-ins while Blocked is a sanctioned account state; folding them together would write an HR record against a fifteen-minute nuisance. Deliberate deviation: the SRS flow diagram puts the counter in Redis and it is stored on users instead, because this app treats Redis as optional and a lockout that silently stops existing when Redis is unreachable has failed open rather than degraded. |
 | `FR-AUTH-05` | M | R | `/logout` | Logout closes the active user_sessions row with total_hours = logout - login and audits the action. |
 | `FR-AUTH-06` | M | R | `/` | Redirects by session state. |
 | `FR-AUTH-07` | M | N | `/dashboard` | Admin vs self dashboard chosen by policy.sees_admin_surface(); unauthenticated gets 302 for a page and 401 for JSON. |
@@ -134,12 +135,11 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (9)
+### NOT_STARTED (8)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
 | `FR-ANL-04` | M | C | `/api/analytics/attrition-risk` | The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing them needs a code change and redeploy. |
-| `FR-AUTH-03` | M | N | — | No consecutive-failure counter and no timed account lock. Only the IP rate limit stands between an attacker and a password spray. |
 | `FR-JOB-03` | S | R | — | No quarterly job opens the next performance review cycle. |
 | `FR-JOB-05` | H | C | — | No leader election. The scheduler starts in the gunicorn master, which is the usual single-instance answer, but a multi-pod deployment would run every cron job once per pod. |
 | `FR-LEA-07` | H | C | — | No manual grant route and no LEAVE_GRANT audit action. An admin cannot add days to an employee; only the policy and the accrual job can. |
@@ -156,14 +156,14 @@ rather than quietly invalidating this document.
 
 ## What the gaps have in common
 
-Nine `NOT_STARTED` rows remain, and they cluster in four places.
+Eight `NOT_STARTED` rows remain, and they cluster in four places.
 
-**One account-level defence is still absent** — `FR-AUTH-03`: there is no
-consecutive-failure counter and no timed lock, so a password *spray* across many
-accounts is stopped only by the per-IP login rate limit, which a distributed
-attacker never touches. The session, hashing, CSRF, MFA and password-policy work
-of Phase 3a and FR-AUTH-10/11 is done; this is the one that is not. It needs a
-`failed_attempts`/`locked_until` pair, so it is a migration.
+**No account-level authentication defence is missing any more.** Phase 3a did
+the session, hashing, CSRF and rate-limit work; FR-AUTH-10 added the password
+policy; FR-AUTH-11 added TOTP; and FR-AUTH-03 added the lockout. What is left
+is a `PARTIAL` row: **FR-AUTH-01**'s login rate limit is keyed on remote address
+rather than on the account *and* the IP, which is the right order of magnitude but
+not the right key.
 
 **Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
 table and its no-overlap exclusion constraint in the canonical schema and no
@@ -193,7 +193,6 @@ are literals in the handler).
 The `PARTIAL` rows are worth reading before any deployment decision, because
 several are security properties rather than features:
 
-* **FR-AUTH-01** — the login rate limit is per remote address, not per account.
 * **FR-AUTH-09** — the reset token is stored unhashed, and expires in 1 h where
   the SRS asks for 24 h.
 * **FR-AUTH-13** — `/api/credentials` has no 5-minute re-authentication, and a
@@ -208,12 +207,14 @@ several are security properties rather than features:
 
 Roughly in order of (risk x effort):
 
-1. **FR-AUTH-03 account lockout** — a consecutive-failure counter and a
-   `locked_until` column. The one absent account-level defence, and the only
-   `NOT_STARTED` row with a security weight rather than a convenience one.
-2. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
-   the token. One line in the write and one in the read; it turns a database read
-   into a usable credential.
+1. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
+   the token. One line in the write and one in the read; as it stands, a database
+   read is a usable credential. It is now the only remaining account-level
+   weakness that is a code change rather than a decision.
+2. **FR-AUTH-01 per-account rate limiting** — the limit is keyed on remote
+   address, so it is bypassed by distributing attempts across sources. Keying a
+   second limit on the employee ID (inside the lockout, which already exists)
+   closes the spray the IP limit was never going to stop.
 3. **FR-LEA-09 one day-counting function** — three implementations currently
    disagree about how many days a leave spans, and the payroll figure is the one
    that costs an employee money.
@@ -226,5 +227,6 @@ Roughly in order of (risk x effort):
 
 The `PARTIAL` rows that need a decision rather than code are worth more than
 several of these: `FR-NOT-03`'s `email` preference is stored and reported but
-**nothing sends email**, and widening `ALL_SCOPE_ROLES` beyond Admin/Super Admin
-is a product decision that changes who sees which company-wide lists.
+**nothing sends email automatically**, and widening `ALL_SCOPE_ROLES` beyond
+Admin/Super Admin is a product decision that changes who sees which
+company-wide lists.

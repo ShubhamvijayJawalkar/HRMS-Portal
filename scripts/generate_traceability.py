@@ -52,14 +52,14 @@ rather than quietly invalidating this document.
 {groups}
 ## What the gaps have in common
 
-Nine `NOT_STARTED` rows remain, and they cluster in four places.
+Eight `NOT_STARTED` rows remain, and they cluster in four places.
 
-**One account-level defence is still absent** — `FR-AUTH-03`: there is no
-consecutive-failure counter and no timed lock, so a password *spray* across many
-accounts is stopped only by the per-IP login rate limit, which a distributed
-attacker never touches. The session, hashing, CSRF, MFA and password-policy work
-of Phase 3a and FR-AUTH-10/11 is done; this is the one that is not. It needs a
-`failed_attempts`/`locked_until` pair, so it is a migration.
+**No account-level authentication defence is missing any more.** Phase 3a did
+the session, hashing, CSRF and rate-limit work; FR-AUTH-10 added the password
+policy; FR-AUTH-11 added TOTP; and FR-AUTH-03 added the lockout. What is left
+is a `PARTIAL` row: **FR-AUTH-01**'s login rate limit is keyed on remote address
+rather than on the account *and* the IP, which is the right order of magnitude but
+not the right key.
 
 **Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
 table and its no-overlap exclusion constraint in the canonical schema and no
@@ -89,7 +89,6 @@ are literals in the handler).
 The `PARTIAL` rows are worth reading before any deployment decision, because
 several are security properties rather than features:
 
-* **FR-AUTH-01** — the login rate limit is per remote address, not per account.
 * **FR-AUTH-09** — the reset token is stored unhashed, and expires in 1 h where
   the SRS asks for 24 h.
 * **FR-AUTH-13** — `/api/credentials` has no 5-minute re-authentication, and a
@@ -106,12 +105,14 @@ CLOSING = """
 
 Roughly in order of (risk x effort):
 
-1. **FR-AUTH-03 account lockout** — a consecutive-failure counter and a
-   `locked_until` column. The one absent account-level defence, and the only
-   `NOT_STARTED` row with a security weight rather than a convenience one.
-2. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
-   the token. One line in the write and one in the read; it turns a database read
-   into a usable credential.
+1. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
+   the token. One line in the write and one in the read; as it stands, a database
+   read is a usable credential. It is now the only remaining account-level
+   weakness that is a code change rather than a decision.
+2. **FR-AUTH-01 per-account rate limiting** — the limit is keyed on remote
+   address, so it is bypassed by distributing attempts across sources. Keying a
+   second limit on the employee ID (inside the lockout, which already exists)
+   closes the spray the IP limit was never going to stop.
 3. **FR-LEA-09 one day-counting function** — three implementations currently
    disagree about how many days a leave spans, and the payroll figure is the one
    that costs an employee money.
@@ -124,8 +125,9 @@ Roughly in order of (risk x effort):
 
 The `PARTIAL` rows that need a decision rather than code are worth more than
 several of these: `FR-NOT-03`'s `email` preference is stored and reported but
-**nothing sends email**, and widening `ALL_SCOPE_ROLES` beyond Admin/Super Admin
-is a product decision that changes who sees which company-wide lists.
+**nothing sends email automatically**, and widening `ALL_SCOPE_ROLES` beyond
+Admin/Super Admin is a product decision that changes who sees which
+company-wide lists.
 """
 
 

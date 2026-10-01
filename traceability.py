@@ -94,11 +94,32 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'rate limit (LOGIN_RATE_LIMIT, default 20/min). The limit is per '
                    'remote address rather than per account *and* per IP.'),
     'FR-AUTH-02': ('M', 'N', 'IMPLEMENTED', ('/login',),
-                   'One response for every failure mode, so an attacker cannot tell '
-                   'an unknown account from a wrong password.'),
-    'FR-AUTH-03': ('M', 'N', 'NOT_STARTED', (),
-                   'No consecutive-failure counter and no timed account lock. Only '
-                   'the IP rate limit stands between an attacker and a password spray.'),
+                   'Every refusal is the same 401 {"error":"invalid_credentials"}: '
+                   'unknown account, wrong password, blocked, archived, pre-hire, '
+                   'allow_login=false and locked out are indistinguishable, and the '
+                   'password is verified before any state is considered so the '
+                   'response time says nothing either. This row previously claimed '
+                   'IMPLEMENTED while the route answered two different 401 messages '
+                   'and two 403s ("Account is blocked", "Login is not allowed") - the '
+                   'state leak the requirement exists to prevent. Found by reading '
+                   'the handler while building FR-AUTH-03.'),
+    'FR-AUTH-03': ('M', 'N', 'IMPLEMENTED', ('/login', '/api/admin/users/<emp_id>/unlock'),
+                   'lockout.py, to the SRS numbers: 10 consecutive failures inside a '
+                   '15-minute window lock the account for 15 minutes and notify the '
+                   'user by email (plus in-app, because send_email only logs when no '
+                   'SMTP host is configured, and a lockout nobody can see is a silent '
+                   'denial). A successful sign-in breaks the streak - without that, '
+                   'four typos spread over a week lock an employee out - and the '
+                   'window is sliding, so ten failures across a month are not ten '
+                   'consecutive failures. An admin can clear a lockout immediately '
+                   'without touching users.status, because a lockout is a temporary '
+                   'consequence of failed sign-ins while Blocked is a sanctioned '
+                   'account state; folding them together would write an HR record '
+                   'against a fifteen-minute nuisance. Deliberate deviation: the SRS '
+                   'flow diagram puts the counter in Redis and it is stored on users '
+                   'instead, because this app treats Redis as optional and a lockout '
+                   'that silently stops existing when Redis is unreachable has failed '
+                   'open rather than degraded.'),
     'FR-AUTH-04': ('M', 'C', 'PARTIAL', ('/logout',),
                    'Server-side Redis sessions (opaque cookie, 8 h TTL), HttpOnly, '
                    'SameSite=Lax, Secure in production; logout deletes the server copy. '
