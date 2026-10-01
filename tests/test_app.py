@@ -701,6 +701,36 @@ def _set_admin_session(client, session_id):
         sess['session_id'] = session_id
 
 
+def _tables_with_column(conn, column):
+    """Every table in the connected schema that has ``column``.
+
+    DuckDB exposes `PRAGMA table_info`; PostgreSQL goes through
+    `information_schema` with the *app's* schema, not `public` — the unit suite runs
+    against the `legacy` schema, where an unqualified `table_schema = 'public'`
+    lookup returns nothing and the caller would silently clean up no tables at all.
+    """
+    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
+        import db_backend
+        rows = conn.execute(
+            "SELECT table_name FROM information_schema.columns "
+            'WHERE table_schema = ? AND column_name = ? ORDER BY table_name',
+            [db_backend.app_schema(), column],
+        ).fetchall()
+    else:
+        rows = []
+        for (name,) in conn.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main' ORDER BY table_name"
+        ).fetchall():
+            try:
+                info = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+            except Exception:
+                continue
+            if any(row[1] == column for row in info):
+                rows.append((name,))
+    return [row[0] for row in rows]
+
+
 def _cleanup_user_contract_rows(*emp_ids):
     if not emp_ids:
         return
@@ -711,20 +741,20 @@ def _cleanup_user_contract_rows(*emp_ids):
             f"DELETE FROM audit_log WHERE entity = 'users' AND entity_id IN ({placeholders})",
             list(emp_ids),
         )
-        # Everything that points at the employee goes first: `users` is still
-        # referenced by a `user_sessions` row from a login, by the notification a
-        # request raises, and by a holiday opt-in, so deleting the employee first
-        # raised a foreign-key error, left the user in place, and made the *next*
-        # test that reused the id fail with "Employee ID already exists" somewhere
-        # unrelated.
-        for table in ('user_sessions', 'shift_assignments', 'user_permissions',
-                      'password_reset_tokens', 'notifications', 'holiday_optins',
-                      'attendance_days', 'leave_requests', 'leave_balance',
-                      'regularization_requests', 'dependents', 'employee_documents'):
+        # Everything that points at the employee goes first, and the set of tables is
+        # **discovered** rather than listed. A hardcoded list has now failed three
+        # times in this file — a login's `user_sessions` row, a notification, a
+        # holiday opt-in and a notification preference each raised a foreign-key
+        # error, left the user in place, and made the *next* test that reused the id
+        # fail with "Employee ID already exists" somewhere unrelated. Adding a table
+        # with an `emp_id` should not require remembering to edit this function.
+        for table in _tables_with_column(conn, 'emp_id'):
             try:
                 conn.execute(f"DELETE FROM {table} WHERE emp_id IN ({placeholders})", list(emp_ids))
             except Exception:
-                pass  # a table this backend does not have
+                # A table this backend does not have, or one whose rows are
+                # referenced in turn — the employee row still has to go.
+                pass
         conn.execute(f"DELETE FROM users WHERE emp_id IN ({placeholders})", list(emp_ids))
     finally:
         conn.close()
@@ -3071,6 +3101,430 @@ def test_cancelling_uses_the_same_day_count_as_the_reservation(client):
 
 
 
+
+
+# ── A BOOLEAN column named `email` silently corrupted every `email = ?` ──────
+
+@pytest.mark.skipif(os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+                    reason='the boolean-column map only exists on the PostgreSQL target')
+def test_a_boolean_column_name_does_not_rewrite_another_tables_column():
+    """`notification_preferences.email` is BOOLEAN; `users.email` is VARCHAR.
+
+    The adapter collected boolean columns as a schema-wide set of *names* and
+    rewrote any `col = ?` matching one, so this table's flag column made every
+    `email = ?` in the entire application become `email = %s::boolean`. The visible
+    symptom was `PUT /api/users` failing with
+
+        invalid input syntax for type boolean: 'someone@company.com'
+
+    and the same rewrite was about to hit `WHERE email = ?` in the directory
+    contract and the login path.
+
+    A bare name is now only rewritten when it is BOOLEAN in *every* table that has
+    a column of that name. The INSERT path does not rely on the bare-name set at
+    all: the statement names its own table, so it resolves the flag columns for that
+    table and is exact.
+    """
+    import db_backend
+
+    # The v2.0 target is named explicitly rather than taken from the connected
+    # schema: the unit suite runs against the compatibility `legacy` shape, where
+    # `notification_preferences.email` is INTEGER and there is no collision to
+    # detect. The bug only exists on `public`, which is where the adapter does the
+    # rewrite that matters.
+    schema = 'public'
+    assert 'email' in db_backend._boolean_tables(schema).get(
+        'notification_preferences', frozenset()
+    ), 'this test is meaningless unless that table has a BOOLEAN email column'
+    assert 'email' not in db_backend._boolean_columns(schema), (
+        'email is BOOLEAN in one table and VARCHAR in others, so it must not be '
+        'rewritten on a bare name')
+
+    values = ['Probe User', 'probe2@company.com', 'Employee', 1, 1, 'EMP002']
+    sql = ('UPDATE users SET name = ?, email = ?, role = ?, allow_login = ?, '
+           'allow_breaks = ? WHERE emp_id = ?')
+    out_sql, out_params = db_backend._coerce_boolean_comparison_params(
+        sql, values, schema)
+    translated = db_backend.translate(out_sql, out_params, schema)
+    assert 'email = %s::boolean' not in translated, translated
+    assert 'email = %s,' in translated, translated
+    # The genuine flags on the same statement are still coerced.
+    assert 'allow_login = %s::boolean' in translated, translated
+    assert 'allow_breaks = %s::boolean' in translated, translated
+    assert out_params[1] == 'probe2@company.com', out_params
+    assert out_params[3] is True and out_params[4] is True, out_params
+
+
+@pytest.mark.skipif(os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
+                    reason='the boolean-column map only exists on the PostgreSQL target')
+def test_the_insert_path_resolves_flag_columns_for_its_own_table():
+    """The INSERT path is table-aware, so it stays exact where the bare-name set
+    has to be conservative."""
+    import db_backend
+
+    schema = 'public'
+    preferences = ('INSERT INTO notification_preferences '
+                   '(pref_id, emp_id, category, in_app, email) VALUES (?, ?, ?, ?, ?)')
+    _sql, params = db_backend._coerce_insert_boolean_params(
+        preferences, [7, 'EMP002', 'Leaves', 1, 0], schema)
+    assert params == [7, 'EMP002', 'Leaves', True, False], params
+
+    # The same column name in a table where it is VARCHAR is left alone.
+    users = "INSERT INTO users (emp_id, name, email) VALUES (?, ?, ?)"
+    _sql, params = db_backend._coerce_insert_boolean_params(
+        users, ['EMPX', 'N', 'a@b.com'], schema)
+    assert params == ['EMPX', 'N', 'a@b.com'], params
+
+
+def test_no_live_code_writes_a_category_outside_the_taxonomy():
+    """Every hardcoded category literal must name a category the taxonomy knows.
+
+    Three literals this slice removed were outside it: the two `HOLIDAY_OPTIN_*`
+    notifications passed `category='Leave'` when the taxonomy calls the category
+    `Holiday`, and the offboarding revocation passed `'Offboarding'`, which the
+    requirement does not name at all. Each was a second writer of the same column
+    disagreeing with the one derivation, which is exactly how a preference for a
+    category silently stops matching its own notifications.
+
+    Checked over the **AST** rather than by regex: a regex has to guess which
+    string literal is the category and which is the notification type, and the
+    exemption list such a check needs would defeat its own purpose. The call
+    signature says which argument is the category, so the parse does not have to
+    guess.
+    """
+    import ast
+    from pathlib import Path
+
+    import notifications
+
+    root = Path(__file__).resolve().parent.parent
+    # The argument index that carries the category in each of the two writers.
+    positions = {'add_notification': 4, '_insert_lifecycle_notification': 4}
+    checked = 0
+    for name in ('app.py', 'outbox.py'):
+        tree = ast.parse((root / name).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Name) or func.id not in positions:
+                continue
+            literal = None
+            if len(node.args) > positions[func.id]:
+                literal = node.args[positions[func.id]]
+            else:
+                for keyword in node.keywords:
+                    if keyword.arg == 'category':
+                        literal = keyword.value
+            if isinstance(literal, ast.Constant) and isinstance(literal.value, str):
+                checked += 1
+                assert literal.value in notifications.CATEGORIES, (
+                    f'{name}:{node.lineno} writes category {literal.value!r}, which '
+                    f'is not in the taxonomy {notifications.CATEGORIES}')
+    # Guard against the check silently finding nothing if the signatures move.
+    assert checked >= 3, f'only {checked} literal categories found - has this check gone stale?'
+
+    # The lifecycle categories resolve into the taxonomy rather than inventing one.
+    assert notifications.category_for('Offboarding') == 'Onboarding'
+    assert notifications.category_for('HOLIDAY_OPTIN_REQUESTED') == 'Holiday'
+
+
+# ── FR-NOT-03 notification preferences: the taxonomy and the two never met ──
+
+def _emitted_notification_types():
+    """Every notification type the app actually raises, read off the source.
+
+    Parsed rather than hand-listed so a new `add_notification` call site cannot be
+    added without this test seeing it — which is the whole point, because the defect
+    this slice fixes was a type that reached the `category` column with no mapping.
+    """
+    import re
+    from pathlib import Path
+
+    found = set()
+    for name in ('app.py', 'outbox.py'):
+        source = (Path(__file__).resolve().parent.parent / name).read_text()
+        found |= set(re.findall(
+            r"add_notification\(\s*[^,]+,\s*'([A-Z_0-9]+)'", source))
+        # The outbox inserts directly, with the type as a literal.
+        found |= set(re.findall(
+            r"INSERT INTO notifications \([^)]*\)\s*VALUES \(\?[^,]*,[^,]*,\s*'([A-Za-z_0-9]+)'",
+            source))
+    found.discard('Payroll')  # matched as a *category* literal, not a type
+    return sorted(found)
+
+
+def test_every_notification_the_app_sends_lands_in_a_preferenceable_category(client):
+    """The defect: none of the nine types the app raised was in the SRS taxonomy.
+
+    Leave notifications were stored as `Leave` where the SRS says `Leaves`, so a
+    preference keyed on `Leaves` would never have matched one, and tickets, goals,
+    reviews and holiday opt-ins all fell through to `General` — which meant
+    `Tickets` had no producer at all and a preference screen built on the old
+    derivation would have been switches that did nothing.
+    """
+    import notifications
+
+    emitted = _emitted_notification_types()
+    assert emitted, 'the parser found no notification types — it has gone stale'
+    misfits = [(t, notifications.category_for(t)) for t in emitted
+               if notifications.category_for(t) == notifications.FALLBACK]
+    assert misfits == [], f'these notifications have no preference category: {misfits}'
+    # KNOWN_TYPES is what `describe()` reports producers from, so it has to cover
+    # the real set or the API understates what is wired.
+    missing = [t for t in emitted if t not in notifications.KNOWN_TYPES]
+    assert missing == [], f'add these to notifications.KNOWN_TYPES: {missing}'
+
+
+def test_the_srs_categories_are_the_taxonomy_and_the_leave_name_is_exact(client):
+    import notifications
+
+    for category in ('Onboarding', 'Leaves', 'Expenses', 'Tickets', 'Payroll', 'Tickets-SLA'):
+        assert category in notifications.SRS_CATEGORIES, category
+        assert category in notifications.CATEGORIES, category
+    # The exact name matters: a preference stored against 'Leaves' has to be the
+    # same key the notification row carries.
+    assert notifications.category_for('LEAVE_APPROVED') == 'Leaves'
+    assert notifications.category_for('LEAVE') == 'Leaves'
+    assert notifications.category_for('TICKET_ASSIGNED') == 'Tickets'
+    assert notifications.category_for('GOAL_RATED') == 'Performance'
+    assert notifications.category_for('REVIEW_SUBMITTED') == 'Performance'
+    assert notifications.category_for('HOLIDAY_OPTIN_REQUESTED') == 'Holiday'
+    assert notifications.category_for('') == notifications.FALLBACK
+    assert notifications.category_for('SOMETHING_UNMAPPED') == notifications.FALLBACK
+
+
+def test_describe_reports_a_category_with_no_producer_honestly(client):
+    """An admin told a switch does something when it does not is worse than one
+    honestly marked as having nothing behind it yet."""
+    import notifications
+
+    rows = {row['category']: row for row in notifications.describe()}
+    assert len(rows) == len(notifications.CATEGORIES)
+    # Expenses and Tickets-SLA have no producer: nothing notifies about an expense,
+    # and FR-TKT-01's SLA targets are unimplemented.
+    assert rows['Expenses']['has_producer'] is False
+    assert rows['Tickets-SLA']['has_producer'] is False
+    # Leaves does, and it is in the SRS.
+    assert rows['Leaves']['has_producer'] is True
+    assert rows['Leaves']['in_srs'] is True
+    # The two extras are marked as deviations rather than presented as SRS.
+    assert rows['Performance']['in_srs'] is False
+    assert rows['Holiday']['in_srs'] is False
+
+
+def test_defaults_are_true_and_a_notification_is_delivered_by_default(client):
+    _set_admin_session(client, 99760)
+    try:
+        prefs = client.get('/api/notification-preferences')
+        assert prefs.status_code == 200, prefs.get_json()
+        body = prefs.get_json()
+        assert body['customised'] == [], body['customised']
+        for category, channels in body['preferences'].items():
+            assert channels == {'in_app': True, 'email': True}, (category, channels)
+        # No row was written to establish the defaults.
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM notification_preferences WHERE emp_id = ?',
+                ['EMP001'],
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+
+        from app import add_notification
+        assert add_notification('EMP002', 'LEAVE_APPROVED', 'Your leave was approved') is True
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT type, category FROM notifications WHERE emp_id = ? '
+                'ORDER BY notification_id DESC LIMIT 1', ['EMP002'],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row == ('LEAVE_APPROVED', 'Leaves'), row
+    finally:
+        _cleanup_user_contract_rows()
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP002' "
+                         "AND message = 'Your leave was approved'")
+        finally:
+            conn.close()
+
+
+def test_turning_a_category_off_suppresses_only_that_category(client):
+    _set_admin_session(client, 99761)
+    try:
+        _create_policy_user(client, 'EMP995', role='Employee')
+        _login_as(client, 'EMP995', 'Employee', 99760)
+        updated = client.put('/api/notification-preferences',
+                             json={'Leaves': {'in_app': False}})
+        assert updated.status_code == 200, updated.get_json()
+        assert updated.get_json()['changed'] == ['Leaves'], updated.get_json()
+        # The email half is stored but nothing consumes it, and the response says so
+        # rather than letting a client promise the user an email.
+        assert 'no automatic email delivery' in updated.get_json()['email_delivery']
+
+        from app import add_notification
+        assert add_notification('EMP995', 'LEAVE_APPROVED', 'suppressed') is False
+        assert add_notification('EMP995', 'TICKET_UPDATED', 'delivered') is True
+        assert add_notification('EMP995', 'PAYROLL', 'delivered') is True
+        # The catch-all cannot be switched off, because "everything we failed to
+        # categorise" is not something a user can meaningfully mute.
+        assert add_notification('EMP995', 'SOMETHING_UNMAPPED', 'delivered') is True
+
+        listed = client.get('/api/notifications').get_json()['data']
+        assert [n['type'] for n in listed] == ['SOMETHING_UNMAPPED', 'PAYROLL',
+                                               'TICKET_UPDATED'], listed
+        assert all(n['category'] in ('General', 'Payroll', 'Tickets') for n in listed), listed
+    finally:
+        _cleanup_user_contract_rows('EMP995')
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP995'")
+        finally:
+            conn.close()
+
+
+def test_a_partial_update_does_not_reset_the_other_categories(client):
+    """A shallow copy of the nested mapping made every comparison trivially equal,
+    so the whole PUT returned 200 and wrote nothing."""
+    _set_admin_session(client, 99762)
+    try:
+        _create_policy_user(client, 'EMP996', role='Employee')
+        _login_as(client, 'EMP996', 'Employee', 99761)
+        assert client.put('/api/notification-preferences',
+                          json={'Leaves': {'in_app': False}}).get_json()['changed'] == ['Leaves']
+        second = client.put('/api/notification-preferences',
+                            json={'Expenses': {'email': False}}).get_json()
+        assert second['changed'] == ['Expenses'], second
+        prefs = second['preferences']
+        assert prefs['Leaves'] == {'in_app': False, 'email': True}, prefs['Leaves']
+        assert prefs['Expenses'] == {'in_app': True, 'email': False}, prefs['Expenses']
+        assert prefs['Tickets'] == {'in_app': True, 'email': True}, prefs['Tickets']
+        # Both are recorded on disk, one row each.
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                'SELECT category, in_app, email FROM notification_preferences '
+                'WHERE emp_id = ? ORDER BY category', ['EMP996'],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert rows == [('Expenses', 1, 0), ('Leaves', 0, 1)], rows
+    finally:
+        _cleanup_user_contract_rows('EMP996')
+
+
+def test_preference_payloads_are_validated(client):
+    _set_admin_session(client, 99763)
+    for payload, fragment in (
+        ({'Nope': {'in_app': True}}, 'Unknown category'),
+        ({'Leaves': 'yes'}, 'must be an object'),
+        ({'Leaves': {'sms': True}}, 'unknown channel'),
+        ({'Leaves': {'in_app': 'yes'}}, 'must be true or false'),
+        ({}, 'at least one category'),
+    ):
+        response = client.put('/api/notification-preferences', json=payload)
+        assert response.status_code == 400, (payload, response.get_json())
+        assert fragment in str(response.get_json()), (payload, response.get_json())
+    conn = get_db()
+    try:
+        assert conn.execute(
+            'SELECT COUNT(*) FROM notification_preferences WHERE emp_id = ?',
+            ['EMP001'],
+        ).fetchone()[0] == 0, 'a refused payload wrote a row'
+    finally:
+        conn.close()
+
+
+def test_preferences_belong_to_one_employee(client):
+    _set_admin_session(client, 99764)
+    try:
+        _create_policy_user(client, 'EMP997', role='Employee')
+        _login_as(client, 'EMP997', 'Employee', 99763)
+        assert client.put('/api/notification-preferences',
+                          json={'Tickets': {'in_app': False}}).status_code == 200
+        _login_as(client, 'EMP001', 'Admin', 99763)
+        assert client.get('/api/notification-preferences').get_json()['preferences']['Tickets'] \
+            == {'in_app': True, 'email': True}
+        # And an admin cannot edit somebody else's preferences: the route reads
+        # `session['emp_id']` and takes no target parameter.
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM notification_preferences WHERE emp_id = ?',
+                ['EMP001'],
+            ).fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        _cleanup_user_contract_rows('EMP997')
+
+
+def test_setting_a_category_back_to_the_default_is_still_recorded(client):
+    """`customised` means "the employee touched this", not "this differs from the
+    default" — otherwise turning something back on would silently erase the record
+    that they had once turned it off."""
+    _set_admin_session(client, 99765)
+    try:
+        _create_policy_user(client, 'EMP998', role='Employee')
+        _login_as(client, 'EMP998', 'Employee', 99764)
+        client.put('/api/notification-preferences', json={'Leaves': {'in_app': False}})
+        reset = client.put('/api/notification-preferences',
+                           json={'Leaves': {'in_app': True}}).get_json()
+        assert reset['changed'] == ['Leaves'], reset
+        assert reset['preferences']['Leaves'] == {'in_app': True, 'email': True}
+        assert client.get('/api/notification-preferences').get_json()['customised'] == ['Leaves']
+        from app import add_notification
+        assert add_notification('EMP998', 'LEAVE_APPROVED', 'back on') is True
+    finally:
+        _cleanup_user_contract_rows('EMP998')
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP998'")
+        finally:
+            conn.close()
+
+
+def test_the_outbox_writes_the_taxonomy_category_not_a_hardcoded_one(client):
+    """The outbox inserts into `notifications` directly, so it used to hardcode the
+    category. Two writers of one column that disagree is the second half of the
+    defect: a hardcoded string drifts the moment a category is renamed."""
+    import outbox
+
+    assert outbox._preference_category('Payroll') == 'Payroll'
+    assert outbox._preference_category('Onboarding') == 'Onboarding'
+    # A type whose taxonomy entry is a *renamed* category follows too, which a
+    # hardcoded literal would not — this is the regression the rewrite exists for.
+    assert outbox._preference_category('LEAVE_APPROVED') == 'Leaves'
+    assert outbox._preference_category('TICKET_ASSIGNED') == 'Tickets'
+
+
+def test_the_preference_update_is_audited(client):
+    import json as _json
+    _set_admin_session(client, 99766)
+    try:
+        _create_policy_user(client, 'EMP990', role='Employee')
+        _login_as(client, 'EMP990', 'Employee', 99765)
+        assert client.put('/api/notification-preferences',
+                          json={'Payroll': {'email': False}}).status_code == 200
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT actor, "after" FROM audit_log '
+                "WHERE action = 'NOTIFICATION_PREFERENCES_UPDATE' AND entity = "
+                "'notification_preferences' ORDER BY log_id DESC LIMIT 1",
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'the preference change was not audited'
+        assert row[0] == 'EMP990', row
+        assert _json.loads(row[1]) == {'Payroll': {'in_app': True, 'email': False}}, row
+    finally:
+        _cleanup_user_contract_rows('EMP990')
+
 # ── FR-HOL-02 holiday calendar: the duplicate rule was a check, not a rule ──
 
 def _far_date(offset=400):
@@ -4677,31 +5131,46 @@ def _leave_balance(emp_id, leave_type, year=None):
     return None if row is None else {'total': row[0], 'used': row[1], 'reserved': row[2]}
 
 
-def _cleanup_leave_rows(emp_id, leave_type=None, year=None):
+def _cleanup_leave_rows(*emp_ids, leave_type=None, year=None):
+    """Remove the fixture employees and every row that points at them.
+
+    This was a single-`emp_id` function and two call sites passed two ids, so the
+    second was silently taken as `leave_type` — the balance delete matched nothing
+    and **the `users` row was never deleted at all**, leaving the employee behind
+    for the next test that reused the id to collide with. It is varargs now, and it
+    discovers the child tables rather than listing them, which is what a third
+    foreign key (`notification_preferences`) would otherwise have had to be added to
+    by hand.
+    """
+    if not emp_ids:
+        return
     year = year or datetime.now().year
+    placeholders = ','.join('?' for _ in emp_ids)
+    ids = list(emp_ids)
     conn = get_db()
     try:
-        # A login writes a `user_sessions` row, and `users` is still referenced by
-        # it, so deleting the user first raised a foreign-key error and left it in
-        # place — which then made the *next* test that reused the id fail with
-        # "Employee ID already exists". Everything that points at the employee goes
-        # first.
-        for table in ('user_sessions', 'attendance_days', 'breaks'):
+        for table in _tables_with_column(conn, 'emp_id'):
+            if table == 'users':
+                continue
             try:
-                conn.execute(f'DELETE FROM {table} WHERE emp_id = ?', [emp_id])
+                conn.execute(f'DELETE FROM {table} WHERE emp_id IN ({placeholders})', ids)
             except Exception:
-                pass  # a table this backend does not have
+                pass  # a table whose rows are themselves referenced
         if leave_type:
             conn.execute(
-                "DELETE FROM leave_balance WHERE emp_id = ? AND leave_type = ? AND year = ?",
-                [emp_id, leave_type, year],
+                f"DELETE FROM leave_balance WHERE emp_id IN ({placeholders}) "
+                'AND leave_type = ? AND year = ?', [*ids, leave_type, year],
             )
         else:
-            conn.execute("DELETE FROM leave_balance WHERE emp_id = ?", [emp_id])
-        conn.execute("DELETE FROM leave_policy_assignments WHERE emp_id = ?", [emp_id])
-        conn.execute("DELETE FROM leave_requests WHERE emp_id = ?", [emp_id])
-        conn.execute("DELETE FROM notifications WHERE emp_id = ?", [emp_id])
-        conn.execute("DELETE FROM audit_log WHERE entity_id = ?", [emp_id])
+            conn.execute(
+                f"DELETE FROM leave_balance WHERE emp_id IN ({placeholders})", ids)
+        for table in ('leave_policy_assignments', 'monthly_leave_grants'):
+            try:
+                conn.execute(f'DELETE FROM {table} WHERE emp_id IN ({placeholders})', ids)
+            except Exception:
+                pass
+        conn.execute(f"DELETE FROM audit_log WHERE entity_id IN ({placeholders})", ids)
+        conn.execute(f"DELETE FROM users WHERE emp_id IN ({placeholders})", ids)
     finally:
         conn.close()
 
@@ -5205,6 +5674,14 @@ def test_audit_log_entity_before_after_written(client):
     assert after['department'] == 'MIS'
 
 def test_notification_category_derived_on_write(client):
+    """The category is the SRS's name, not a substring of the type.
+
+    This asserted 'Leave'. The SRS's preference taxonomy (FR-NOT-03) says
+    'Leaves', and the two never met: a preference stored against 'Leaves' would
+    never have matched a leave notification, which is why the requirement was
+    unreachable rather than merely unimplemented. Corrected with the taxonomy in
+    `notifications.py`.
+    """
     with client.session_transaction() as sess:
         sess['emp_id'] = 'EMP001'
         sess['name'] = 'Admin'
@@ -5220,7 +5697,7 @@ def test_notification_category_derived_on_write(client):
         " ORDER BY created_at DESC LIMIT 1").fetchone()
     conn.close()
     assert row and row[0] == 'LEAVE_APPLIED'
-    assert row[1] == 'Leave'
+    assert row[1] == 'Leaves'
 
 def test_notification_category_db_default(client):
     """Legacy/`legacy` DDL default applies when category is omitted (outbox path)."""

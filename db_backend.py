@@ -134,7 +134,8 @@ def _translate_date_fn(sql: str) -> str:
     return _DATE_FN_CALL.sub(_repl, sql)
 
 
-_BOOLEAN_COL_CACHE: dict[str, frozenset[str]] = {}
+_BOOLEAN_TABLE_CACHE: dict[str, dict[str, frozenset]] = {}
+_COLUMN_TYPE_CACHE: dict[str, dict[str, frozenset]] = {}
 
 
 def _naive_datetime_factory(cursor):
@@ -156,22 +157,80 @@ def _naive_datetime_factory(cursor):
     return _naive
 
 
+def _introspect_columns(schema: str):
+    """``(table, column, is_boolean)`` for every column in ``schema``, once.
+
+    One query for all three views below, so the caches cannot disagree with each
+    other or drift out of date independently. Any failure yields an empty result:
+    an adapter that cannot introspect must leave the SQL alone, which is what the
+    Phase-3b tests call "inert", rather than guess.
+    """
+    rows_out = []
+    try:
+        with psycopg.connect(database_url(), autocommit=True) as ic:
+            rows_out = ic.execute(
+                "SELECT table_name, column_name, data_type = 'boolean' "
+                "FROM information_schema.columns WHERE table_schema = %s "
+                "ORDER BY table_name, column_name",
+                (schema,),
+            ).fetchall()
+    except Exception:
+        rows_out = []
+    tables: dict[str, set] = {}
+    by_name: dict[str, list] = {}
+    for table_name, column_name, is_bool in rows_out:
+        is_bool = bool(is_bool)
+        if is_bool:
+            tables.setdefault(table_name, set()).add(column_name)
+        by_name.setdefault(column_name, []).append(is_bool)
+    _BOOLEAN_TABLE_CACHE[schema] = {t: frozenset(c) for t, c in tables.items()}
+    _COLUMN_TYPE_CACHE[schema] = {n: frozenset(flags) for n, flags in by_name.items()}
+
+
+def _boolean_tables(schema: str) -> dict:
+    """``{table: frozenset(boolean column names)}`` in ``schema``, once per process.
+
+    **Table-aware on purpose.** The alternative — one schema-wide set of boolean
+    *names* — is wrong as soon as two tables share a column name, and the SRS's own
+    vocabulary makes that likely.
+    """
+    if schema not in _BOOLEAN_TABLE_CACHE:
+        _introspect_columns(schema)
+    return _BOOLEAN_TABLE_CACHE.get(schema, {})
+
+
 def _boolean_columns(schema: str) -> frozenset[str]:
-    """Boolean column names in ``schema``, introspected once per process."""
-    if schema not in _BOOLEAN_COL_CACHE:
-        cols: set[str] = set()
-        try:
-            with psycopg.connect(database_url(), autocommit=True) as ic:
-                rows = ic.execute(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_schema = %s AND data_type = 'boolean'",
-                    (schema,),
-                ).fetchall()
-                cols = {r[0] for r in rows}
-        except Exception:
-            cols = set()
-        _BOOLEAN_COL_CACHE[schema] = frozenset(cols)
-    return _BOOLEAN_COL_CACHE[schema]
+    """Boolean column names that are safe to rewrite on a *name* alone.
+
+    **Only names that are BOOLEAN in every table that has a column of that name.**
+    A name that is BOOLEAN in one table and something else in another is excluded,
+    because the consumers of this set — `_rewrite_boolean_literals` and
+    `_coerce_boolean_comparison_params` — match a bare identifier with no way to
+    know which table the statement is about.
+
+    That restriction is not theoretical. `notification_preferences.email` is
+    BOOLEAN (FR-NOT-03), while `users.email` and `candidates.email` are VARCHAR, so
+    a schema-wide name map made the adapter rewrite **every** `email = ?` in the
+    whole application to `email = %s::boolean` — and `PUT /api/users` failed with
+    *"invalid input syntax for type boolean: 'someone@company.com'"*. One table's
+    flag column silently corrupted an unrelated column of the same name everywhere.
+    Losing the `0/1` rewrite for an ambiguous name is the safe direction to fail:
+    it surfaces as a type error on one statement rather than corrupting every
+    statement that mentions that word.
+
+    The INSERT path does not rely on this set: `_coerce_insert_boolean_params`
+    parses the target table and its column list, so it uses
+    :func:`_boolean_tables` and is exact. Only the bare-name rewrites need the
+    conservative set.
+    """
+    if schema not in _COLUMN_TYPE_CACHE:
+        _introspect_columns(schema)
+    if schema not in _COLUMN_TYPE_CACHE:
+        return frozenset()
+    return frozenset(
+        name for name, flags in _COLUMN_TYPE_CACHE[schema].items()
+        if flags and all(flags)
+    )
 
 
 def _rewrite_boolean_literals(sql: str, schema: str | None) -> str:
@@ -253,11 +312,16 @@ def _coerce_insert_boolean_params(sql: str, params, schema: str | None):
     """
     if not schema:
         return sql, params
-    bool_cols = _boolean_columns(schema)
-    if not bool_cols or "),(" in sql:
-        return sql, params
     m = re.match(r"(?is)^(INSERT\s+INTO\s+[\"`\w.]+)\s*\(([^)]*)\)\s+VALUES\s*\((.*)\)\s*;?\s*$", sql)
     if not m:
+        return sql, params
+    # Resolve the flag columns **for this table** rather than by bare name, so a
+    # column that is BOOLEAN in one table and VARCHAR in another cannot make this
+    # insert coerce the wrong parameter. The statement names its own table, so
+    # there is no ambiguity to be conservative about here.
+    target = m.group(1).split()[-1].strip('"`').split('.')[-1]
+    bool_cols = _boolean_tables(schema).get(target, frozenset())
+    if not bool_cols or "),(" in sql:
         return sql, params
     cols = [c.strip().strip("\"`") for c in m.group(2).split(",")]
     vals = [v.strip() for v in _split_top_level(m.group(3))]
@@ -454,3 +518,9 @@ def reset_schema(schema: str | None = None) -> None:
         conn.execute(f"CREATE SCHEMA {schema}")
     finally:
         conn.close()
+    # The introspection caches describe a schema that no longer exists. Leaving them
+    # populated would have the adapter rewriting SQL against the *old* column types,
+    # which is the one failure mode where being wrong is silent until a statement
+    # happens to hit a table that changed.
+    _BOOLEAN_TABLE_CACHE.pop(schema, None)
+    _COLUMN_TYPE_CACHE.pop(schema, None)

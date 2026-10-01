@@ -52,6 +52,7 @@ import holidays_optin  # noqa: E402  # optional-holiday opt-ins (FR-HOL-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
+import notifications  # noqa: E402  # per-category notification preferences (FR-NOT-03)
 import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
@@ -869,6 +870,24 @@ def init_db():
         )
     ''')
 
+    # ── Notification preferences (FR-NOT-03) ─────────────────────────
+    # The `category` column on `notifications` existed for this and nothing read it.
+    # A row is optional and its absence means "default true", so adding a category
+    # is a no-op for employees already in the system rather than a backfill.
+    # No-op on v2.0 `public`, which owns the identity/BOOLEAN version.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS notification_preferences (
+            pref_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            category VARCHAR NOT NULL,
+            in_app INTEGER DEFAULT 1,
+            email INTEGER DEFAULT 1,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id),
+            UNIQUE (emp_id, category)
+        )
+    ''')
+
     # ── Outbox (CC-09 transactional outbox) ────────────────────────
     # No-op on the v2.0 `public` schema (already BIGINT-identity + JSONB);
     # DuckDB / legacy-PG get the self-serving v1.0 shape.
@@ -1585,8 +1604,13 @@ def init_db():
 
     if conn.execute("SELECT COUNT(*) FROM notifications").fetchone()[0] < 2:
         conn.execute(
-            "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [base_id + 15, 'EMP001', 'Leave', 'Your leave request is pending', '/leaves', 0, now]
+            # `category` is named explicitly: omitting it took the column default
+            # 'General', so a seeded leave notification carried a different category
+            # from a real one and no preference could ever have matched it.
+            "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, is_read, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [base_id + 15, 'EMP001', 'Leave', notifications.category_for('Leave'),
+             'Your leave request is pending', '/leaves', 0, now]
         )
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, message, related_link, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -3674,7 +3698,7 @@ def request_holiday_optin(hid):
               f'Opt-in requested for {holiday[1]}', entity='holiday_optins', entity_id=optin_id)
     add_notification(
         session['emp_id'], 'HOLIDAY_OPTIN_REQUESTED',
-        f'Your opt-in request for {holiday[1]} is waiting for HR approval.', '/leaves', 'Leave',
+        f'Your opt-in request for {holiday[1]} is waiting for HR approval.', '/leaves',
     )
     return jsonify({
         'message': 'Opt-in requested', 'optin_id': optin_id, 'status': 'Pending',
@@ -3799,7 +3823,7 @@ def _review_holiday_optin(oid, target):
               entity_id=oid, before={'status': 'Pending'}, after={'status': target})
     add_notification(
         emp_id, f'HOLIDAY_OPTIN_{target.upper()}',
-        f'Your opt-in request for {holiday_name} was {target.lower()}.', '/leaves', 'Leave',
+        f'Your opt-in request for {holiday_name} was {target.lower()}.', '/leaves',
     )
     return jsonify({'message': f'Opt-in {target.lower()}', 'optin_id': oid, 'status': target}), 200
 
@@ -3814,36 +3838,64 @@ def _review_holiday_optin(oid, target):
 # ══════════════════════════════════════════════════════════════════════
 
 def _notification_category(ntype):
-    """FR-NOT-03 preference category derived from the notification type."""
-    t = (ntype or '').upper()
-    if 'LEAVE' in t:
-        return 'Leave'
-    if 'PAYROLL' in t:
-        return 'Payroll'
-    if 'ONBOARDING' in t:
-        return 'Onboarding'
-    if 'BREAK' in t:
-        return 'Break'
-    if 'OFFER' in t:
-        return 'Offer'
-    return 'General'
+    """FR-NOT-03 preference category for a notification type.
+
+    Delegates to `notifications.category_for`. The previous implementation derived
+    the category with substring tests, and the two never met the SRS's taxonomy:
+    every leave notification was stored as `Leave` where the SRS says `Leaves`, so
+    a preference keyed on `Leaves` would never have matched one, and tickets, goals,
+    reviews and holiday opt-ins all fell through to `General` - which is to say
+    `Tickets` had no producer at all, and a preference screen built on this would
+    have been a set of switches that did nothing.
+    """
+    return notifications.category_for(ntype)
+
+
+def _effective_notification_preferences(conn, emp_id):
+    """The employee's effective preferences, defaults applied."""
+    try:
+        rows = conn.execute(
+            'SELECT category, in_app, email FROM notification_preferences WHERE emp_id = ?',
+            [emp_id],
+        ).fetchall()
+    except Exception:
+        # A backend without the table answers with the defaults rather than failing
+        # every notification in the system.
+        return notifications.effective_for([])
+    return notifications.effective_for(rows)
 
 
 def add_notification(emp_id, ntype, message, link=None, category=None):
+    """Record an in-app notification, unless the employee switched that category off.
+
+    FR-NOT-03: `{in_app, email}` per category, default true. A category the employee
+    has turned off in-app produces no row - the *fact* is unaffected, it is only the
+    in-app delivery that is suppressed, and whatever raised the notification owns
+    the record of it.
+
+    Returns True when a row was written, so a caller can tell a suppressed
+    notification from a delivered one instead of inferring it from silence.
+    """
     conn = None
     try:
         conn = get_db()
         if category is None:
             category = _notification_category(ntype)
+        if not notifications.wants_in_app(
+            _effective_notification_preferences(conn, emp_id), category
+        ):
+            return False
         conn.execute(
             "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [_next_generated_id(conn, 'notifications', 'notification_id'), emp_id, ntype, category, message, link, datetime.now()]
         )
+        return True
     except Exception as e:
         logger.warning("Notification failed: %s", e)
     finally:
         if conn:
             conn.close()
+    return False
 
 
 @app.route('/api/v1/notifications', methods=['GET'])
@@ -3872,6 +3924,101 @@ def mark_notifications_read():
     conn.execute("UPDATE notifications SET is_read = 1 WHERE emp_id = ?", [session['emp_id']])
     conn.close()
     return jsonify({'message': 'Marked read'}), 200
+
+
+# ── Notification preferences (FR-NOT-03) ─────────────────────────────────
+# "Preferences per category (Onboarding, Leaves, Expenses, Tickets, Payroll,
+# Tickets-SLA), {in_app, email} each, default true."
+#
+# The routes are deliberately thin: `notifications.check_payload` validates and
+# merges, so a partial body answers the same as a full one and an absent category
+# keeps its stored value rather than reverting to the default. That matters for the
+# same reason it does on `PUT /api/users` — a client sending one switch must not
+# reset the other seven.
+
+@app.route('/api/v1/notification-preferences', methods=['GET'])
+@app.route('/api/notification-preferences', methods=['GET'])
+@login_required
+def get_notification_preferences():
+    """The caller's effective preferences, with the taxonomy described.
+
+    `has_producer` is reported per category so an employee toggling `Tickets-SLA` —
+    which FR-TKT-01 will populate and nothing does today — is told that, rather
+    than left to conclude the switch is broken. The same honesty applies to
+    `Expenses`, which has no notification producer yet.
+    """
+    conn = get_db()
+    try:
+        effective = _effective_notification_preferences(conn, session['emp_id'])
+        stored = {
+            row[0] for row in conn.execute(
+                'SELECT category FROM notification_preferences WHERE emp_id = ?',
+                [session['emp_id']],
+            ).fetchall()
+        }
+    finally:
+        conn.close()
+    preferences = notifications.ordered(effective)
+    return jsonify({
+        'preferences': preferences,
+        'channels': list(notifications.CHANNELS),
+        'default': 'true - a category with no stored row is on',
+        'taxonomy': notifications.describe(),
+        # The categories the employee has actually touched, so a client can
+        # distinguish "I set this to the default" from "I never touched this".
+        'customised': [c for c in preferences if c in stored],
+    }), 200
+
+
+@app.route('/api/v1/notification-preferences', methods=['PUT'])
+@app.route('/api/notification-preferences', methods=['PUT'])
+@login_required
+def update_notification_preferences():
+    """Set one or more categories. A full replace of the categories named, not of
+    the whole set — see the note above."""
+    data = request.get_json(silent=True) or {}
+    conn = get_db()
+    try:
+        current = _effective_notification_preferences(conn, session['emp_id'])
+        try:
+            effective = notifications.check_payload(data, current)
+        except notifications.PreferenceError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        changed = []
+        for category, channels in effective.items():
+            if channels == current.get(category):
+                continue
+            conn.execute(
+                'DELETE FROM notification_preferences WHERE emp_id = ? AND category = ?',
+                [session['emp_id'], category],
+            )
+            conn.execute(
+                'INSERT INTO notification_preferences '
+                '(pref_id, emp_id, category, in_app, email, updated_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                [_next_generated_id(conn, 'notification_preferences', 'pref_id'),
+                 session['emp_id'], category, int(channels['in_app']),
+                 int(channels['email']), datetime.now()],
+            )
+            changed.append(category)
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'NOTIFICATION_PREFERENCES_UPDATE',
+              f'Notification preferences updated: {", ".join(changed) or "none"}',
+              entity='notification_preferences', entity_id=session['emp_id'],
+              before={c: current.get(c) for c in (changed or [])},
+              after={c: effective.get(c) for c in (changed or [])})
+    return jsonify({
+        'message': 'Preferences updated',
+        'preferences': notifications.ordered(effective),
+        'changed': changed,
+        # Stated plainly rather than left for someone to discover: the email channel
+        # is stored and reported, and nothing consumes it yet, because the app has
+        # no automatic email delivery path (POST /api/send-notification-email is a
+        # manual admin endpoint). A client must not promise a user an email that no
+        # code will send.
+        'email_delivery': 'stored only — this build has no automatic email delivery',
+    }), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -4758,7 +4905,8 @@ def _revoke_offboarding_access_impl(target_date, conn, offboard_id=None):
             ).fetchall()
             for admin in admins:
                 _insert_lifecycle_notification(
-                    conn, admin[0], f'Access revoked for {emp_id} on last working day', '/offboarding', 'Offboarding'
+                    conn, admin[0], f'Access revoked for {emp_id} on last working day',
+                    '/offboarding', notifications.category_for('Offboarding')
                 )
             _revoke_redis_sessions(emp_id)
             revoked.append({'emp_id': emp_id, 'resignation_id': resignation_id, 'offboard_id': offboard_id})

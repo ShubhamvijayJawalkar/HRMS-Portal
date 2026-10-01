@@ -25,8 +25,8 @@ rather than quietly invalidating this document.
 | Verdict | Count | Share |
 |---|---:|---:|
 | `IMPLEMENTED` | 56 | 54% |
-| `PARTIAL` | 36 | 35% |
-| `NOT_STARTED` | 11 | 11% |
+| `PARTIAL` | 37 | 36% |
+| `NOT_STARTED` | 10 | 10% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
@@ -91,7 +91,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (36)
+### PARTIAL (37)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -118,6 +118,7 @@ rather than quietly invalidating this document.
 | `FR-LEA-02` | M | C | `/api/leaves` | Dates are swapped if reversed and the session is recorded. Working-day deduction ignores holidays — FR-LEA-09 asks for one shared function and there is none. |
 | `FR-LEA-03` | M | N | `/api/leaves/export` | Excel export ships, synchronously. The async variant for large ranges is not implemented. |
 | `FR-NOT-01` | M | C | `/api/notifications` | Last-50 list with an unread count. Delivery is a direct SMTP call on the request thread rather than an outbox enqueue, so a slow provider can block the request that triggered it. |
+| `FR-NOT-03` | S | R | `/api/notification-preferences` | Per-category {in_app, email} preferences with default true, own-row only, partial update, validated, audited. The gap was structural, not just missing: the stored categories and the SRS taxonomy had NOTHING in common. Every leave notification was stored as `Leave` where the SRS says `Leaves`, so a preference keyed on `Leaves` would never have matched one, and tickets, goals, reviews and holiday opt-ins all fell through to `General` - `Tickets` had no producer at all, so a preference screen built on the old substring derivation would have been switches that did nothing. notifications.category_for is now the single derivation (exact table then longest prefix), a test parses the real add_notification call sites and fails if any type has no mapping, and the outbox no longer hardcodes a category. Two documented deviations: `Performance` and `Holiday` are added because the app emits goal ratings, reviews and holiday opt-ins and forcing them into General would be worse than naming them; `Tickets-SLA` is kept even though FR-TKT-01 has no producer yet, and the API reports has_producer per category rather than presenting a dead switch. MISSING: the `email` channel has no automatic delivery path - POST /api/send-notification-email is a manual admin endpoint that picks its own recipient - so the column is stored and reported but nothing consumes it, which the PUT response states explicitly. |
 | `FR-ONB-04` | H | C | `/api/preboarding/<token>/documents/<doc_type>`<br>`/api/onboarding-checklist/<int:item_id>/review` | Upload, review, and mandatory rejection notes all ship. The shared pipeline only checks the file extension (FR-DOC-02 is partial). |
 | `FR-REG-01` | M | R | `/api/regularization` | Filters and the company-wide/self split ship, the split decided by policy.can_view_all. Delegated reports are not included. |
 | `FR-REG-02` | M | C | `/api/regularization` | Corrected times are captured and future dates are refused. The "a specific corrected time is required" rule is not enforced: a reason-only request is accepted. |
@@ -132,7 +133,7 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (11)
+### NOT_STARTED (10)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -144,7 +145,6 @@ rather than quietly invalidating this document.
 | `FR-LEA-07` | H | C | — | No manual grant route and no LEAVE_GRANT audit action. An admin cannot add days to an employee; only the policy and the accrual job can. |
 | `FR-LEA-08a` | M | N | — | approval_delegations exists in the canonical schema with a no-overlap exclusion constraint, but no route reads or writes it. A manager going on leave has no way to delegate. |
 | `FR-LEA-09` | M | C | — | There is no single working-day/holiday-deduction function. Leave day counting, payroll LOP and the reports each approximate it differently, which is the inconsistency the requirement exists to remove. |
-| `FR-NOT-03` | S | R | — | No per-category {in_app, email} preferences. category exists on the notification row, but the preference model and its defaults do not. |
 | `FR-REG-04` | M | N | — | No regularization Excel export. |
 | `FR-USR-07` | H | R | — | No POST /api/users/bulk. The block/archive routes take a single employee; there is no batch endpoint with per-row results. |
 

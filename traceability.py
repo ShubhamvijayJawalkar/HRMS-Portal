@@ -263,9 +263,29 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'can block the request that triggered it.'),
     'FR-NOT-02': ('M', 'R', 'IMPLEMENTED', ('/api/notifications/read',),
                   'Sets is_read and keeps the row, so a read notification does not vanish.'),
-    'FR-NOT-03': ('S', 'R', 'NOT_STARTED', (),
-                  'No per-category {in_app, email} preferences. category exists on the '
-                  'notification row, but the preference model and its defaults do not.'),
+    'FR-NOT-03': ('S', 'R', 'PARTIAL',
+                  ('/api/notification-preferences',),
+                  'Per-category {in_app, email} preferences with default true, own-row '
+                  'only, partial update, validated, audited. The gap was structural, not '
+                  'just missing: the stored categories and the SRS taxonomy had NOTHING in '
+                  'common. Every leave notification was stored as `Leave` where the SRS '
+                  'says `Leaves`, so a preference keyed on `Leaves` would never have '
+                  'matched one, and tickets, goals, reviews and holiday opt-ins all fell '
+                  'through to `General` - `Tickets` had no producer at all, so a '
+                  'preference screen built on the old substring derivation would have been '
+                  'switches that did nothing. notifications.category_for is now the single '
+                  'derivation (exact table then longest prefix), a test parses the real '
+                  'add_notification call sites and fails if any type has no mapping, and '
+                  'the outbox no longer hardcodes a category. Two documented deviations: '
+                  '`Performance` and `Holiday` are added because the app emits goal '
+                  'ratings, reviews and holiday opt-ins and forcing them into General '
+                  'would be worse than naming them; `Tickets-SLA` is kept even though '
+                  'FR-TKT-01 has no producer yet, and the API reports has_producer per '
+                  'category rather than presenting a dead switch. MISSING: the `email` '
+                  'channel has no automatic delivery path - POST /api/send-notification-'
+                  'email is a manual admin endpoint that picks its own recipient - so the '
+                  'column is stored and reported but nothing consumes it, which the PUT '
+                  'response states explicitly.'),
 
     # ── FR-AST / FR-ATS: assets and recruitment ─────────────────────────
     'FR-AST-01': ('M', 'R', 'IMPLEMENTED', ('/api/assets', '/api/my-assets', '/api/assets/<int:aid>/return'),

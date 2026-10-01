@@ -1217,6 +1217,102 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   with no assertion change. Same shape as the CDN-load flake already noted for
   `test_admin_sees_user_tab`.
 
+## FR-NOT-03 notification preferences, and a BOOLEAN column named `email` (`notifications.py`)
+- **The gap was structural, not just missing.** The `category` column on
+  `notifications` and the derivation filling it had never met the SRS taxonomy,
+  so a preference screen built on them would have been switches that did nothing.
+  Not one of the nine types the app raised landed on one of the SRS's six
+  categories: `LEAVE_*` stored `Leave` where the SRS says **`Leaves`** (so a
+  preference keyed on `Leaves` would never have matched one), and
+  `TICKET_ASSIGNED`, `TICKET_UPDATED`, `GOAL_RATED`, `REVIEW_SUBMITTED` and
+  `HOLIDAY_OPTIN_REQUESTED` all fell through to `General` — meaning `Tickets`,
+  `Expenses` and `Tickets-SLA` had **no producer at all**.
+- `notifications.py` owns the taxonomy. `category_for` is an exact table then
+  longest-prefix, replacing substring inference, which is what produced `Leave`
+  for `Leaves` and `General` for every ticket: a substring test cannot express
+  "this category is called something the type name does not contain". Every rule
+  lives in one table — an earlier draft left a bare `LEAVE` prefix in a second
+  loop, which is the drift this module exists to remove.
+- A test **parses the real call sites** out of `app.py` and `outbox.py` and fails
+  if any type reaches the column with no mapping, so the next notification added
+  without one turns the build red instead of landing as a silent `General`.
+- Three hardcoded literals removed: the two `HOLIDAY_OPTIN_*` notifications
+  passed `category='Leave'` (taxonomy: `Holiday`) and offboarding passed
+  `'Offboarding'` (not in the requirement at all; `OFFBOARD` now derives to
+  `Onboarding`, the SRS's lifecycle category). The outbox hardcoded `Payroll` and
+  `Onboarding` too — a second writer of one column disagreeing with the one
+  derivation. A test checks literal category arguments over the **AST** of both
+  files, not a regex: a regex must guess which string is the category and which is
+  the type, and the exemption list that needs would defeat its own purpose. It
+  guards that it found ≥3 literals so it cannot pass vacuously if the signatures
+  move.
+- The boot seed's notification insert omitted `category` and took the column
+  default `General`, so a seeded leave notification carried a different category
+  from a real one. Fixed by naming the column.
+- **`PARTIAL`, honestly.** `in_app` is enforced end to end and `add_notification`
+  returns whether a row was written, so a caller can tell a suppressed
+  notification from a delivered one instead of inferring it from silence. `email`
+  is stored and reported but **nothing consumes it**: the app has no automatic
+  email delivery path at all (`POST /api/send-notification-email` is a manual
+  admin endpoint picking its own recipient). The `PUT` response says so in plain
+  text, because a client promising an email no code will send is worse than one
+  admitting it cannot.
+- Two recorded deviations: `Performance` and `Holiday` added (the app emits goal
+  ratings, reviews and holiday opt-ins; forcing them into `General` is worse than
+  naming them), and `Tickets-SLA` **kept** though FR-TKT-01 has no producer —
+  `GET` reports `has_producer` per category so nobody concludes a switch is broken.
+- A row is optional and its absence means "default true", so adding a category is
+  a no-op for existing employees rather than an eight-row backfill per person.
+- **The most consequential defect was in the adapter, not the feature.**
+  `notification_preferences.email` is `BOOLEAN`; `users.email` and
+  `candidates.email` are `VARCHAR`. `db_backend` collected boolean columns as a
+  schema-wide set of **names** and rewrote any `col = ?` matching one, so this new
+  table's flag column made **every** `email = ?` in the application become
+  `email = %s::boolean` and `PUT /api/users` failed with *invalid input syntax for
+  type boolean: 'someone@company.com'* — one statement from the login path and the
+  directory contract. Caught only because the public-flip probe ran the shifts
+  flow on a clean v2.0 database.
+  - Fixed by being **table-aware**: `_boolean_tables` resolves flags for the table
+    a statement names, and the INSERT path (which parses its own target table and
+    column list) uses it and is exact.
+  - Only the two *bare-name* rewrites lack a table, so they use a conservative
+    set — a name is rewritten only if BOOLEAN in **every** table that has it.
+    `email` is excluded; `allow_login`, `is_read` and the rest are unaffected.
+    Failing closed is the right direction: a type error on one statement instead of
+    corrupting every statement mentioning that word.
+  - One query now feeds all three views so the caches cannot disagree, and
+    `reset_schema` clears them — it previously dropped the schema while leaving a
+    description of its old columns in memory.
+- **A bug in my own patch, caught before it shipped.** `check_payload` started
+  with `effective = dict(current)`, a *shallow* copy, so writing
+  `effective['Leaves']['in_app'] = False` also mutated `current['Leaves']`; the
+  route's changed-detection then found every category equal to itself and the whole
+  `PUT` returned **200 and wrote nothing**. Deep copy fixed it; the partial-update
+  regression test asserts exactly that case.
+- **Two test-harness defects, both now permanent fixes.** The cleanup helper
+  listed child tables by hand and had been wrong **three times**
+  (`user_sessions`, `notifications`, `holiday_optins`, `notification_preferences`),
+  each time raising an FK error that left the employee in place so the *next* test
+  reusing the id failed with "Employee ID already exists" somewhere unrelated. It
+  now discovers every table with an `emp_id` column from the schema.
+  `_cleanup_leave_rows` was worse: single-`emp_id` signature, two call sites
+  passed two ids, so the second became `leave_type` — and it **never deleted the
+  `users` row**, so it had been leaking fixture employees into the suite. Varargs
+  now, and it removes the user.
+- 14 new unit tests, and one **existing** test corrected:
+  `test_notification_category_derived_on_write` asserted `category == 'Leave'`,
+  i.e. it had encoded the bug as expected behaviour. A test that asserts a
+  requirement's defect is not merely stale — it is actively preventing the fix.
+  `scripts/probe_public_flip.py` gained
+  `notification-preferences(taxonomy + per-category switch)`, which reads the
+  v2.0 rows back: **107/107 GET + 52/52 write**, idempotent across runs, with
+  CC-01 and the read-only preflight green. `cutover_preflight.py`'s expected head
+  is now `0008_notification_preferences`.
+- Note for whoever adds a **boolean column whose name is also used elsewhere**:
+  this is the second time a name collision in that map has been load-bearing. The
+  conservative rule is what makes it safe, so a new flag column cannot be added
+  without checking that rule still excludes what it should.
+
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)
 - Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks

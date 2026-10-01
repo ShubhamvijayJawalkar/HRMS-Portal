@@ -120,6 +120,20 @@ def _backoff_seconds(attempts: int) -> int:
     return BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
 
 
+def _preference_category(ntype: str) -> str:
+    """The FR-NOT-03 preference category for a type this handler writes directly.
+
+    The outbox inserts into `notifications` rather than calling
+    `app.add_notification`, so it used to hardcode the category. That is the second
+    half of the taxonomy defect: the two writers of the same column disagreed, and a
+    hardcoded string drifts the moment a category is renamed. Both handlers route
+    through the one derivation now.
+    """
+    import notifications  # lazy: avoids a circular import at module load
+
+    return notifications.category_for(ntype)
+
+
 def _handle_payroll_finalized(conn, row) -> bool:
     """Post-payroll: notify every employee on the run with their net pay."""
     from app import _is_public_target_schema, _next_generated_id, gen_id  # lazy
@@ -135,9 +149,10 @@ def _handle_payroll_finalized(conn, row) -> bool:
         for i, (emp_id, name, net) in enumerate(employees):
             conn.execute(
                 "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
-                "VALUES (?, ?, 'Payroll', 'Payroll', ?, '/my-payslips', ?)",
+                "VALUES (?, ?, 'Payroll', ?, ?, '/my-payslips', ?)",
                 [(_next_generated_id(conn, 'notifications', 'notification_id') if _is_public_target_schema() else gen_id()),
-                 emp_id, f'Salary for run {run_id} credited: Rs.{float(net):,.2f}', now],
+                 emp_id, _preference_category('Payroll'),
+                 f'Salary for run {run_id} credited: Rs.{float(net):,.2f}', now],
             )
         return True
     except Exception as exc:
@@ -179,9 +194,10 @@ def _handle_offer_accepted(conn, row) -> bool:
         for (recipient,) in recipients:
             conn.execute(
                 "INSERT INTO notifications (notification_id, emp_id, type, category, message, related_link, created_at) "
-                "VALUES (?, ?, 'Onboarding', 'Onboarding', ?, '/onboarding', ?)",
+                "VALUES (?, ?, 'Onboarding', ?, ?, '/onboarding', ?)",
                 [(_next_generated_id(conn, 'notifications', 'notification_id') if _is_public_target_schema() else gen_id()),
-                 recipient, f'Candidate {cid} accepted — onboarding workflow started', datetime.now()],
+                 recipient, _preference_category('Onboarding'),
+                 f'Candidate {cid} accepted — onboarding workflow started', datetime.now()],
             )
         return True
     except Exception as exc:

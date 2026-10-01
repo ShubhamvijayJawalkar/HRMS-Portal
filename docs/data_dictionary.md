@@ -1,6 +1,6 @@
 # HRMS v2.0 — Data Dictionary
 
-_Generated 2026-09-29T07:59:37.544221+00:00 by `scripts/generate_data_dictionary.py` from `localhost:5432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
+_Generated 2026-10-01T12:09:59.170397+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms_dd`. **Do not hand-edit** — regenerate (SRS §15)._
 
 Corresponds to SRS v2.0 §7 (Data model & database constraints). 
 Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4), `audit-indefinite-with-review`. PII columns are permission-gated behind `pii_reveal`.
@@ -13,11 +13,11 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `anonymisation_requests` | 0 | transactional | — |
 | `approval_delegations` | 0 | transactional | — |
 | `assets` | 2 | transactional | — |
-| `attendance_days` | 4 | statutory-7y | — |
-| `audit_log` | 27 | audit-indefinite-with-review | — |
+| `attendance_days` | 0 | statutory-7y | — |
+| `audit_log` | 2 | audit-indefinite-with-review | — |
 | `break_approvals` | 0 | transactional | — |
 | `break_types` | 3 | transactional | — |
-| `breaks` | 3 | statutory-7y | — |
+| `breaks` | 2 | statutory-7y | — |
 | `candidates` | 2 | transactional | — |
 | `dependents` | 2 | transactional | — |
 | `documents` | 2 | transactional | — |
@@ -28,17 +28,18 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `feedback_360` | 2 | transactional | — |
 | `goals` | 2 | transactional | — |
 | `holiday_optins` | 0 | transactional | — |
-| `holidays` | 6 | transactional | — |
+| `holidays` | 5 | transactional | — |
 | `idempotency_keys` | 0 | transactional | — |
 | `import_jobs` | 0 | transactional | — |
 | `interviews` | 2 | transactional | — |
 | `job_postings` | 2 | transactional | — |
 | `leave_balance` | 6 | statutory-7y | — |
 | `leave_policy_assignments` | 0 | transactional | — |
-| `leave_requests` | 3 | statutory-7y | — |
+| `leave_requests` | 2 | statutory-7y | — |
 | `mfa_credentials` | 0 | transactional | — |
 | `monthly_leave_grants` | 0 | transactional | — |
-| `notifications` | 5 | transactional | — |
+| `notification_preferences` | 0 | transactional | — |
+| `notifications` | 2 | transactional | — |
 | `offboarding_approvals` | 0 | transactional | — |
 | `offboarding_settlements` | 0 | transactional | — |
 | `offboarding_tasks` | 2 | transactional | — |
@@ -48,20 +49,20 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `onboarding_tasks` | 2 | transactional | — |
 | `onboarding_workflow` | 0 | transactional | — |
 | `outbox_events` | 0 | audit-indefinite-with-review | — |
-| `password_reset_tokens` | 3 | transactional | — |
+| `password_reset_tokens` | 2 | transactional | — |
 | `payroll_approvals` | 0 | statutory-7y | — |
 | `payroll_items` | 2 | statutory-7y | — |
 | `payroll_runs` | 2 | statutory-7y | — |
-| `performance_reviews` | 3 | transactional | — |
+| `performance_reviews` | 2 | transactional | — |
 | `regularization_requests` | 2 | statutory-7y | — |
 | `resignations` | 0 | transactional | — |
 | `salary_structures` | 2 | statutory-7y | — |
-| `shift_assignments` | 4 | transactional | — |
+| `shift_assignments` | 2 | transactional | — |
 | `ticket_comments` | 2 | transactional | — |
 | `tickets` | 2 | transactional | — |
 | `user_permissions` | 0 | transactional | — |
-| `user_sessions` | 13 | transactional | — |
-| `users` | 4 | transactional | — |
+| `user_sessions` | 2 | transactional | — |
+| `users` | 2 | transactional | — |
 
 ---
 
@@ -337,6 +338,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `approved_by` | character varying | Y | `` |  |
 | `paid_at` | timestamp with time zone | Y | `` |  |
 | `created_at` | timestamp with time zone | N | `now()` |  |
+| `rejection_reason` | character varying | Y | `` |  |
 
 ## `feedback_360`
 
@@ -379,8 +381,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 - Retention class: **transactional**
 - Primary key: `optin_id`
 - Foreign keys: `emp_id` → `users.emp_id`; `holiday_id` → `holidays.holiday_id`
-- Unique indexes: `uq_optin` (emp_id, holiday_id)
-- Exclusion constraints: `uq_optin` ()
+- Unique indexes: `uq_holiday_optins_active` (emp_id, holiday_id) WHERE ((status)::text = ANY ((ARRAY['Pending'::character varying, 'Approved'::character varying])::text[]))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
@@ -394,7 +395,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 - Retention class: **transactional**
 - Primary key: `holiday_id`
-- Unique indexes: none
+- Unique indexes: `uq_holiday_name_date_location` (name, holiday_date, (expression))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
@@ -576,6 +577,23 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `year` | integer | N | `` |  |
 | `granted_by` | character varying | Y | `` |  |
 | `granted_at` | timestamp with time zone | N | `now()` |  |
+
+## `notification_preferences`
+
+- Retention class: **transactional**
+- Primary key: `pref_id`
+- Foreign keys: `emp_id` → `users.emp_id`
+- Unique indexes: `uq_notification_preferences` (emp_id, category)
+- Exclusion constraints: `uq_notification_preferences` ()
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `pref_id` | bigint | N | `` |  |
+| `emp_id` | character varying | N | `` |  |
+| `category` | character varying | N | `` |  |
+| `in_app` | boolean | N | `true` |  |
+| `email` | boolean | N | `true` |  |
+| `updated_at` | timestamp with time zone | N | `now()` |  |
 
 ## `notifications`
 

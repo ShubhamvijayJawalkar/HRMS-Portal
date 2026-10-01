@@ -495,6 +495,9 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM holiday_optins WHERE holiday_id IN "
                    "(SELECT holiday_id FROM holidays WHERE name LIKE 'Probe Cal%')")
         pc.execute("DELETE FROM holidays WHERE name LIKE 'Probe Cal%'")
+        # FR-NOT-03: the probe's own preference rows, so a second run reads the
+        # defaults rather than the previous run's switches.
+        pc.execute("DELETE FROM notification_preferences WHERE emp_id = 'EMP002'")
     _remove_probe_upload_files(upload_paths)
 
     def run(name, fn):
@@ -964,6 +967,73 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             return 409
         return 200
     run("holidays(calendar CRUD, copy, export, iCal)", holiday_calendar)
+
+    # ── FR-NOT-03: preferences, and the taxonomy they key on ────────────────
+    # The stored categories and the SRS's preference taxonomy had nothing in common
+    # before this: leave notifications were stored as `Leave` where the SRS says
+    # `Leaves`, and tickets, goals, reviews and holiday opt-ins all fell through to
+    # `General`. This flow reads a notification back and checks the category it
+    # carries is a key a preference can actually be stored against.
+    def notification_preferences():
+        cl, tok, lc = _login(app_mod, "EMP002")
+        if lc != 200:
+            return lc
+        before = cl.get("/api/notification-preferences").get_json() or {}
+        prefs = before.get("preferences") or {}
+        # Every category defaults on with no stored row.
+        for category, channels in prefs.items():
+            if channels != {"in_app": True, "email": True}:
+                return 409
+        # A category with nothing behind it yet is reported as such rather than
+        # being presented as a working switch.
+        taxonomy = {row["category"]: row for row in before.get("taxonomy", [])}
+        if not taxonomy or "Leaves" not in taxonomy:
+            return 409
+        if taxonomy["Leaves"].get("in_srs") is not True:
+            return 409
+        # Read the categories off the rows themselves, through the v2.0 table.
+        with psycopg.connect(pg_dsn) as vpc:
+            stored = vpc.execute(
+                "SELECT DISTINCT category FROM notifications WHERE emp_id = 'EMP002' "
+                'AND category IS NOT NULL'
+            ).fetchall()
+        for (category,) in stored:
+            if category != "General" and category not in prefs:
+                return 409
+        # Turn a category off and confirm the canonical row is written.
+        updated = _put(cl, tok, "/api/notification-preferences",
+                       {"Leaves": {"in_app": False}})
+        if updated.status_code != 200:
+            return updated.status_code
+        if (updated.get_json() or {}).get("changed") != ["Leaves"]:
+            return 409
+        with psycopg.connect(pg_dsn) as vpc:
+            row = vpc.execute(
+                "SELECT in_app, email FROM notification_preferences "
+                "WHERE emp_id = 'EMP002' AND category = 'Leaves'"
+            ).fetchone()
+        if not row or row[0] is not False or row[1] is not True:
+            return 409
+        # A partial update must not reset the others.
+        second = _put(cl, tok, "/api/notification-preferences",
+                      {"Expenses": {"email": False}})
+        if second.status_code != 200:
+            return second.status_code
+        after = (second.get_json() or {}).get("preferences") or {}
+        if (after.get("Leaves") or {}).get("in_app") is not False:
+            return 409
+        if (after.get("Tickets") or {}).get("in_app") is not True:
+            return 409
+        # And a bad payload is refused with a 400, not a silent no-op.
+        if _put(cl, tok, "/api/notification-preferences",
+                {"Nope": {"in_app": True}}).status_code != 400:
+            return 409
+        if _put(cl, tok, "/api/notification-preferences",
+                {"Leaves": "yes"}).status_code != 400:
+            return 409
+        return 200
+    run("notification-preferences(taxonomy + per-category switch)", notification_preferences)
+
 
 
 
