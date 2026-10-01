@@ -487,6 +487,14 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM attendance_days WHERE attendance_date IN "
                    "(SELECT holiday_date FROM holidays WHERE name = 'Probe Optional')")
         pc.execute("DELETE FROM holidays WHERE name = 'Probe Optional'")
+        # FR-HOL-02: the probe's own calendar fixtures, matched by name across
+        # *every* year. Keying on a year was wrong: the flow dates most of its
+        # holidays relative to today, so they land in the current year and only the
+        # leap-day fixture lands in 2036 — a year-scoped cleanup left the rest
+        # behind and every later run collided on the duplicate rule. Children first.
+        pc.execute("DELETE FROM holiday_optins WHERE holiday_id IN "
+                   "(SELECT holiday_id FROM holidays WHERE name LIKE 'Probe Cal%')")
+        pc.execute("DELETE FROM holidays WHERE name LIKE 'Probe Cal%'")
     _remove_probe_upload_files(upload_paths)
 
     def run(name, fn):
@@ -808,8 +816,9 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         if not hid:
             return 409
         # A National holiday cannot be opted into, and the seed has one in range.
-        national = [h for h in hl.get("/api/holidays").get_json() or []
-                    if h.get("type") == "National"]
+        catalog = hl.get("/api/holidays").get_json() or {}
+        listed = catalog.get("holidays") if isinstance(catalog, dict) else catalog
+        national = [h for h in (listed or []) if h.get("type") == "National"]
         if national:
             refused = _post(hl, htok, f"/api/holidays/{national[0]['id']}/opt-in", {})
             if refused.status_code != 409:
@@ -857,6 +866,105 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             ).fetchone()
         return 200 if (status and status[0] == 'Holiday') else 409
     run("holidays(optional opt-in drives attendance)", holiday_optin)
+
+    # ── FR-HOL-01/02: the calendar itself ─────────────────────────────────────
+    # Location scoping, the per-location duplicate rule (a unique constraint on
+    # v2.0), a year-to-year copy that skips rather than shifts 29 February, the CSV
+    # round trip, and the iCal feed's all-day form.
+    def holiday_calendar():
+        hl, htok, hstatus = _login(app_mod, "EMP001")
+        if hstatus != 200:
+            return hstatus
+        when = (today + timedelta(days=300)).isoformat()
+        created = _post(hl, htok, "/api/holidays", {
+            "name": "Probe Cal Day", "date": when, "type": "National", "location": "Pune",
+        })
+        if created.status_code != 201:
+            return created.status_code
+        hid = (created.get_json() or {}).get("id")
+        if not hid:
+            return 409
+        # Duplicate (name, date) per location. A plain UNIQUE would accept the
+        # org-wide case, which is why the index is on COALESCE(location, '').
+        if _post(hl, htok, "/api/holidays", {
+            "name": "Probe Cal Day", "date": when, "location": "Pune",
+        }).status_code != 409:
+            return 409
+        if _post(hl, htok, "/api/holidays", {
+            "name": "Probe Cal Day", "date": when, "location": "Mumbai",
+        }).status_code != 201:
+            return 409
+        org = (today + timedelta(days=301)).isoformat()
+        if _post(hl, htok, "/api/holidays", {"name": "Probe Cal Org", "date": org}).status_code != 201:
+            return 409
+        if _post(hl, htok, "/api/holidays", {
+            "name": "Probe Cal Org", "date": org, "location": "",
+        }).status_code != 409:
+            return 409
+        # A location filter includes the org-wide holiday, not just its own.
+        pune = hl.get("/api/holidays?location=Pune").get_json() or {}
+        listed = pune.get("holidays") if isinstance(pune, dict) else pune
+        names = {h.get("name") for h in (listed or [])}
+        if "Probe Cal Day" not in names or "Probe Cal Org" not in names:
+            return 409
+        # The "U" of CRUD, with an unknown field refused.
+        edited = hl.put(f"/api/holidays/{hid}", json={"name": "Probe Cal Day Renamed"},
+                        headers={"X-CSRF-Token": htok, "Content-Type": "application/json"})
+        if edited.status_code != 200 or not (edited.get_json() or {}).get("name"):
+            return 409
+        typo = hl.put(f"/api/holidays/{hid}", json={"name": "X", "bogus": 1},
+                      headers={"X-CSRF-Token": htok, "Content-Type": "application/json"})
+        if typo.status_code != 400:
+            return 409
+        # A copy that must skip a leap day rather than shift it.
+        leap = "2036-02-29"
+        if _post(hl, htok, "/api/holidays", {
+            "name": "Probe Cal Leap", "date": leap, "type": "Optional",
+        }).status_code != 201:
+            return 409
+        copied = _post(hl, htok, "/api/holidays/copy-year",
+                       {"from_year": 2036, "to_year": 2037})
+        if copied.status_code != 200:
+            return copied.status_code
+        body = copied.get_json() or {}
+        skipped = {s.get("name") for s in body.get("skipped", [])}
+        if "Probe Cal Leap" not in skipped:
+            return 409
+        with psycopg.connect(pg_dsn) as vpc:
+            # 29 February does not exist in 2037, and nothing was invented.
+            row = vpc.execute(
+                "SELECT COUNT(*) FROM holidays WHERE year = 2037 "
+                "AND name LIKE 'Probe Cal%' AND EXTRACT(MONTH FROM holiday_date) = 2 "
+                "AND EXTRACT(DAY FROM holiday_date) IN (28, 29)"
+            ).fetchone()
+        if row and row[0]:
+            return 409
+        # The CSV export and the iCal feed, both for 2036 — the year this flow
+        # actually put a holiday in. Asking a year with no holidays in it for an
+        # `DTSTART` proves nothing: the feed is correctly empty, which is how the
+        # first version of this flow reported a 409 for a working endpoint.
+        exported = hl.get("/api/holidays/export?year=2036")
+        if exported.status_code != 200:
+            return exported.status_code
+        text = exported.data.decode()
+        if not text.startswith("name,date,type,location") or "Probe Cal Leap" not in text:
+            return 409
+        # The iCal feed: an all-day DTSTART, or clients show a time.
+        feed = hl.get("/api/holidays/ical?year=2036")
+        if feed.status_code != 200 or feed.mimetype != "text/calendar":
+            return 409
+        ics = feed.data.decode()
+        if "DTSTART;VALUE=DATE:20360229" not in ics or "DTSTART:2" in ics:
+            return 409
+        if "SUMMARY:Probe Cal Leap (Optional)" not in ics:
+            return 409
+        # Delete is refused while an opt-in references the holiday (a foreign key).
+        if hl.delete(f"/api/holidays/{hid}",
+                     headers={"X-CSRF-Token": htok}).status_code != 200:
+            return 409
+        return 200
+    run("holidays(calendar CRUD, copy, export, iCal)", holiday_calendar)
+
 
 
 

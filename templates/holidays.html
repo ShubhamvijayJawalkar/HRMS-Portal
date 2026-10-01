@@ -208,8 +208,22 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="mb-2"><label class="form-label">Holiday Name</label><input type="text" id="holidayName" class="form-control" placeholder="e.g. Independence Day" required></div>
                     <div class="mb-2"><label class="form-label">Date</label><input type="date" id="holidayDate" class="form-control" required></div>
-                    <div class="mb-3"><label class="form-label">Type</label><select id="holidayType" class="form-select"><option>National</option><option>Optional</option></select></div>
-                    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-plus-lg me-1"></i>Add Holiday</button>
+                    <div class="mb-2"><label class="form-label">Type</label><select id="holidayType" class="form-select"><option>National</option><option>Optional</option></select></div>
+                    <div class="mb-2"><label class="form-label">Location <span class="text-muted" style="font-size:11px;">(blank = all sites)</span></label><input type="text" id="holidayLocation" class="form-control" placeholder="e.g. Pune"></div>
+                    <div class="mb-3"><button type="submit" class="btn btn-primary w-100"><i class="bi bi-plus-lg me-1"></i>Add Holiday</button></div>
+                    <hr>
+                    <label class="form-label">Copy a year's calendar forward</label>
+                    <div class="d-flex gap-2">
+                        <select id="copyFromYear" class="form-select form-select-sm"></select>
+                        <span class="align-self-center">&rarr;</span>
+                        <select id="copyToYear" class="form-select form-select-sm"></select>
+                        <button type="button" id="copyYearBtn" class="btn btn-sm btn-outline-light flex-shrink-0">Copy</button>
+                    </div>
+                    <div class="form-text" style="font-size:11px;">A 29 February holiday is skipped, not moved to another day.</div>
+                    <div class="d-flex gap-2 mt-2">
+                        <a id="exportCsv" class="btn btn-sm btn-outline-light flex-fill" download>Export CSV</a>
+                        <a id="icalFeed" class="btn btn-sm btn-outline-light flex-fill" target="_blank" rel="noopener">iCal feed</a>
+                    </div>
                 </form>
             </div>
         </div>
@@ -248,7 +262,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     loadHolidays();
     loadLeaves('Pending');
+    fillCopyYearSelectors();
+    refreshCalendarLinks();
+    ySel.addEventListener('change', refreshCalendarLinks);
     document.getElementById('holidayForm').addEventListener('submit', addHoliday);
+    document.getElementById('copyYearBtn').addEventListener('click', copyHolidayYear);
     document.querySelectorAll('#leaveTabs .btn').forEach(el => el.addEventListener('click', function() {
         document.querySelectorAll('#leaveTabs .btn').forEach(b => b.classList.remove('active'));
         this.classList.add('active');
@@ -258,7 +276,11 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadHolidays() {
     const year = document.getElementById('yearSelect').value;
     const r = await fetch(`/api/holidays?year=${year}`);
-    allHolidays = await r.json();
+    const data = await r.json();
+    // The list response is now an object that echoes the applied filters, matching
+    // `GET /api/users`. Accepting a bare array too keeps this page working against
+    // either shape, so a rolling deploy in either direction is not a broken page.
+    allHolidays = Array.isArray(data) ? data : (data.holidays || []);
     renderStats();
     renderTable();
     renderNextHoliday();
@@ -314,7 +336,10 @@ async function addHoliday(e) {
         body: JSON.stringify({
             name: document.getElementById('holidayName').value,
             date: document.getElementById('holidayDate').value,
-            type: document.getElementById('holidayType').value
+            type: document.getElementById('holidayType').value,
+            // Blank means organisation-wide, which is what the per-location
+            // duplicate rule treats as one value.
+            location: document.getElementById('holidayLocation').value.trim()
         })
     });
     const d = await r.json();
@@ -324,6 +349,53 @@ async function addHoliday(e) {
         bootstrap.Modal.getInstance(document.getElementById('addHolidayModal')).hide();
         loadHolidays();
     }
+}
+
+async function copyHolidayYear() {
+    const from = document.getElementById('copyFromYear').value;
+    const to = document.getElementById('copyToYear').value;
+    if (!from || !to || from === to) {
+        showToast('error', 'Choose two different years');
+        return;
+    }
+    const r = await fetch('/api/holidays/copy-year', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from_year: Number(from), to_year: Number(to) })
+    });
+    const d = await r.json();
+    if (!r.ok) {
+        showToast('error', d.error || 'Copy failed');
+        return;
+    }
+    let message = d.message;
+    if (d.skipped && d.skipped.length) {
+        // Name them: "2 holidays were not copied" sends the admin back to the
+        // calendar to work out which two.
+        message += ` — not copied: ${d.skipped.map(s => s.name).join(', ')}`;
+    }
+    showToast('success', message);
+    loadHolidays();
+}
+
+function fillCopyYearSelectors() {
+    const thisYear = new Date().getFullYear();
+    const from = document.getElementById('copyFromYear');
+    const to = document.getElementById('copyToYear');
+    const options = [];
+    for (let y = thisYear - 2; y <= thisYear + 4; y++) {
+        options.push(`<option value="${y}">${y}</option>`);
+    }
+    from.innerHTML = options.join('');
+    to.innerHTML = options.join('');
+    from.value = String(thisYear);
+    to.value = String(thisYear + 1);
+}
+
+function refreshCalendarLinks() {
+    const year = document.getElementById('yearSelect').value;
+    document.getElementById('exportCsv').href = `/api/holidays/export?year=${year}`;
+    document.getElementById('icalFeed').href = `/api/holidays/ical?year=${year}`;
 }
 
 async function deleteHoliday(id) {

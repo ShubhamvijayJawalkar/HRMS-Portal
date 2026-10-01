@@ -40,6 +40,21 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-09-30", "FR-HOL-01/02 holiday calendar: the duplicate rule was a SELECT in the "
+     "route, which is a message and not a rule - two concurrent adds both passed the check "
+     "and both inserted. It is now a unique index, and the obvious constraint would have "
+     "been wrong: a plain UNIQUE(name, holiday_date, location) accepts duplicate org-wide "
+     "holidays because NULL is distinct from NULL in SQL, so the index is on "
+     "COALESCE(location, '') and the application builds the identical triple. Added the "
+     "missing update, year-to-year copy that skips rather than shifts a 29 February "
+     "holiday, CSV import/export, an iCal feed that uses DTSTART;VALUE=DATE and folds "
+     "every line to the 75-octet RFC 5545 limit, and a delete that is refused while "
+     "opt-ins reference the holiday. The consequential find: the role gates decided 'is "
+     "this an API call?' with request.is_json, which is False for a multipart upload, so "
+     "every admin-gated upload route answered a non-admin with a 302 to dashboard HTML "
+     "that a fetch client follows and cannot parse, with a 200 status. app._wants_json() "
+     "now keys on the path as well. Matrix is now 56 IMPLEMENTED / 36 PARTIAL / 11 "
+     "NOT_STARTED / 1 RETIRED."),
     ("2026-09-30", "FR-HOL-03 optional-holiday opt-ins: a defect rather than a feature. "
      "holiday_optins existed in the canonical schema, init_db created it on the compatibility "
      "shape, and nothing ever wrote to it. An Optional holiday is an attendance holiday only "
@@ -284,9 +299,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "188 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "193 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "193 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "DuckDB", "199 passed, 6 skipped (PG-gated compatibility/public tests)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "204 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "204 passed, 1 skipped"),
     ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

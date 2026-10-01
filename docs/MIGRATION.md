@@ -1114,6 +1114,56 @@ and is idempotent across two runs, and the CC-01 checker plus the read-only
 preflight both pass on that database. The matrix is now **54 IMPLEMENTED / 38
 PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
 
+### 14.18 The holiday calendar (implemented)
+
+FR-HOL-01/02 is one line with six clauses — "CRUD (HR/Admin, holidays
+permission), duplicate (name, date) per location prevented by a unique
+constraint; copy year-to-year with Feb-29 handling; import/export; iCal feed" —
+and four were missing, one was wrong, and one did not exist at all.
+
+The duplicate rule was a `SELECT 1 ... WHERE name = ? AND holiday_date = ?` in
+the route. That is a message, not a rule: two concurrent adds both pass the check
+and both insert, and nothing in the database refused the second row. It is now a
+unique index (Alembic `0007`).
+
+The obvious constraint would have been wrong. A plain
+`UNIQUE (name, holiday_date, location)` accepts any number of duplicate org-wide
+holidays, because NULL is distinct from NULL in SQL — so the case that matters
+most, the accidental duplicate org-wide holiday, would still have gone in. The
+index is on `COALESCE(location, '')`, and `holiday_calendar.duplicate_key` builds
+the same triple so the application and the index agree on what "the same holiday"
+means.
+
+Feb-29 on copy is skipped and named in the response, never shifted. Putting it on
+28 February silently invents a company holiday on a day nobody agreed to, and the
+1st of March is worse because the date means nothing then.
+
+The iCal feed has two details that decide whether it works at all: an all-day
+event needs `DTSTART;VALUE=DATE`, or clients show 1 January at 00:00 in one
+timezone and 05:30 in another; and every content line must fold to 75 octets,
+because a client handed a longer line may drop the property silently and leave a
+calendar with no holidays in it.
+
+**A cross-cutting defect found while writing a test for this slice.** The role
+gates decided "is this an API call?" with `request.is_json`, which is False for a
+`multipart/form-data` upload, so every admin-gated upload route answered a
+non-admin with a 302 to the dashboard HTML. A fetch-based client follows that
+redirect and receives a page it cannot parse with a 200 status, so an
+authorisation failure surfaced as a JSON parse error. `app._wants_json()` now keys
+on the path as well as the content type. This is a deliberate behaviour change on
+every gated route; the Playwright suite is what makes it safe to land.
+
+`GET /api/holidays` also changed shape from a bare array to an object echoing the
+applied filters, matching `GET /api/users`. The admin page's fetch accepts both
+shapes so a rolling deploy in either direction is not a broken page.
+
+Validation: **199 DuckDB unit tests passed / 6 skipped**, **204 PostgreSQL unit
+tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
+DuckDB and PostgreSQL**, the clean v2.0 probe is **105/105 GET + 51/51 write**
+and is idempotent across two runs, and the CC-01 checker plus the read-only
+preflight both pass on that database. The matrix is now **56 IMPLEMENTED / 36
+PARTIAL / 11 NOT_STARTED / 1 RETIRED**.
+
 ### 14.3 Permission policy (implemented, enforcement wiring still pending)
 
 `policy.py` now owns the role → module matrix and the resolution order:

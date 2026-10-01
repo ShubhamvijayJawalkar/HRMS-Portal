@@ -403,13 +403,26 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'response, so the object store is never reachable directly.'),
 
     # ── FR-HOL: holidays ────────────────────────────────────────────────
-    'FR-HOL-01': ('M', 'C', 'PARTIAL', ('/api/holidays',),
+    'FR-HOL-01': ('M', 'C', 'IMPLEMENTED', ('/api/holidays',),
                   'National/Optional types, per-location applicability and search. The '
-                  'location field is stored but not filtered on.'),
-    'FR-HOL-02': ('H', 'C', 'PARTIAL', ('/api/holidays', '/api/holidays/<int:hid>'),
-                  'CRUD for HR/Admin with a duplicate (name, date) check. The check is '
-                  'in the handler, not a unique constraint, so it races under '
-                  'concurrency. No year-to-year copy, so Feb-29 handling is absent.'),
+                  'location column is now writable, reported, and filtered on: a location '
+                  'filter includes org-wide holidays rather than hiding them, and the '
+                  'applied filters are echoed so a client can tell an empty result from an '
+                  'over-narrow one.'),
+    'FR-HOL-02': ('H', 'C', 'IMPLEMENTED',
+                  ('/api/holidays', '/api/holidays/<int:hid>',
+                   '/api/holidays/copy-year', '/api/holidays/export',
+                   '/api/holidays/import', '/api/holidays/ical'),
+                  'Full CRUD for HR/Admin (the update did not exist) plus copy year-to-year, '
+                  'CSV import/export and an iCal feed. The duplicate rule is a unique '
+                  'constraint, not a handler check, on (name, holiday_date, '
+                  "COALESCE(location, '')) - a plain UNIQUE would accept duplicate "
+                  'org-wide holidays, because NULL is distinct from NULL in SQL. Feb-29 on '
+                  'copy is skipped and named in the response rather than shifted onto '
+                  'another day (holiday_calendar.copy_plan). The iCal feed uses '
+                  'DTSTART;VALUE=DATE and folds every content line to the 75-octet RFC 5545 '
+                  'limit. Delete is refused while opt-ins reference the holiday. Import '
+                  'reports per-row reasons and converges on a re-run.'),
     'FR-HOL-03': ('H', 'C', 'IMPLEMENTED',
                   ('/api/holidays/<int:hid>/opt-in', '/api/holidays/opt-ins/mine',
                    '/api/holidays/opt-ins', '/api/holidays/opt-ins/<int:oid>/approve',

@@ -1,6 +1,6 @@
 # SRS v2.0 requirement traceability
 
-_Generated 2026-09-30 by `scripts/generate_traceability.py` from `traceability.py`.
+_Generated 2026-10-01 by `scripts/generate_traceability.py` from `traceability.py`.
 **Do not hand-edit this file** — edit the data and re-run the script._
 
 Every FR-* requirement in `HRMS_SRS_v2.0.pdf` is listed with the routes that
@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 54 | 52% |
-| `PARTIAL` | 38 | 37% |
+| `IMPLEMENTED` | 56 | 54% |
+| `PARTIAL` | 36 | 35% |
 | `NOT_STARTED` | 11 | 11% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (54)
+### IMPLEMENTED (56)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -58,6 +58,8 @@ rather than quietly invalidating this document.
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | Double-submit on every mutating /api request; a fetch wrapper attaches the header and native forms carry the hidden field. Asserted end to end with server-side sessions too. |
 | `FR-DOC-01` | M | R | `/api/documents` | Scoped to the owner unless HR/Admin. |
 | `FR-EXP-03` | M | C | `/api/expenses`<br>`/api/expenses/<int:eid>/status` | Strict transition table in expenses.py: Pending -> Approved/Rejected by the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only (Appendix A-11), Rejected and Paid final. Self-approval blocked, a rejection reason required, every write a conditional UPDATE with a before/after audit, and the list reports the actions the caller may actually take. Finance holds the expenses module because the SRS names it for Paid; the list stays scoped to own + reports, so that grants reach rather than company-wide visibility. |
+| `FR-HOL-01` | M | C | `/api/holidays` | National/Optional types, per-location applicability and search. The location column is now writable, reported, and filtered on: a location filter includes org-wide holidays rather than hiding them, and the applied filters are echoed so a client can tell an empty result from an over-narrow one. |
+| `FR-HOL-02` | H | C | `/api/holidays`<br>`/api/holidays/<int:hid>`<br>`/api/holidays/copy-year`<br>`/api/holidays/export`<br>`/api/holidays/import`<br>`/api/holidays/ical` | Full CRUD for HR/Admin (the update did not exist) plus copy year-to-year, CSV import/export and an iCal feed. The duplicate rule is a unique constraint, not a handler check, on (name, holiday_date, COALESCE(location, '')) - a plain UNIQUE would accept duplicate org-wide holidays, because NULL is distinct from NULL in SQL. Feb-29 on copy is skipped and named in the response rather than shifted onto another day (holiday_calendar.copy_plan). The iCal feed uses DTSTART;VALUE=DATE and folds every content line to the 75-octet RFC 5545 limit. Delete is refused while opt-ins reference the holiday. Import reports per-row reasons and converges on a re-run. |
 | `FR-HOL-03` | H | C | `/api/holidays/<int:hid>/opt-in`<br>`/api/holidays/opt-ins/mine`<br>`/api/holidays/opt-ins`<br>`/api/holidays/opt-ins/<int:oid>/approve`<br>`/api/holidays/opt-ins/<int:oid>/cancel` | The table existed and nothing wrote to it, which made FR-JOB-01 wrong rather than merely incomplete: an Optional holiday is an attendance holiday only for an employee with an Approved opt-in, no employee could ever obtain one, and the nightly finalisation recorded the seeded Diwali as Weekly-off. An employee requests, HR approves or rejects from a queue, and the owner may withdraw; all of it is holidays_optin.check_request / check_cancel / check_review. Only Optional holidays can be opted into, a passed holiday cannot (its attendance is finalised), and the review is a conditional write so two reviewers give one winner and one 409. "One active opt-in per employee per holiday" is a partial unique index (Alembic 0006) because a withdrawn or rejected request must not stop the employee asking again - the baseline uq_optin was a plain UNIQUE, which made opt-out irreversible, and the compatibility schema enforces the same definition in a conditional INSERT because DuckDB has no partial index. |
 | `FR-JOB-01` | H | C | — | Nightly finalisation classifies every active employee in the required priority order, groups per shift date so night shifts finalize correctly, replaces the target date transactionally, and recomputes on regularization approval. |
 | `FR-JOB-04` | H | C | `/api/admin/offboarding/revoke` | The nightly job closes sessions, clears permissions, disables login and marks the employee Inactive on their last working day. |
@@ -89,7 +91,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (38)
+### PARTIAL (36)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -111,8 +113,6 @@ rather than quietly invalidating this document.
 | `FR-DOC-03` | M | C | `/api/documents/<int:did>/download`<br>`/api/documents/<int:did>` | Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is closed), and the download now writes a DOCUMENT_DOWNLOAD audit row - a document read that leaves no trail is the one that matters after an incident. Still missing: a presigned URL rather than a direct file response, so the object store is never reachable directly. |
 | `FR-EXP-01` | M | R | `/api/expense-categories` | Six seeded categories and a read endpoint. No CRUD, so the set is configurable only by editing rows. |
 | `FR-EXP-02` | M | C | `/api/expenses` | emp_id is taken from the session and a body override is rejected with a 400, closing the v1.0 impersonation hole; the category must exist and the amount must be positive. Missing: receipt validation on upload. |
-| `FR-HOL-01` | M | C | `/api/holidays` | National/Optional types, per-location applicability and search. The location field is stored but not filtered on. |
-| `FR-HOL-02` | H | C | `/api/holidays`<br>`/api/holidays/<int:hid>` | CRUD for HR/Admin with a duplicate (name, date) check. The check is in the handler, not a unique constraint, so it races under concurrency. No year-to-year copy, so Feb-29 handling is absent. |
 | `FR-JOB-02` | H | C | — | Hourly purge of expired reset and idempotency tokens. The orphaned-break auto-close is not implemented (see FR-AUTH-14). |
 | `FR-LEA-01` | M | R | `/api/leaves` | Filters and the scope split ship. Missing: delegated-manager visibility. |
 | `FR-LEA-02` | M | C | `/api/leaves` | Dates are swapped if reversed and the session is recorded. Working-day deduction ignores holidays — FR-LEA-09 asks for one shared function and there is none. |

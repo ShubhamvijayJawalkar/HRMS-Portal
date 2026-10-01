@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 from flasgger import Swagger
 from flask import (
     Flask,
+    Response,
     g,
     has_request_context,
     jsonify,
@@ -46,6 +47,7 @@ load_dotenv()
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
+import holiday_calendar  # noqa: E402  # holiday calendar maintenance (FR-HOL-01/02)
 import holidays_optin  # noqa: E402  # optional-holiday opt-ins (FR-HOL-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
@@ -802,6 +804,19 @@ def init_db():
             type VARCHAR DEFAULT 'National'
         )
     ''')
+    # `location` is per-location applicability (FR-HOL-01) and exists on the v2.0
+    # table. It is added here rather than left out because without it a holiday
+    # cannot be scoped to a site, the "duplicate (name, date) *per location*"
+    # rule of FR-HOL-02 has nothing to key on, and the compatibility schema
+    # would silently accept what the target refuses. The ADD is guarded because
+    # the table may predate it; the backfill of '' is what makes a pre-existing
+    # org-wide holiday compare equal to a new one, matching
+    # COALESCE(location, '') in the canonical index.
+    try:
+        conn.execute("ALTER TABLE holidays ADD COLUMN location VARCHAR")
+    except Exception:
+        pass  # already present
+    conn.execute("UPDATE holidays SET location = '' WHERE location IS NULL")
 
     # ── Holiday Opt-ins ────────────────────────────────────────────
     # Optional holidays become attendance holidays only for employees with
@@ -1398,17 +1413,24 @@ def init_db():
              'EMP001', 'Active', 1, 1, datetime.now(), datetime.now()]
         )
 
-        # Seed some holidays
+        # Seed some holidays. The named column list is load-bearing: `location`
+        # (FR-HOL-01) now exists on the compatibility table too, so a bare
+        # `INSERT INTO holidays VALUES (?, ?, ?, ?, ?)` fails to bind with a column
+        # count error on boot. Org-wide, so the location is an empty string rather
+        # than NULL — the same spelling the unique index's COALESCE produces.
         year = datetime.now().year
         base = 9000000 + (datetime.now().microsecond % 100000)
         holidays_data = [
-            [base + 1, 'New Year', f'{year}-01-01', year, 'National'],
-            [base + 2, 'Republic Day', f'{year}-01-26', year, 'National'],
-            [base + 3, 'Independence Day', f'{year}-08-15', year, 'National'],
-            [base + 4, 'Diwali', f'{year}-11-01', year, 'Optional'],
-            [base + 5, 'Christmas', f'{year}-12-25', year, 'Optional'],
+            [base + 1, 'New Year', f'{year}-01-01', year, 'National', ''],
+            [base + 2, 'Republic Day', f'{year}-01-26', year, 'National', ''],
+            [base + 3, 'Independence Day', f'{year}-08-15', year, 'National', ''],
+            [base + 4, 'Diwali', f'{year}-11-01', year, 'Optional', ''],
+            [base + 5, 'Christmas', f'{year}-12-25', year, 'Optional', ''],
         ]
-        conn.executemany("INSERT INTO holidays VALUES (?, ?, ?, ?, ?)", holidays_data)
+        conn.executemany(
+            'INSERT INTO holidays (holiday_id, name, holiday_date, year, type, location) '
+            'VALUES (?, ?, ?, ?, ?, ?)', holidays_data,
+        )
 
     # ── Seed Expense Categories ───────────────────────────────────
     result = conn.execute("SELECT COUNT(*) FROM expense_categories").fetchone()[0]
@@ -2339,6 +2361,8 @@ _ROUTE_MODULES = {
     'cancel_import_job': 'import_users', 'run_import_job': 'import_users',
     # Attendance / time off
     'add_holiday': 'holidays', 'delete_holiday': 'holidays', 'admin_holidays': 'holidays',
+    'update_holiday': 'holidays', 'copy_holiday_year': 'holidays',
+    'import_holidays': 'holidays',
     'holiday_optin_queue': 'holidays', 'approve_holiday_optin': 'holidays',
     'reject_holiday_optin': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
@@ -2422,7 +2446,7 @@ def expense_actor_required(f):
     the database, so a stale session copy cannot widen this.
     """
     def denial():
-        if request.is_json:
+        if _wants_json():
             return jsonify({'error': 'Forbidden'}), 403
         return redirect(url_for('dashboard'))
 
@@ -2430,7 +2454,7 @@ def expense_actor_required(f):
     def decorated(*args, **kwargs):
         if 'emp_id' not in session or not _session_user_active():
             session.clear()
-            if request.is_json:
+            if _wants_json():
                 return jsonify({'error': 'Authentication required'}), 401
             return redirect(url_for('login'))
         conn = get_db()
@@ -2486,7 +2510,7 @@ def reporting_line_required(f):
     revoke it.
     """
     def denial():
-        if request.is_json:
+        if _wants_json():
             return jsonify({'error': 'Forbidden'}), 403
         return redirect(url_for('dashboard'))
 
@@ -2494,7 +2518,7 @@ def reporting_line_required(f):
     def decorated(*args, **kwargs):
         if 'emp_id' not in session or not _session_user_active():
             session.clear()
-            if request.is_json:
+            if _wants_json():
                 return jsonify({'error': 'Authentication required'}), 401
             return redirect(url_for('login'))
         conn = get_db()
@@ -2530,11 +2554,29 @@ def login_required(f):
     def decorated(*args, **kwargs):
         if 'emp_id' not in session or not _session_user_active():
             session.clear()
-            if request.is_json:
+            if _wants_json():
                 return jsonify({'error': 'Authentication required'}), 401
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return _tag_gate(decorated, 'login', None)
+
+
+def _wants_json():
+    """Should a gate denial be JSON, or an HTML redirect?
+
+    ``request.is_json`` alone is wrong for an upload. A ``multipart/form-data``
+    POST carries no JSON body, so ``request.is_json`` is False and an
+    admin-gated upload route answered a non-admin with a **302 to the dashboard
+    HTML** instead of a 403 - the client followed the redirect and received a page
+    it cannot parse. ``POST /api/users/import`` and ``POST /api/holidays/import``
+    are both reachable that way.
+
+    A path under ``/api/`` is an API call whatever it carries, and no page route
+    lives under that prefix (checked: every ``/api/`` rule returns JSON or a
+    file), so widening the test to the path is safe and makes the answer depend on
+    *what was asked for* rather than on *how it was encoded*.
+    """
+    return bool(request.is_json) or request.path.startswith('/api/')
 
 
 def _gated(f, gate, denial, module, departments=()):
@@ -2550,7 +2592,7 @@ def _gated(f, gate, denial, module, departments=()):
     def decorated(*args, **kwargs):
         if 'emp_id' not in session or not _session_user_active():
             session.clear()
-            if request.is_json:
+            if _wants_json():
                 return jsonify({'error': 'Authentication required'}), 401
             return redirect(url_for('login'))
         conn = get_db()
@@ -2570,7 +2612,7 @@ def _forbidden_json(message):
 
 def admin_required(f):
     def denial():
-        if request.is_json:
+        if _wants_json():
             return jsonify({'error': 'Forbidden'}), 403
         return redirect(url_for('dashboard'))
     return _gated(f, 'admin', denial, _gate_module(f))
@@ -3090,64 +3132,436 @@ def documents_api():
 #  HOLIDAY CALENDAR
 # ══════════════════════════════════════════════════════════════════════
 
+# The unique index that makes "duplicate (name, date) per location" a constraint
+# rather than a check in a handler. Named here because the error mapping below
+# matches on it: a database that refuses the duplicate is the authority, and the
+# pre-check exists only to give a readable message.
+_HOLIDAY_UNIQUE_INDEX = 'uq_holiday_name_date_location'
+_HOLIDAY_UNIQUE_COLUMNS = 3
+
+
+def _holiday_rows(conn, year=None, htype=None, location=None, name=None):
+    """The calendar, with the filters FR-HOL-01 asks for."""
+    query = 'SELECT holiday_id, name, holiday_date, type, location FROM holidays WHERE 1 = 1'
+    params = []
+    if year is not None:
+        query += ' AND year = ?'
+        params.append(year)
+    if htype is not None:
+        query += ' AND type = ?'
+        params.append(htype)
+    if location is not None:
+        # An org-wide holiday (location NULL or empty) is part of every location's
+        # calendar, so filtering for a site includes it. Filtering the column
+        # directly would hide Republic Day from the Mumbai office, which is
+        # exactly the "stored but not filtered on" gap FR-HOL-01 records.
+        query += " AND (location IS NULL OR location = '' OR LOWER(location) = ?)"
+        params.append(location.strip().lower())
+    if name is not None:
+        query += ' AND LOWER(name) LIKE ?'
+        params.append(f'%{name.strip().lower()}%')
+    query += ' ORDER BY holiday_date, name'
+    return conn.execute(query, params).fetchall()
+
+
+def _holiday_json(row):
+    holiday_id, name, when, htype, location = row
+    payload = {
+        'id': holiday_id,
+        'name': name,
+        'date': when.isoformat() if hasattr(when, 'isoformat') else str(when),
+        'type': htype,
+    }
+    # `location` is reported as null rather than '' for an org-wide holiday, so a
+    # client does not have to know which empty spelling the backend stores.
+    if location:
+        payload['location'] = location
+    return payload
+
+
+def _is_holiday_duplicate(exc):
+    """Did the database refuse this insert as a duplicate holiday?"""
+    constraint = getattr(getattr(exc, 'diag', None), 'constraint_name', None) or ''
+    if constraint == _HOLIDAY_UNIQUE_INDEX:
+        return True
+    text = str(exc).lower()
+    return 'unique' in text or 'duplicate key' in text
+
+
+def _holiday_duplicate_exists(conn, name, when, location, exclude_id=None):
+    """The readable pre-check, using the same normalisation as the index.
+
+    It exists so the caller gets "a holiday named X already exists on that date
+    for <location>" instead of a constraint name. The index is still what makes it
+    true under concurrency; this is a message, not the rule.
+    """
+    target = holiday_calendar.duplicate_key(name, when, location)
+    for row in _holiday_rows(conn):
+        if row[0] == exclude_id:
+            continue
+        if holiday_calendar.duplicate_key(row[1], row[2], row[4]) == target:
+            return row
+    return None
+
+
+def _holiday_filter_error(kind, value):
+    if kind == 'type' and value not in holiday_calendar.TYPES:
+        return jsonify({'error': f'type must be one of {", ".join(holiday_calendar.TYPES)}'}), 400
+    if kind == 'year' and (value is None or not 1970 <= value <= 2200):
+        return jsonify({'error': 'year must be between 1970 and 2200'}), 400
+    return None
+
+
 @app.route('/api/v1/holidays', methods=['GET'])
 @app.route('/api/holidays', methods=['GET'])
 @login_required
 def get_holidays():
-    year = request.args.get('year', datetime.now().year, type=int)
+    """The calendar, with search and filter (FR-HOL-01)."""
+    year = request.args.get('year', type=int)
+    htype = request.args.get('type')
+    location = request.args.get('location')
+    name = request.args.get('q') or request.args.get('name')
+    if year is None and request.args.get('year') is not None:
+        return _holiday_filter_error('year', 0)
+    if year is not None:
+        bad = _holiday_filter_error('year', year)
+        if bad:
+            return bad
+    if htype is not None:
+        bad = _holiday_filter_error('type', htype)
+        if bad:
+            return bad
     conn = get_db()
     try:
-        rows = conn.execute("SELECT holiday_id, name, holiday_date, type FROM holidays WHERE year = ? ORDER BY holiday_date", [year]).fetchall()
-        return jsonify([{'id': r[0], 'name': r[1], 'date': r[2].isoformat(), 'type': r[3]} for r in rows]), 200
+        rows = _holiday_rows(conn, year=year, htype=htype, location=location, name=name)
     finally:
         conn.close()
+    return jsonify({
+        'holidays': [_holiday_json(r) for r in rows],
+        'filters': {
+            'year': year, 'type': htype, 'location': location, 'q': name,
+        },
+    }), 200
 
 
 @app.route('/api/v1/holidays', methods=['POST'])
 @app.route('/api/holidays', methods=['POST'])
 @admin_required
+@idempotent
 def add_holiday():
-    data = request.get_json(silent=True) or {}
-    if not data.get('name') or not data.get('date'):
-        return jsonify({'error': 'name and date required'}), 400
-    htype = data.get('type', 'National')
-    if htype not in ('National', 'Optional'):
-        return jsonify({'error': 'type must be National or Optional'}), 400
-    d = parse_date(data['date'])
-    if d is None:
-        return jsonify({'error': 'Invalid date format'}), 400
+    """Add a holiday (FR-HOL-02). Duplicate (name, date) per location is a 409."""
+    try:
+        name, when, htype, location = holiday_calendar.check_payload(
+            request.get_json(silent=True) or {})
+    except holiday_calendar.HolidayError as exc:
+        return jsonify({'error': str(exc)}), exc.status
     conn = get_db()
     try:
-        dup = conn.execute("SELECT 1 FROM holidays WHERE holiday_date = ? AND name = ?", [d, data['name']]).fetchone()
-        if dup:
-            return jsonify({'error': 'Holiday with this name and date already exists'}), 409
+        existing = _holiday_duplicate_exists(conn, name, when, location)
+        if existing is not None:
+            return jsonify({'error': (
+                f'A holiday named {name} already exists on {when.isoformat()}'
+                + (f' for {existing[4]}' if existing[4] else ' (organisation-wide)')
+            )}), 409
         hid = _next_generated_id(conn, 'holidays', 'holiday_id')
         # An explicit column list, not `INSERT INTO holidays VALUES (...)`. v2.0
         # `holidays` has a sixth column (`location`, FR-HOL-01), so a bare VALUES
         # with five placeholders mis-targets every value and raises — the same
         # shape of defect that made `POST /api/goals` return 500 on every backend.
-        conn.execute(
-            'INSERT INTO holidays (holiday_id, name, holiday_date, year, type) '
-            'VALUES (?, ?, ?, ?, ?)',
-            [hid, data['name'], d, d.year, htype],
-        )
-        return jsonify({'message': 'Holiday added', 'id': hid}), 201
+        try:
+            conn.execute(
+                'INSERT INTO holidays (holiday_id, name, holiday_date, year, type, location) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                [hid, name, when, when.year, htype, location],
+            )
+        except Exception as exc:
+            if _is_holiday_duplicate(exc):
+                # The index refused a concurrent duplicate. The pre-check cannot
+                # see that, which is the whole reason the rule is a constraint.
+                return jsonify({'error': 'A holiday with this name and date already '
+                                         'exists for that location'}), 409
+            raise
+        return jsonify({'message': 'Holiday added', 'id': hid, **_holiday_json(
+            (hid, name, when, htype, location))}), 201
     finally:
         conn.close()
+
+
+@app.route('/api/v1/holidays/<int:hid>', methods=['PUT'])
+@app.route('/api/holidays/<int:hid>', methods=['PUT'])
+@admin_required
+def update_holiday(hid):
+    """Edit a holiday. The "C" and "U" of CRUD, which did not exist.
+
+    A partial update reads the existing row and validates the merged result, so
+    omitting a field does not null it — the same contract `PUT /api/users` follows
+    (see the FR-USR directory section). Changing a holiday's date re-derives
+    ``year``, and an edited holiday is audited because attendance may have been
+    finalised against the old date.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data:
+        return jsonify({'error': 'A JSON object with at least one field is required'}), 400
+    # Reject an unknown field on the *raw* body. Merging into a fixed dict first
+    # would strip the offending key before check_payload ever saw it, so a typo
+    # like `dat:` would be accepted and silently ignored - the same failure mode
+    # as an edit that "succeeds" while changing nothing.
+    allowed = {'name', 'date', 'type', 'location'}
+    unknown = set(data) - allowed
+    if unknown:
+        return jsonify({'error': f'Unknown field(s): {", ".join(sorted(unknown))}'}), 400
+    conn = get_db()
+    try:
+        current = conn.execute(
+            'SELECT holiday_id, name, holiday_date, type, location FROM holidays '
+            'WHERE holiday_id = ?', [hid],
+        ).fetchone()
+        if not current:
+            return jsonify({'error': 'Holiday not found'}), 404
+        merged = {
+            'name': data.get('name', current[1]),
+            'date': data.get('date', current[2]),
+            'type': data.get('type', current[3]),
+            'location': data.get('location', current[4]),
+        }
+        try:
+            name, when, htype, location = holiday_calendar.check_payload(merged)
+        except holiday_calendar.HolidayError as exc:
+            return jsonify({'error': str(exc)}), exc.status
+        existing = _holiday_duplicate_exists(conn, name, when, location, exclude_id=hid)
+        if existing is not None:
+            return jsonify({'error': 'A holiday with this name and date already exists '
+                                     'for that location'}), 409
+        try:
+            conn.execute(
+                'UPDATE holidays SET name = ?, holiday_date = ?, year = ?, type = ?, '
+                'location = ? WHERE holiday_id = ?',
+                [name, when, when.year, htype, location, hid],
+            )
+        except Exception as exc:
+            if _is_holiday_duplicate(exc):
+                return jsonify({'error': 'A holiday with this name and date already exists '
+                                         'for that location'}), 409
+            raise
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'HOLIDAY_UPDATE', f'Holiday {name} updated',
+              entity='holidays', entity_id=hid,
+              before={'name': current[1], 'date': current[2].isoformat(),
+                      'type': current[3], 'location': current[4] or None},
+              after={'name': name, 'date': when.isoformat(), 'type': htype,
+                     'location': location})
+    return jsonify({'message': 'Holiday updated', **_holiday_json(
+        (hid, name, when, htype, location))}), 200
 
 
 @app.route('/api/v1/holidays/<int:hid>', methods=['DELETE'])
 @app.route('/api/holidays/<int:hid>', methods=['DELETE'])
 @admin_required
 def delete_holiday(hid):
+    """Delete a holiday, refusing while employees have an opt-in for it.
+
+    The opt-ins carry a foreign key to the holiday, so deleting one that has been
+    opted into would raise — and the two ways out are both bad: silently deleting
+    the opt-ins removes the evidence that an employee asked to take that day off,
+    and a raw 500 tells the admin nothing. The refusal names the count so the next
+    step is obvious.
+    """
     conn = get_db()
     try:
-        result = conn.execute("DELETE FROM holidays WHERE holiday_id = ?", [hid])
-        if result.rowcount == 0:
+        row = conn.execute(
+            'SELECT holiday_id, name, holiday_date, type, location FROM holidays '
+            'WHERE holiday_id = ?', [hid],
+        ).fetchone()
+        if not row:
             return jsonify({'error': 'Holiday not found'}), 404
-        return jsonify({'message': 'Deleted'}), 200
+        linked = 0
+        if _attendance_table_exists(conn, 'holiday_optins'):
+            linked = conn.execute(
+                'SELECT COUNT(*) FROM holiday_optins WHERE holiday_id = ?', [hid],
+            ).fetchone()[0]
+        if linked:
+            return jsonify({
+                'error': f'{linked} employee(s) have an opt-in for {row[1]}, which is '
+                         'the basis of their attendance for that day',
+                'optins': linked,
+                'hint': 'reject or let the employees withdraw the opt-ins first',
+            }), 409
+        conn.execute('DELETE FROM holidays WHERE holiday_id = ?', [hid])
     finally:
         conn.close()
+    audit_log(session['emp_id'], 'HOLIDAY_DELETE', f'Holiday {row[1]} deleted',
+              entity='holidays', entity_id=hid,
+              before={'name': row[1], 'date': row[2].isoformat(), 'type': row[3]})
+    return jsonify({'message': 'Deleted'}), 200
+
+
+@app.route('/api/v1/holidays/copy-year', methods=['POST'])
+@app.route('/api/holidays/copy-year', methods=['POST'])
+@admin_required
+def copy_holiday_year():
+    """Copy one year's calendar into another (FR-HOL-02).
+
+    The Feb-29 rule and the idempotency rule are `holiday_calendar.copy_plan`'s,
+    not this route's: a 29 February holiday is **skipped and named in the
+    response** rather than shifted onto another day, because silently moving a
+    company holiday to a date nobody agreed to is worse than leaving it out, and
+    "the 29th of February" means nothing on the 1st of March. A re-run skips what
+    is already there and reports it, so a retried request converges.
+    """
+    data = request.get_json(silent=True) or {}
+    source_year = data.get('from_year')
+    target_year = data.get('to_year')
+    for label, value in (('from_year', source_year), ('to_year', target_year)):
+        if value is None:
+            return jsonify({'error': f'{label} is required'}), 400
+        bad = _holiday_filter_error('year', value)
+        if bad:
+            return bad
+    if source_year == target_year:
+        return jsonify({'error': 'from_year and to_year must differ'}), 400
+
+    conn = get_db()
+    try:
+        source = conn.execute(
+            'SELECT name, holiday_date, type, location FROM holidays WHERE year = ? '
+            'ORDER BY holiday_date', [source_year],
+        ).fetchall()
+        if not source:
+            return jsonify({'error': f'There are no holidays in {source_year} to copy'}), 404
+        plan, skipped = holiday_calendar.copy_plan(source, target_year)
+        created, already = 0, 0
+        for name, when, htype, location in plan:
+            if _holiday_duplicate_exists(conn, name, when, location) is not None:
+                already += 1
+                continue
+            conn.execute(
+                'INSERT INTO holidays (holiday_id, name, holiday_date, year, type, location) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                [_next_generated_id(conn, 'holidays', 'holiday_id'), name, when,
+                 target_year, htype, location],
+            )
+            created += 1
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'HOLIDAY_COPY_YEAR',
+              f'Copied {created} holiday(s) from {source_year} to {target_year}',
+              entity='holidays', entity_id=None,
+              after={'from_year': source_year, 'to_year': target_year, 'created': created,
+                     'skipped': len(skipped), 'already_present': already})
+    return jsonify({
+        'message': f'Copied {created} holiday(s) from {source_year} to {target_year}',
+        'from_year': source_year, 'to_year': target_year,
+        'created': created,
+        'already_present': already,
+        # Named, not counted: "2 holidays were not copied" sends the admin back
+        # to the calendar to work out which two.
+        'skipped': [{'name': n, 'reason': r, 'detail': d} for n, r, d in skipped],
+    }), 200
+
+
+@app.route('/api/v1/holidays/export', methods=['GET'])
+@app.route('/api/holidays/export', methods=['GET'])
+@login_required
+def export_holidays():
+    """Export the calendar as CSV, in the shape `POST /api/holidays/import` reads."""
+    year = request.args.get('year', type=int)
+    conn = get_db()
+    try:
+        rows = _holiday_rows(conn, year=year, htype=request.args.get('type'),
+                            location=request.args.get('location'))
+    finally:
+        conn.close()
+    body = holiday_calendar.to_csv([(r[1], r[2], r[3], r[4]) for r in rows])
+    return Response(
+        body,
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="holidays_{year or "all"}.csv"'},
+    )
+
+
+@app.route('/api/v1/holidays/import', methods=['POST'])
+@app.route('/api/holidays/import', methods=['POST'])
+@admin_required
+def import_holidays():
+    """Import a holiday calendar from CSV.
+
+    Per-row validation with a per-row reason and the spreadsheet row number, the
+    same contract the user CSV import uses (FR-USR-04): a calendar is usually
+    mostly good, and an admin needs to know which lines failed rather than a
+    single abort that loses the rest. Rows that duplicate an existing holiday are
+    reported as skipped rather than inserted, so re-running a corrected file
+    converges instead of erroring.
+    """
+    upload = request.files.get('file')
+    if upload is None:
+        return jsonify({'error': 'A CSV file part named "file" is required'}), 400
+    raw = upload.read(holiday_calendar.MAX_IMPORT_BYTES + 1)
+    if len(raw) > holiday_calendar.MAX_IMPORT_BYTES:
+        return jsonify({'error': f'The file is larger than '
+                                 f'{holiday_calendar.MAX_IMPORT_BYTES // (1024 * 1024)} MB'}), 400
+    try:
+        text = raw.decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'The file must be UTF-8 encoded'}), 400
+    try:
+        rows, errors = holiday_calendar.parse_csv(text)
+    except holiday_calendar.HolidayError as exc:
+        return jsonify({'error': str(exc)}), exc.status
+
+    conn = get_db()
+    try:
+        imported, skipped = 0, []
+        for number, (name, when, htype, location) in rows:
+            if _holiday_duplicate_exists(conn, name, when, location) is not None:
+                skipped.append((number, f'{name} on {when.isoformat()} already exists'
+                                       + (f' for {location}' if location else '')))
+                continue
+            conn.execute(
+                'INSERT INTO holidays (holiday_id, name, holiday_date, year, type, location) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                [_next_generated_id(conn, 'holidays', 'holiday_id'), name, when,
+                 when.year, htype, location],
+            )
+            imported += 1
+    finally:
+        conn.close()
+    audit_log(session['emp_id'], 'HOLIDAY_IMPORT',
+              f'Imported {imported} holiday(s), {len(skipped)} skipped, '
+              f'{len(errors)} rejected', entity='holidays', entity_id=None,
+              after={'imported': imported, 'skipped': len(skipped), 'errors': len(errors)})
+    return jsonify({
+        'message': f'Imported {imported} holiday(s)', 'imported': imported,
+        'skipped': [{'row': n, 'reason': r} for n, r in skipped],
+        'errors': [{'row': n, 'reason': r} for n, r in errors],
+    }), 200
+
+
+@app.route('/api/v1/holidays/ical', methods=['GET'])
+@app.route('/api/holidays/ical', methods=['GET'])
+@login_required
+def holiday_ical_feed():
+    """The calendar as an iCalendar feed (FR-HOL-02).
+
+    A subscribeable URL, which is the point: an employee's own calendar shows the
+    company's holidays without anyone maintaining a second copy.
+    """
+    year = request.args.get('year', datetime.now().year, type=int)
+    bad = _holiday_filter_error('year', year)
+    if bad:
+        return bad
+    conn = get_db()
+    try:
+        rows = _holiday_rows(conn, year=year, location=request.args.get('location'))
+    finally:
+        conn.close()
+    name = request.args.get('calendar_name')
+    body = holiday_calendar.to_ics(
+        [(r[1], r[2], r[3], r[4]) for r in rows], name or f'HRMS Holidays {year}'
+    )
+    return Response(body, mimetype='text/calendar', headers={
+        'Content-Disposition': f'inline; filename="holidays_{year}.ics"',
+    })
 
 
 # ── Optional-holiday opt-ins (FR-HOL-03) ───────────────────────────────

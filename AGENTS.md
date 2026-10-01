@@ -10,7 +10,7 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 188 on DuckDB, 193 on PostgreSQL)
+python -m pytest tests/test_app.py -v   # Unit tests (fast: 199 on DuckDB, 204 on PostgreSQL)
 python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
 ```
 
@@ -28,7 +28,7 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (188 on DuckDB, 193 on PostgreSQL; the
+- `tests/test_app.py` — Flask unit tests (199 on DuckDB, 204 on PostgreSQL; the
   6 PG-gated compatibility/public tests skip on DuckDB)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
@@ -1125,6 +1125,97 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   (**54 IMPLEMENTED / 38 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
 - DuckDB is 188 passed / 6 skipped; PostgreSQL 193 passed / 1 skipped (also with
   Redis); Playwright 21/21 on both backends.
+
+
+## FR-HOL-01/02 the holiday calendar: the duplicate rule was a check, not a rule (`holiday_calendar.py`)
+- The SRS is one line with six clauses: *"CRUD (HR/Admin, holidays
+  permission), duplicate (name, date) per location prevented by a unique
+  constraint; copy year-to-year with Feb-29 handling; import/export; iCal feed."*
+  Four were missing, one was wrong, and one did not exist.
+- **The duplicate rule was `SELECT 1 ... WHERE name = ? AND holiday_date = ?` in
+  the route.** That is a message, not a rule: two concurrent adds of the same
+  holiday both pass the check and both insert, and nothing in the database
+  refused the second row. It is now a unique index (Alembic `0007`).
+- **The obvious constraint would have been wrong.** A plain
+  `UNIQUE (name, holiday_date, location)` accepts any number of duplicate
+  org-wide holidays, because in SQL **NULL is distinct from NULL** — so the case
+  that matters most, the accidental duplicate org-wide holiday, would still have
+  gone in. The index is on `COALESCE(location, '')`, and
+  `holiday_calendar.duplicate_key` builds the same triple so the application and
+  the index define "the same holiday" identically.
+- **A recorded gap, not an oversight:** the application compares location
+  case-insensitively, the index uses the raw column. A `LOWER(location)` index
+  would need a second functional index, and a functional index on a nullable
+  expression is not portable to the DuckDB compatibility schema at all. The
+  application check catches the case variant; the index catches the exact
+  duplicate; they disagree only on a case-variant arriving concurrently.
+- **Feb-29 on copy is skipped and named, never shifted** (`copy_plan`). Both
+  tempting answers are wrong: putting it on 28 February silently invents a company
+  holiday on a day nobody agreed to, and 1 March is worse because the date means
+  nothing then. A holiday named for the 29th is an observance of that date, so
+  when the date does not exist the honest result is to leave it out and *report
+  it*. The response lists skipped holidays **by name** — "2 holidays were not
+  copied" sends the admin back to the calendar to work out which two. A re-run
+  converges: it skips what is present and says so.
+- **The iCal feed has two details that decide whether it works at all.** An
+  all-day event needs `DTSTART;VALUE=DATE` — given a date-time, clients show 1
+  January at 00:00 in one timezone and 05:30 in another, and some drop it. And
+  every content line must fold to 75 octets (RFC 5545 §3.1): a client handed a
+  longer line may **drop the property silently**, so the calendar simply has no
+  holidays in it. Folding is on octets and never splits a multi-byte character,
+  because a name in a non-Latin script cut mid-character is undecodable — worse
+  than an over-long line. The `UID` is derived from the holiday's identity, not
+  its name or date, because the spec requires a UID to be stable.
+- **Delete is now refused while opt-ins reference a holiday.** The opt-ins carry
+  a foreign key, so deleting one that has been opted into raised a raw 500. Both
+  ways past that are bad — silently cascading deletes the evidence that an
+  employee asked to take that day off, and a 500 tells the admin nothing — so it
+  is a 409 naming the count.
+- **A cross-cutting defect found while writing a test for this slice, and the
+  most consequential thing here.** The role gates decided "is this an API call?"
+  with `request.is_json`, which is False for a `multipart/form-data` upload. So
+  **every admin-gated upload route answered a non-admin with a 302 to the
+  dashboard HTML** — `POST /api/users/import` and now
+  `POST /api/holidays/import`. A `fetch`-based client follows that redirect and
+  receives a page it cannot parse, with a **200** status, so the failure surfaces
+  as a JSON parse error rather than an authorisation failure. `app._wants_json()`
+  now keys on the path (`/api/`) as well as the content type; no page route lives
+  under that prefix, so the browser flow is unchanged and a page route still
+  redirects. **This is a deliberate behaviour change on every gated route**, and
+  two existing tests asserted the old 302 and were updated with the reasoning
+  recorded rather than flipped silently. The Playwright suite (21 tests, both
+  backends) is what makes it safe to land.
+- **A response-shape change with a UI consumer:** `GET /api/holidays` now returns
+  `{"holidays": [...], "filters": {...}}` instead of a bare array, matching
+  `GET /api/users`. The admin page was reading the array directly, so its fetch
+  accepts **both** shapes — a rolling deploy in either direction is not a broken
+  page. The add form gained a location field (without one, the per-location rule
+  is unreachable from the UI), and the modal gained copy-year plus CSV/iCal links.
+- **My own change caught the same bare-`VALUES` bug a second time.** Adding
+  `location` to the compatibility table made the boot seed's
+  `INSERT INTO holidays VALUES (?, ?, ?, ?, ?)` fail to bind with a column-count
+  error on every startup. Fixed with a named column list and a comment saying why.
+- **A test of mine asserted something false and failed intermittently.** The iCal
+  test demanded the feed be byte-identical across two fetches; `DTSTAMP` is
+  defined as when the object was created, so on a *generated* feed it advances
+  between calls. It now compares the feeds with `DTSTAMP` removed, which tests the
+  property that actually matters (the calendar content is stable). Caught only
+  because the DuckDB suite is slow enough for the two requests to straddle a
+  second boundary.
+- 12 new unit tests and a probe flow
+  (`holidays(calendar CRUD, copy, export, iCal)`) covering per-location
+  duplicates, the org-wide `COALESCE` case, the edit with its audit, the leap-day
+  copy, the CSV round trip, the iCal all-day/folding/UID properties, and the
+  guarded delete — **105/105 GET + 51/51 write**, idempotent across two runs,
+  with CC-01 and the preflight green.
+- The matrix moves FR-HOL-01 and FR-HOL-02 to `IMPLEMENTED`
+  (**56 IMPLEMENTED / 36 PARTIAL / 11 NOT_STARTED / 1 RETIRED**).
+- DuckDB is 199 passed / 6 skipped; PostgreSQL 204 passed / 1 skipped (also with
+  Redis); Playwright 21/21 on both backends.
+- One browser flake recorded rather than hidden: `test_ats_offer_and_preboarding_
+  browser_flow` failed once in a full run and passed on re-run and in isolation,
+  with no assertion change. Same shape as the CDN-load flake already noted for
+  `test_admin_sees_user_tab`.
 
 ## Database
 - DuckDB file in temp dir for tests (env var `DB_FILE`)

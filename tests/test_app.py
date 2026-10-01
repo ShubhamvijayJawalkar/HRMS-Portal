@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import pathlib
@@ -1461,10 +1462,13 @@ def test_accrual_run_is_admin_only_and_registered_as_a_job(client):
     _set_admin_session(client, 99863)
     _create_policy_user(client, 'EMP956', role='Employee')
     _login_as(client, 'EMP956', 'Employee', 99862)
-    # A JSON API call is refused with 403; a bare form-style POST is the gate's
-    # long-standing page behaviour (redirect to the dashboard).
+    # Any request to an `/api/` path is refused with 403 and a JSON body, whether
+    # or not it carries JSON. The gate used to test `request.is_json`, so a
+    # body-less POST fell through to the page behaviour and returned a 302 to the
+    # dashboard - which for a fetch-based client means following the redirect and
+    # receiving HTML it cannot parse, with a 200 status.
     assert client.post('/api/accrual/run', json={}).status_code == 403
-    assert client.post('/api/accrual/run').status_code == 302
+    assert client.post('/api/accrual/run').status_code == 403
     _cleanup_user_contract_rows('EMP956')
 
     import app as app_module
@@ -3066,6 +3070,437 @@ def test_cancelling_uses_the_same_day_count_as_the_reservation(client):
     assert leave_policy.CANCELLABLE_STATUSES == frozenset({'Pending', 'Approved'})
 
 
+
+# ── FR-HOL-02 holiday calendar: the duplicate rule was a check, not a rule ──
+
+def _far_date(offset=400):
+    return (date.today() + timedelta(days=offset)).isoformat()
+
+
+def _make_holiday(client, name, when, htype='National', location=None, expect=201):
+    body = {'name': name, 'date': when, 'type': htype}
+    if location is not None:
+        body['location'] = location
+    response = client.post('/api/holidays', json=body)
+    assert response.status_code == expect, response.get_json()
+    return response
+
+
+def _cleanup_holidays(*names):
+    conn = get_db()
+    try:
+        for name in names:
+            ids = [r[0] for r in conn.execute(
+                'SELECT holiday_id FROM holidays WHERE name = ?', [name]).fetchall()]
+            for hid in ids:
+                conn.execute('DELETE FROM holiday_optins WHERE holiday_id = ?', [hid])
+                conn.execute('DELETE FROM holidays WHERE holiday_id = ?', [hid])
+    finally:
+        conn.close()
+
+
+def test_the_duplicate_rule_is_per_location(client):
+    """FR-HOL-02: "duplicate (name, date) *per location* prevented by a unique constraint"."""
+    _set_admin_session(client, 99770)
+    when = _far_date()
+    try:
+        _make_holiday(client, 'Probe Founders Day', when, location='Pune')
+        # Same name and date, same location — including a different case, because a
+        # location is a label an admin retypes rather than a second place.
+        _make_holiday(client, 'Probe Founders Day', when, location='Pune', expect=409)
+        _make_holiday(client, 'Probe Founders Day', when, location='PUNE', expect=409)
+        # The same holiday on the same day in a *different* location is legitimate.
+        _make_holiday(client, 'Probe Founders Day', when, location='Mumbai')
+        assert len(client.get('/api/holidays?q=Probe Founders Day').get_json()['holidays']) == 2
+    finally:
+        _cleanup_holidays('Probe Founders Day')
+
+
+def test_an_org_wide_duplicate_is_refused(client):
+    """The case a plain UNIQUE would have missed: NULL is distinct from NULL in SQL.
+
+    Two org-wide holidays with the same name and date are the mistake an admin
+    actually makes, and the constraint is on COALESCE(location, '') precisely so
+    they collide.
+    """
+    _set_admin_session(client, 99771)
+    when = _far_date(401)
+    try:
+        _make_holiday(client, 'Probe Company Day', when)
+        # An explicit empty location is the same holiday, not a different one.
+        _make_holiday(client, 'Probe Company Day', when, location='', expect=409)
+    finally:
+        _cleanup_holidays('Probe Company Day')
+
+
+def test_holiday_listing_filters_and_searches(client):
+    """FR-HOL-01: "list with search/filter" — and the location column was never read."""
+    _set_admin_session(client, 99772)
+    when = _far_date()
+    try:
+        _make_holiday(client, 'Probe Pune Day', when, location='Pune')
+        _make_holiday(client, 'Probe Mumbai Day', when, location='Mumbai')
+        _make_holiday(client, 'Probe Optional Day', _far_date(402), 'Optional', location='Pune')
+
+        pune = client.get('/api/holidays?location=Pune').get_json()['holidays']
+        names = {h['name'] for h in pune}
+        assert 'Probe Pune Day' in names and 'Probe Mumbai Day' not in names, names
+        # An org-wide holiday belongs to every location's calendar, and the seeded
+        # New Year is one. Filtering the column directly would hide it.
+        assert 'New Year' in names, 'an org-wide holiday was hidden from a location filter'
+
+        searched = client.get('/api/holidays?q=mumbai day').get_json()['holidays']
+        assert [h['name'] for h in searched] == ['Probe Mumbai Day'], searched
+        optional = client.get('/api/holidays?type=Optional').get_json()['holidays']
+        assert all(h['type'] == 'Optional' for h in optional)
+
+        # The response echoes the filters, so a client can tell an empty result from
+        # an over-narrow one.
+        echo = client.get('/api/holidays?location=Pune').get_json()['filters']
+        assert echo == {'year': None, 'type': None, 'location': 'Pune', 'q': None}, echo
+
+        assert client.get('/api/holidays?type=Weekend').status_code == 400
+        assert client.get('/api/holidays?year=nonsense').status_code == 400
+        assert client.get('/api/holidays?year=12').status_code == 400
+    finally:
+        _cleanup_holidays('Probe Pune Day', 'Probe Mumbai Day', 'Probe Optional Day')
+
+
+def test_a_holiday_can_be_edited_and_the_edit_is_audited(client):
+    """The "U" of CRUD did not exist. A partial update must not null the rest."""
+    _set_admin_session(client, 99773)
+    when = _far_date()
+    try:
+        hid = _make_holiday(client, 'Probe Edit Me', when, 'Optional', 'Pune').get_json()['id']
+        renamed = client.put(f'/api/holidays/{hid}', json={'name': 'Probe Renamed'})
+        assert renamed.status_code == 200, renamed.get_json()
+        body = renamed.get_json()
+        # Date, type and location all survive an update that did not mention them.
+        assert body['date'] == when, body
+        assert body['type'] == 'Optional', body
+        assert body['location'] == 'Pune', body
+
+        # An unknown field is refused rather than silently dropped, which is what a
+        # merge into a fixed dict would have done to a `dat:` typo.
+        typo = client.put(f'/api/holidays/{hid}', json={'name': 'X', 'dat': '2027-01-01'})
+        assert typo.status_code == 400, typo.get_json()
+        assert 'dat' in str(typo.get_json()), typo.get_json()
+        assert client.put(f'/api/holidays/{hid}', json={}).status_code == 400
+        assert client.put('/api/holidays/99999999', json={'name': 'X'}).status_code == 404
+
+        # Changing the date re-derives the year, or the calendar filter goes wrong.
+        moved = client.put(f'/api/holidays/{hid}', json={'date': _far_date(500)}).get_json()
+        assert moved['date'] == _far_date(500)
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT year FROM holidays WHERE holiday_id = ?', [hid],
+            ).fetchone()[0] == int(_far_date(500)[:4])
+        finally:
+            conn.close()
+
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT action, "before", "after" FROM audit_log WHERE action = '
+                "'HOLIDAY_UPDATE' AND CAST(entity_id AS VARCHAR) = ?", [str(hid)],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'the edit was not audited'
+        assert json.loads(row[2])['name'] == 'Probe Renamed', row
+        assert json.loads(row[1])['name'] == 'Probe Edit Me', row
+    finally:
+        _cleanup_holidays('Probe Renamed', 'Probe Edit Me')
+
+
+def test_copying_a_year_skips_and_names_a_february_29th_holiday(client):
+    """FR-HOL-02: "copy year-to-year with Feb-29 handling".
+
+    The decision is to *skip and report*, never to shift the date. Silently moving
+    a company holiday to 28 February invents a holiday on a day nobody agreed to,
+    and "the 29th of February" means nothing on the 1st of March — so it is left
+    out and named in the response, and the admin can add it deliberately.
+    """
+    _set_admin_session(client, 99774)
+    try:
+        # A two-holiday 2024 calendar, one of them on the leap day.
+        _make_holiday(client, 'Probe Republic Day', '2024-01-26')
+        _make_holiday(client, 'Probe Leap Day', '2024-02-29', 'Optional')
+
+        copied = client.post('/api/holidays/copy-year', json={'from_year': 2024, 'to_year': 2025})
+        assert copied.status_code == 200, copied.get_json()
+        body = copied.get_json()
+        assert body['created'] == 1, body
+        assert body['already_present'] == 0, body
+        skipped = body['skipped']
+        assert [s['name'] for s in skipped] == ['Probe Leap Day'], skipped
+        assert '2025' in skipped[0]['reason'], skipped
+        assert 'not shifted' in skipped[0]['detail'], skipped
+
+        names = {h['name'] for h in client.get('/api/holidays?year=2025').get_json()['holidays']}
+        assert 'Probe Republic Day' in names, names
+        # Nothing was invented on 28 February or 1 March.
+        assert 'Probe Leap Day' not in names, names
+        for day in ('2025-02-28', '2025-03-01'):
+            found = [h for h in client.get('/api/holidays?year=2025').get_json()['holidays']
+                     if h['date'] == day]
+            assert not found, f'the leap day was silently shifted onto {day}'
+
+        # A retry converges instead of duplicating or erroring.
+        again = client.post('/api/holidays/copy-year', json={'from_year': 2024, 'to_year': 2025})
+        assert again.get_json()['created'] == 0, again.get_json()
+        assert again.get_json()['already_present'] == 1, again.get_json()
+        # And the skipped holiday is still reported, because it is still not copied.
+        assert [s['name'] for s in again.get_json()['skipped']] == ['Probe Leap Day']
+
+        # Copying into a leap year from a leap year copies the 29th.
+        forward = client.post('/api/holidays/copy-year', json={'from_year': 2024, 'to_year': 2028})
+        assert [s['name'] for s in forward.get_json()['skipped']] == [], forward.get_json()
+        leap = [h for h in client.get('/api/holidays?year=2028').get_json()['holidays']
+                if h['name'] == 'Probe Leap Day']
+        assert [h['date'] for h in leap] == ['2028-02-29'], leap
+    finally:
+        _cleanup_holidays('Probe Republic Day', 'Probe Leap Day')
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM holidays WHERE year IN (2025, 2028) AND "
+                         "name LIKE 'Probe%'")
+        finally:
+            conn.close()
+
+
+def test_copying_a_year_refuses_the_nonsensical(client):
+    _set_admin_session(client, 99775)
+    assert client.post('/api/holidays/copy-year',
+                       json={'from_year': 2026, 'to_year': 2026}).status_code == 400
+    assert client.post('/api/holidays/copy-year',
+                       json={'from_year': 2026}).status_code == 400
+    assert client.post('/api/holidays/copy-year',
+                       json={'to_year': 2026}).status_code == 400
+    assert client.post('/api/holidays/copy-year',
+                       json={'from_year': 1999, 'to_year': 2000}).status_code == 404
+
+
+def test_the_calendar_exports_and_imports_round_trip(client):
+    """FR-HOL-02: import/export. The export is the format the import accepts."""
+    _set_admin_session(client, 99776)
+    try:
+        _make_holiday(client, 'Probe Export Me', '2030-01-05', 'National', 'Chennai')
+        exported = client.get('/api/holidays/export?year=2030')
+        assert exported.status_code == 200, exported.get_json()
+        assert exported.mimetype == 'text/csv'
+        body = exported.data.decode()
+        assert body.splitlines()[0] == 'name,date,type,location', body
+        assert 'Probe Export Me,2030-01-05,National,Chennai' in body, body
+    finally:
+        _cleanup_holidays('Probe Export Me')
+
+    # A fresh calendar, then the export is fed back in.
+    _set_admin_session(client, 99777)
+    try:
+        upload = client.post('/api/holidays/import', data={
+            'file': (io.BytesIO(b'name,date,type,location\n'
+                               b'Probe Round Trip,2031-02-03,Optional,Kolkata\n'
+                               b'Probe Bad Date,not-a-date,National,\n'
+                               b'Probe Also Fine,2031-04-05,National,\n'),
+                     'calendar.csv'),
+        }, content_type='multipart/form-data')
+        assert upload.status_code == 200, upload.get_json()
+        result = upload.get_json()
+        assert result['imported'] == 2, result
+        # Per-row reasons with the spreadsheet row number, the FR-USR-04 contract.
+        assert result['errors'] == [
+            {'row': 3, 'reason': 'date is required and must be a real date (YYYY-MM-DD)'}], result
+
+        # Re-running a corrected file converges rather than erroring.
+        again = client.post('/api/holidays/import', data={
+            'file': (io.BytesIO(b'name,date,type,location\n'
+                               b'Probe Round Trip,2031-02-03,Optional,Kolkata\n'),
+                     'calendar.csv'),
+        }, content_type='multipart/form-data').get_json()
+        assert again['imported'] == 0 and len(again['skipped']) == 1, again
+        assert 'already exists' in again['skipped'][0]['reason'], again
+
+        assert client.post('/api/holidays/import', data={},
+                           content_type='multipart/form-data').status_code == 400
+        bad_header = client.post('/api/holidays/import', data={
+            'file': (io.BytesIO(b'foo,bar\n1,2\n'), 'x.csv'),
+        }, content_type='multipart/form-data')
+        assert bad_header.status_code == 400, bad_header.get_json()
+        assert 'header must include' in str(bad_header.get_json()), bad_header.get_json()
+    finally:
+        _cleanup_holidays('Probe Round Trip', 'Probe Also Fine')
+
+
+def test_the_ical_feed_is_a_valid_all_day_calendar(client):
+    """FR-HOL-02: iCal feed. Two details decide whether it works at all.
+
+    An all-day event needs ``DTSTART;VALUE=DATE`` — with a date-time, a client
+    shows 1 January at 00:00 in one timezone and 05:30 in another, and some drop
+    it. And every content line must fold to 75 octets: a client handed a longer
+    line may drop the property, so the calendar simply has no holidays in it.
+    """
+    _set_admin_session(client, 99778)
+    try:
+        long_name = ('Probe Long Holiday Name For Line Folding ' * 2).strip()
+        _make_holiday(client, long_name, '2032-01-26', 'National', 'Mumbai')
+        _make_holiday(client, 'Probe Opt Day', '2032-11-01', 'Optional')
+        feed = client.get('/api/holidays/ical?year=2032')
+        assert feed.status_code == 200, feed.get_json()
+        assert feed.mimetype == 'text/calendar'
+        body = feed.data.decode()
+        assert body.startswith('BEGIN:VCALENDAR'), body[:40]
+        assert body.rstrip('\r\n').endswith('END:VCALENDAR'), body[-40:]
+        # RFC 5545 line endings.
+        assert body.endswith('\r\n') and '\n' not in body.replace('\r\n', ''), 'not CRLF'
+
+        lines = [line for line in body.split('\r\n') if line]
+        assert all(len(line.encode()) <= 75 for line in lines), \
+            f'an over-long line survived: {max(len(x.encode()) for x in lines)} octets'
+        # Continuations begin with a single space, and unfolding recovers the name.
+        unfolded = []
+        for line in lines:
+            if line.startswith(' '):
+                assert unfolded, 'a continuation with nothing to continue'
+                unfolded[-1] += line[1:]
+            else:
+                unfolded.append(line)
+        assert f'SUMMARY:{long_name}' in unfolded, 'folding lost the holiday name'
+        # No timed DTSTART anywhere.
+        assert 'DTSTART;VALUE=DATE:20320126' in unfolded, unfolded
+        assert not [line for line in unfolded if line.startswith('DTSTART:')], \
+            'an all-day holiday was given a time'
+        # An Optional holiday says who it is for, so a subscriber who has not
+        # opted in is not quietly shown a day off they do not get.
+        assert 'DESCRIPTION:Optional holiday' in '\n'.join(unfolded)
+        assert 'LOCATION:Mumbai' in unfolded
+        # A stable UID: the same holiday must not become a new event on re-fetch.
+        uids = [line for line in unfolded if line.startswith('UID:')]
+        assert len(uids) == len(set(uids)), uids
+        # Re-fetching must return the same calendar. Not the same *bytes*: DTSTAMP is
+        # defined as when the iCalendar object was created, so on a generated feed it
+        # advances between calls, and asserting byte-identity here was a test that
+        # failed whenever the two requests straddled a second boundary.
+        def without_stamp(raw):
+            return [line for line in raw.decode().split('\r\n')
+                    if line and not line.startswith('DTSTAMP:')]
+
+        assert without_stamp(client.get('/api/holidays/ical?year=2032').data) == without_stamp(
+            feed.data), 'the feed is not stable between fetches'
+    finally:
+        _cleanup_holidays(long_name, 'Probe Opt Day')
+
+
+def test_deleting_a_holiday_with_optins_is_refused_with_the_count(client):
+    """The opt-ins carry a foreign key, so a raw delete would 500.
+
+    Both ways past that are bad: silently cascading deletes the evidence that an
+    employee asked to take that day off, and a 500 tells the admin nothing.
+    """
+    _set_admin_session(client, 99779)
+    try:
+        _make_holiday(client, 'Probe Guarded', '2033-05-01', 'Optional', 'Pune')
+        conn = get_db()
+        try:
+            hid = conn.execute(
+                "SELECT holiday_id FROM holidays WHERE name = 'Probe Guarded'").fetchone()[0]
+            conn.execute(
+                "INSERT INTO holiday_optins (optin_id, emp_id, holiday_id, status, created_at) "
+                "VALUES (?, ?, ?, 'Approved', ?)",
+                [99101, 'EMP002', hid, datetime.now()],
+            )
+        finally:
+            conn.close()
+        refused = client.delete(f'/api/holidays/{hid}')
+        assert refused.status_code == 409, refused.get_json()
+        assert refused.get_json()['optins'] == 1, refused.get_json()
+        assert 'opt-in' in str(refused.get_json()), refused.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT COUNT(*) FROM holidays WHERE holiday_id = ?', [hid]).fetchone()[0] == 1
+        finally:
+            conn.close()
+
+        # Once the opt-in is gone the delete succeeds.
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM holiday_optins WHERE optin_id = 99101')
+        finally:
+            conn.close()
+        assert client.delete(f'/api/holidays/{hid}').status_code == 200
+        assert client.delete(f'/api/holidays/{hid}').status_code == 404
+    finally:
+        _cleanup_holidays('Probe Guarded')
+
+
+def test_a_gate_denial_on_an_upload_is_json_not_a_redirect(client):
+    """A multipart upload carries no JSON body, so `request.is_json` is False.
+
+    Every admin-gated upload route — `POST /api/users/import` and now
+    `POST /api/holidays/import` — answered a non-admin with a 302 to the dashboard
+    HTML. The client followed the redirect and got a page it cannot parse.
+    """
+    _set_admin_session(client, 99780)
+    try:
+        _create_policy_user(client, 'EMP994', role='Employee')
+        _login_as(client, 'EMP994', 'Employee', 99779)
+        def upload():
+            # A fresh stream per request: a consumed BytesIO is closed, and Flask
+            # reads the part lazily.
+            return {'file': (io.BytesIO(b'name,date,type,location\n'), 'c.csv')}
+
+        refused = client.post('/api/holidays/import', data=upload(),
+                              content_type='multipart/form-data')
+        assert refused.status_code == 403, refused.status_code
+        assert refused.mimetype == 'application/json', refused.mimetype
+        assert refused.get_json() == {'error': 'Forbidden'}, refused.get_json()
+        # The pre-existing user-import upload behaves the same way now.
+        assert client.post('/api/users/import', data=upload(),
+                           content_type='multipart/form-data').status_code == 403
+        # A page route still redirects, so the browser flow is unchanged.
+        assert client.get('/admin/holidays').status_code == 302
+    finally:
+        _cleanup_user_contract_rows('EMP994')
+
+
+def test_the_calendar_rules_are_owned_by_the_module(client):
+    """The decisions live in holiday_calendar, so the routes cannot drift from them."""
+    import holiday_calendar as hc
+
+    # COALESCE semantics: the application and the index must agree that an org-wide
+    # holiday and one with an empty location are the same holiday.
+    assert hc.duplicate_key('X', date(2027, 1, 1), None) == ('X', date(2027, 1, 1), '')
+    assert hc.duplicate_key('X', date(2027, 1, 1), '  ') == ('X', date(2027, 1, 1), '')
+    assert hc.duplicate_key('X', date(2027, 1, 1), ' Pune ') == ('X', date(2027, 1, 1), 'pune')
+
+    # Feb-29: skipped in a non-leap year, copied in a leap year, never shifted.
+    rows = [('Republic Day', date(2024, 1, 26), 'National', None),
+            ('Leap', date(2024, 2, 29), 'National', None)]
+    plan, skipped = hc.copy_plan(rows, 2025)
+    assert [r[0] for r in plan] == ['Republic Day'], plan
+    assert [s[0] for s in skipped] == ['Leap'], skipped
+    assert '2024-02-29' in skipped[0][1], skipped
+    plan, skipped = hc.copy_plan(rows, 2028)
+    assert [r[0] for r in plan] == ['Republic Day', 'Leap'], plan
+    assert skipped == [], skipped
+    assert date(2028, 2, 29) in [r[1] for r in plan]
+
+    # A non-leap source year has no 29 February to worry about.
+    plan, skipped = hc.copy_plan([('Republic Day', date(2026, 1, 26), 'National', None)], 2027)
+    assert plan and not skipped, (plan, skipped)
+
+    # Line folding, exercised directly so a regression is a unit failure.
+    folded = hc._ics_fold('SUMMARY:' + 'x' * 200)
+    assert all(len(line.encode()) <= 75 for line in folded), folded
+    assert folded[0].startswith('SUMMARY:') and folded[1].startswith(' ')
+    assert ''.join(x[1:] if x.startswith(' ') else x for x in folded) == 'SUMMARY:' + 'x' * 200
+    # A multi-byte name is never cut mid-character.
+    accented = hc._ics_fold('SUMMARY:' + 'é' * 100)
+    assert all(len(line.encode()) <= 75 for line in accented), accented
+    assert ''.join(x[1:] if x.startswith(' ') else x for x in accented) == 'SUMMARY:' + 'é' * 100
+
 # ── FR-HOL-03 optional-holiday opt-ins: the table existed, nothing wrote to it ──
 
 def _optional_holiday(client, name='Probe Optional'):
@@ -3951,9 +4386,10 @@ def test_admin_operations_endpoints_follow_the_directory_permission(client):
             '/api/users/EMP931/permissions', json={'modules': {'users': False}}
         ).status_code == 200
         _login_as(client, 'EMP931', 'Admin', 99896)
-        # admin_required redirects a non-JSON GET away, exactly as for a
-        # non-admin today; the JSON caller gets an explicit 403.
-        assert client.get('/api/users').status_code == 302
+        # A denied module gets a 403 with a JSON body for *every* request to an
+        # `/api/` path, not only the ones carrying JSON - see the note on
+        # `app._wants_json()`. A page route still redirects.
+        assert client.get('/api/users').status_code == 403
         assert client.get('/api/users', json={}).status_code == 403
         assert client.post('/api/users', json={
             'emp_id': 'EMP933', 'name': 'Nope', 'email': 'nope@company.com',
