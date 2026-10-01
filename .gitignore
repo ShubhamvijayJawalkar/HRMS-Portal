@@ -10,6 +10,8 @@ __pycache__/
 .env
 
 # Database
+# DuckDB was decommissioned at Phase 6. Kept so a stray file from an old
+# checkout is never committed by accident.
 *.duckdb
 *.duckdb.wal
 
