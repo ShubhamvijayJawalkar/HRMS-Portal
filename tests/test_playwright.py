@@ -430,9 +430,13 @@ def test_can_start_and_end_break(page):
     first_btn = page.locator('.break-type-btn').first
     assert first_btn.is_visible(), 'No break type buttons visible'
     first_btn.click()
-    page.wait_for_timeout(2000)
     active = page.locator('#activeBreakInfo')
     end_btn = active.locator('.endBreakBtn')
+    # Wait for the button, not a fixed interval: it only exists after the
+    # POST /api/start-break round-trip and the re-render. This assertion used a
+    # 2s sleep and was the flakier of the two break tests, because the wait was
+    # an upper bound rather than a signal.
+    end_btn.wait_for(state='visible', timeout=10000)
     assert end_btn.is_visible(), 'End Break button should appear after starting a break'
     end_btn.click()
     page.wait_for_selector('.endBreakBtn', state='hidden', timeout=10000)
@@ -480,9 +484,12 @@ def test_break_daily_limit_enforced(page):
     first_btn = page.locator('.break-type-btn').first
     assert first_btn.is_visible()
     first_btn.click()
-    page.wait_for_timeout(1000)
     active = page.locator('#activeBreakInfo')
     end_btn = active.locator('.endBreakBtn')
+    # Same reason as in test_can_start_and_end_break. This one waited only 1s for
+    # a round-trip that its sibling allowed 2s for, which is why it failed in full
+    # runs and passed alone.
+    end_btn.wait_for(state='visible', timeout=10000)
     assert end_btn.is_visible()
     end_btn.click()
     page.wait_for_selector('.endBreakBtn', state='hidden', timeout=10000)
