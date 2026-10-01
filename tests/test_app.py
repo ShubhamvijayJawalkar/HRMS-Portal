@@ -3,38 +3,49 @@ import json
 import os
 import pathlib
 import sys
-import tempfile
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# ── PostgreSQL only ──────────────────────────────────────────────────────
+# This suite used to run against either DuckDB (a fresh ~50 MB file per session,
+# named from a timestamp) or PostgreSQL. DuckDB was removed at the Phase-6
+# decommission, so the backend is no longer a choice and `APP_DB` is gone.
+#
+# That per-session file was also a genuine storage leak: `cleanup()` deleted it
+# but was never wired as a fixture teardown, so every run left a file behind
+# until the disk filled. 19 orphans had reached 923 MB. PostgreSQL needs no
+# such cleanup — `reset_schema` drops and recreates the schema per run, which is
+# a few hundred KB rather than a 50 MB file.
+os.environ.setdefault(
+    'DATABASE_URL',
+    'postgresql+psycopg://postgres:postgres@localhost:55432/hrms',
+)
 os.environ['SECRET_KEY'] = 'test-secret-key'
-os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_test_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
-os.environ.setdefault('APP_DB', 'duckdb')
 # The app's global "200 per minute" limit is meant for production traffic. A
 # full suite issues thousands of requests in well under a minute, and a 429 on
 # the CSRF-token fetch surfaces much later as a bogus "CSRF token missing or
 # invalid" on an unrelated assertion, so lift it for tests.
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
-# DuckDB attaches a database file once per process, so a background job opening
-# a connection while the suite is mid-assertion raises "Unique file handle
-# conflict". The browser suite leaves the scheduler on for PostgreSQL.
-os.environ['HRMS_DISABLE_SCHEDULER'] = '1'
 # `HRMS_DISABLE_SCHEDULER=1` is available for a fully deterministic run; the
 # suite keeps the scheduler on so the job-registration tests stay meaningful, and
 # the import tests below tolerate the dispatcher picking a job up first.
 # Tests must never reset the production cutover target, even when a shell
 # inherits FLASK_ENV=production or APP_DB_SCHEMA=public.
 os.environ['APP_DB_SCHEMA'] = 'legacy'
-if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-    import db_backend
-    db_backend.reset_schema()
 
-import pytest
+import db_backend
 
-from app import (
+db_backend.reset_schema()
+
+# The env must be set above before `app` is imported: it decides the schema and
+# the schema is dropped/recreated here, so these two imports are intentionally
+# late (E402).
+import pytest  # noqa: E402
+
+from app import (  # noqa: E402
     _next_generated_id,
     app,
     check_password,
@@ -83,13 +94,6 @@ def client():
 def auth_client(client):
     client.post('/login', json={'emp_id': 'EMP001', 'password': 'pass123'})
     return client
-
-
-def cleanup():
-    try:
-        os.remove(os.environ['DB_FILE'])
-    except OSError:
-        pass
 
 
 # ── Basic Tests ─────────────────────────────────────────────────
@@ -249,19 +253,6 @@ def test_public_seed_sequence_advancer_repairs_explicit_ids(monkeypatch):
     assert connection.setvals == [['public.breaks_break_id_seq', 42]]
 
 
-def test_etl_allows_missing_post_v1_payroll_approval_table():
-    import duckdb
-
-    from scripts.migrate_duckdb_to_postgres import REGISTRY, _read_source_rows, _source_catalog
-
-    entry = next(item for item in REGISTRY if item['table'] == 'payroll_approvals')
-    source = duckdb.connect(':memory:')
-    present, rows = _read_source_rows(source, entry, _source_catalog(source))
-    source.close()
-    assert not present
-    assert rows == []
-
-
 def test_seed_data_has_multiple_entries_per_model(client):
     conn = get_db()
     tables = [
@@ -361,10 +352,6 @@ def test_plaintext_password_normalized_on_boot():
     assert check_password('pass123', fixed)
 
 
-@pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-    reason='CC-01 inspects the v2.0 target schema on PostgreSQL',
-)
 def test_cc01_surrogate_keys_are_identity():
     """CC-01: every surrogate PK is an identity column; only natural keys differ."""
     conn = get_db()
@@ -404,10 +391,6 @@ def test_cc01_surrogate_keys_are_identity():
     conn.close()
 
 
-@pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-    reason='the boolean rewrite snoops information_schema on PostgreSQL',
-)
 def test_boolean_flag_rewrite_public_and_inert_legacy():
     """Phase-3b flip compat: v2.0 BOOLEAN flags accept legacy 0/1 predicates.
 
@@ -436,10 +419,6 @@ def test_boolean_flag_rewrite_public_and_inert_legacy():
     assert translate(numeric, None, 'public') == numeric
 
 
-@pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-    reason='the boolean coercion snoops information_schema on PostgreSQL',
-)
 def test_insert_boolean_param_coercion_public_and_inert_legacy():
     """Phase-3b flip compat: INSERTs into v2.0 BOOLEAN flags accept int params."""
     from db_backend import _coerce_insert_boolean_params
@@ -460,10 +439,6 @@ def test_insert_boolean_param_coercion_public_and_inert_legacy():
     assert '1' in s_leg  # legacy is INTEGER: nothing rewritten
 
 
-@pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-    reason='the boolean coercion snoops information_schema on PostgreSQL',
-)
 def test_boolean_comparison_param_coercion_public_and_inert_legacy():
     """UPDATE/SELECT int params become bool before psycopg binds them."""
     from db_backend import _coerce_boolean_comparison_params
@@ -704,30 +679,15 @@ def _set_admin_session(client, session_id):
 def _tables_with_column(conn, column):
     """Every table in the connected schema that has ``column``.
 
-    DuckDB exposes `PRAGMA table_info`; PostgreSQL goes through
-    `information_schema` with the *app's* schema, not `public` — the unit suite runs
-    against the `legacy` schema, where an unqualified `table_schema = 'public'`
-    lookup returns nothing and the caller would silently clean up no tables at all.
+    Queried with the *app's* schema, not `public` — the unit suite runs against
+    the `legacy` schema, where an unqualified `table_schema = 'public'` lookup
+    returns nothing and the caller would silently clean up no tables at all.
     """
-    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-        import db_backend
-        rows = conn.execute(
-            "SELECT table_name FROM information_schema.columns "
-            'WHERE table_schema = ? AND column_name = ? ORDER BY table_name',
-            [db_backend.app_schema(), column],
-        ).fetchall()
-    else:
-        rows = []
-        for (name,) in conn.execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'main' ORDER BY table_name"
-        ).fetchall():
-            try:
-                info = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
-            except Exception:
-                continue
-            if any(row[1] == column for row in info):
-                rows.append((name,))
+    rows = conn.execute(
+        "SELECT table_name FROM information_schema.columns "
+        'WHERE table_schema = ? AND column_name = ? ORDER BY table_name',
+        [db_backend.app_schema(), column],
+    ).fetchall()
     return [row[0] for row in rows]
 
 
@@ -3105,8 +3065,6 @@ def test_cancelling_uses_the_same_day_count_as_the_reservation(client):
 
 # ── A BOOLEAN column named `email` silently corrupted every `email = ?` ──────
 
-@pytest.mark.skipif(os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-                    reason='the boolean-column map only exists on the PostgreSQL target')
 def test_a_boolean_column_name_does_not_rewrite_another_tables_column():
     """`notification_preferences.email` is BOOLEAN; `users.email` is VARCHAR.
 
@@ -3155,8 +3113,6 @@ def test_a_boolean_column_name_does_not_rewrite_another_tables_column():
     assert out_params[3] is True and out_params[4] is True, out_params
 
 
-@pytest.mark.skipif(os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-                    reason='the boolean-column map only exists on the PostgreSQL target')
 def test_the_insert_path_resolves_flag_columns_for_its_own_table():
     """The INSERT path is table-aware, so it stays exact where the bare-name set
     has to be conservative."""
@@ -3292,6 +3248,19 @@ def test_the_srs_categories_are_the_taxonomy_and_the_leave_name_is_exact(client)
     assert notifications.category_for('HOLIDAY_OPTIN_REQUESTED') == 'Holiday'
     assert notifications.category_for('') == notifications.FALLBACK
     assert notifications.category_for('SOMETHING_UNMAPPED') == notifications.FALLBACK
+    # Break decisions and punch corrections are attendance events the SRS gives no
+    # category of their own. The earlier substring derivation mapped them to
+    # `'Leave'`, which is not a category at all — a name no preference can be
+    # stored against, so the notification was unmuteable by construction while
+    # looking like it belonged somewhere real. They now fall to the catch-all, and
+    # there is deliberately no rule for them (see the comment in `_PREFIX_RULES`):
+    # a rule mapping to FALLBACK is a no-op that reads like data.
+    for attendance_event in ('BREAK_APPROVED', 'BREAK_REJECTED', 'PUNCH'):
+        assert notifications.category_for(attendance_event) == notifications.FALLBACK, (
+            attendance_event)
+    # And nothing anywhere derives a category outside the taxonomy.
+    for category in ('Leave', 'Break', 'Offer'):
+        assert category not in notifications.CATEGORIES, category
 
 
 def test_describe_reports_a_category_with_no_producer_honestly(client):
@@ -5305,10 +5274,6 @@ def test_leave_policy_assignment_is_audited(client):
         _cleanup_user_contract_rows('EMP953')
 
 
-@pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'),
-    reason='the boolean adapter snoop needs PostgreSQL and both schemas',
-)
 def test_user_permissions_allow_column_shape_public_and_inert_legacy():
     """v2.0 stores BOOLEAN, legacy stores INTEGER; the adapter only rewrites one."""
     from db_backend import _coerce_boolean_comparison_params, _coerce_insert_boolean_params
@@ -6144,7 +6109,7 @@ def test_attendance_nightly_scheduler_job_registered():
     from app import _register_scheduler_jobs, scheduler
 
     # Registered without starting the scheduler: a background thread firing next
-    # to the assertions is what makes the DuckDB backend flaky.
+    # to the assertions makes the run non-deterministic.
     _register_scheduler_jobs(2)
     job = scheduler.get_job('attendance-finalization')
     assert job is not None
@@ -6155,7 +6120,7 @@ def test_attendance_nightly_scheduler_job_registered():
 # ── Service-layer rewrite inc 2 (shifts: users.columns ⇄ shift_assignments) ──
 
 def test_shift_model_false_on_v1(client):
-    """DuckDB/legacy keep shifts on users.shift_start/shift_end."""
+    """The compatibility `legacy` schema keeps shifts on users.shift_start/end."""
     from app import _shift_model
     assert _shift_model() is False
 
@@ -6225,10 +6190,14 @@ def test_shift_24x7_roundtrip(client):
     assert sd == datetime(2030, 1, 15, 0, 0, 0)
 
 
-def test_shift_assignments_branch_executes_on_duckdb(client):
-    """Exercise the v2.0 shift_assignments code path with DuckDB standing in
-    for public: create the table, flip the cached model flag, and drive
-    get_shift/set_shift/user-CRUD through the assignment branch (inc 2).
+def test_shift_assignments_branch_executes_on_compat_schema(client):
+    """Exercise the v2.0 shift_assignments code path on the compatibility schema.
+
+    `public` owns `shift_assignments` and no `users.shift_*` columns, while
+    `legacy` (what this suite runs against) has the reverse. Creating the table
+    here flips the cached model flag so the assignment branch is driven for real
+    on the schema the rest of the suite uses — the two shapes coexist, so this is
+    a stand-in for `public` rather than a mock of it.
     """
     from app import _SHIFT_MODEL_CACHE, _get_shift_end_dt, _get_shift_start_dt, _shift_model, get_shift, set_shift
     conn = get_db()
@@ -6286,8 +6255,7 @@ def test_shift_assignments_branch_executes_on_duckdb(client):
 
 
 @pytest.mark.skipif(
-    os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg')
-    or os.getenv('APP_DB_SCHEMA', 'legacy') != 'public',
+    db_backend.app_schema() != 'public',
     reason='the v2.0 shift_assignments path runs on the pure public schema',
 )
 def test_shift_assignments_path_on_public():

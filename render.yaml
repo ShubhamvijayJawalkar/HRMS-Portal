@@ -17,8 +17,6 @@ services:
         value: "0"
       - key: FLASK_ENV
         value: "production"
-      - key: DB_FILE
-        value: /data/hrms.duckdb
       - key: SECRET_KEY
         generateValue: true
       - key: LOG_LEVEL

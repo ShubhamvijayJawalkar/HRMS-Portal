@@ -52,11 +52,12 @@ def _table_exists(conn, table: str = 'monthly_leave_grants') -> bool:
 
     A compatibility database created before this slice does not have the table
     until `init_db` runs, and the module is imported before that; the read paths
-    must not raise in that window.
+    must not raise in that window. Keyed per schema, since the same process can
+    serve `legacy` and `public` in the test suite.
     """
-    import os
+    import db_backend
 
-    key = f"{os.getenv('APP_DB', 'duckdb').lower()}:{table}"
+    key = f"{db_backend.app_schema()}:{table}"
     if key not in _TABLE_PRESENT:
         try:
             conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone()

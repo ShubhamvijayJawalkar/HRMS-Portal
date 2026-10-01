@@ -23,27 +23,26 @@ Run it with::
 import json
 import os
 import sys
-import tempfile
-from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+os.environ.setdefault(
+    'DATABASE_URL',
+    'postgresql+psycopg://postgres:postgres@localhost:55432/hrms',
+)
 os.environ['SECRET_KEY'] = 'test-secret-key'
-os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_redis_test_{datetime.now().timestamp()}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
-os.environ.setdefault('APP_DB', 'duckdb')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
-# DuckDB attaches a database file once per process; see tests/test_app.py.
 os.environ['HRMS_DISABLE_SCHEDULER'] = '1'
 os.environ['APP_DB_SCHEMA'] = 'legacy'
-if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-    import db_backend
 
-    db_backend.reset_schema()
+import db_backend
 
-import pytest
+db_backend.reset_schema()
 
-from app import app, get_db
+import pytest  # noqa: E402
+
+from app import app, get_db  # noqa: E402
 
 REDIS_URL = os.getenv('REDIS_URL')
 
@@ -133,8 +132,8 @@ def _admin_login():
 def _cleanup():
     """Remove the subjects and every row that points at them.
 
-    A login writes a `user_sessions` row and an audit entry, and DuckDB enforces
-    the foreign key, so the order matters.
+    A login writes a `user_sessions` row and an audit entry, and PostgreSQL
+    enforces the foreign key, so the order matters.
     """
     conn = get_db()
     try:

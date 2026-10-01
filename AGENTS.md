@@ -10,35 +10,34 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (fast: 199 on DuckDB, 204 on PostgreSQL)
-python -m pytest tests/test_playwright.py -v  # Browser tests (~3 min, 21 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (217 passed, 1 skipped, ~70s)
+python -m pytest tests/test_playwright.py -v  # Browser tests (21 tests)
+python -m pytest tests/test_redis_sessions.py -v  # Redis session store (10, skip without REDIS_URL)
 ```
 
-### Running the suite against PostgreSQL (Phase 2)
-The app runs on either backend via `APP_DB` (`duckdb` default, `postgres` for
-the Phase-2 cutover). On the Postgres backend the tests drop/recreate the
-`legacy` schema before importing `app`, so each run starts clean (the v2.0
-target schema in `public` is never touched). Requires the `hrms-pg` container
-(see `docs/MIGRATION.md`).
+### The suites are PostgreSQL-only
+There is no `APP_DB` and no `DB_FILE`. `tests/test_app.py` defaults
+`DATABASE_URL` to `postgresql+psycopg://postgres:postgres@localhost:55432/hrms`
+and drops/recreates the `legacy` schema before importing `app`, so each run
+starts clean (the v2.0 target schema in `public` is never touched). Requires
+the `hrms-pg` container (see `docs/MIGRATION.md`). Override `DATABASE_URL` to
+point elsewhere:
 ```bash
-APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
+DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   python -m pytest tests/test_app.py -v
-APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
-  python -m pytest tests/test_playwright.py -v
 ```
 
 ### Test infrastructure
-- `tests/test_app.py` — Flask unit tests (199 on DuckDB, 204 on PostgreSQL; the
-  6 PG-gated compatibility/public tests skip on DuckDB)
+- `tests/test_app.py` — Flask unit tests (217 passed, 1 skipped; the skip is
+  `test_shift_assignments_path_on_public`, which needs `APP_DB_SCHEMA=public`)
 - `tests/test_playwright.py` — Playwright browser tests (21 tests)
 - Playwright tests spin up a dev server in a thread per session, each test gets a fresh browser context
 
 ### Test patterns
 - The **unit** suite sets `HRMS_DISABLE_SCHEDULER=1`; the **browser** fixture
-  runs single-threaded on DuckDB and keeps the scheduler off there too (DuckDB
-  attaches a file once per process, so an overlapping request *or* a background
-  job collides). PostgreSQL gets a threaded server and a live scheduler.
-  `_register_scheduler_jobs()` lets the wiring be asserted without starting it
+  runs a threaded server with a live scheduler. `_register_scheduler_jobs()`
+  lets the wiring be asserted without starting a thread that fires next to the
+  assertions.
 - `ANONYMISATION_SALT` is set for both suites (anonymisation refuses to run
   without one)
 - Each browser test logs in fresh, waits 3-5s for session to stabilize
@@ -253,10 +252,11 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   ETL with Phase-1/Phase-2 reconciliation, CC-05 cleanup, head stamping,
   read-only preflight, authenticated GET/write smoke coverage, and a post-write
   CC-01 sequence check.
-- The actual final delta sync, maintenance-window health check, DNS/load-
-  balancer switch, and DuckDB read-only audit lock remain operator actions.
-  Do not mark Phase 5 complete until the traffic switch and rollback window
-  are verified.
+- The actual final delta sync, maintenance-window health check and
+  DNS/load-balancer switch remain operator actions. Do not mark Phase 5
+  complete until the traffic switch is verified.
+- The DuckDB read-only audit lock it also listed is gone: the backend was
+  removed at Phase 6, so there is no fallback file left to lock.
 
 ## FR-USR employee-management hardening (in progress)
 - The first safe slice replaces destructive user deletion with status-based
@@ -1303,7 +1303,20 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   `test_notification_category_derived_on_write` asserted `category == 'Leave'`,
   i.e. it had encoded the bug as expected behaviour. A test that asserts a
   requirement's defect is not merely stale — it is actively preventing the fix.
-  `scripts/probe_public_flip.py` gained
+- **A second instance of the same root cause, found on the second pass.** The old
+  substring derivation also mapped `BREAK_*` and `PUNCH` to `'Leave'` — a category
+  that does not exist, so a break notification was unmuteable by construction while
+  looking like it belonged somewhere real, and a break decision under a switch
+  labelled *leave* would have been wrong even if the name had matched. Break and
+  punch events are attendance with no SRS category of their own, so they now have
+  **no rule at all** and fall to the catch-all, which is delivered. A rule mapping
+  to `FALLBACK` would be a no-op that reads like data; the reasoning is a comment in
+  `_PREFIX_RULES` instead. Nothing emits those types today, and the emitted-types
+  test forces a decision if one is added rather than letting it land as a silent
+  `General`. `wants_in_app` also states explicitly that a category outside the
+  taxonomy is delivered — reachable through historical rows, and the failure mode to
+  avoid is silently muting a notification because of a renamed category.
+- `scripts/probe_public_flip.py` gained
   `notification-preferences(taxonomy + per-category switch)`, which reads the
   v2.0 rows back: **107/107 GET + 52/52 write**, idempotent across runs, with
   CC-01 and the read-only preflight green. `cutover_preflight.py`'s expected head
@@ -1314,6 +1327,17 @@ APP_DB=postgres APP_DB_SCHEMA=legacy DATABASE_URL=postgresql+psycopg://postgres:
   without checking that rule still excludes what it should.
 
 ## Database
-- DuckDB file in temp dir for tests (env var `DB_FILE`)
+- PostgreSQL only. `DATABASE_URL` selects the server, `APP_DB_SCHEMA` selects the schema (`legacy` for dev/tests, `public` for production). There is no `APP_DB` and no `DB_FILE`.
 - Seed data includes 2 users (EMP001, EMP002), break types (Tea, Lunch, Personal), sample sessions/breaks
 - Production boot refuses an empty database; `HRMS_ALLOW_DEMO_SEED=1` is reserved for disposable validation databases only.
+
+## Phase 6 (DuckDB runtime decommission — done)
+- **The runtime leak was a test harness bug, and it was the storage problem.** `tests/test_app.py` created a unique ~50 MB `hrms_test_<timestamp>.duckdb` per session, and the `cleanup()` that deleted it was **defined but never wired as a fixture teardown** — so every run leaked a file. 19 orphans had reached 923 MB in `/tmp`. Removing the backend removes the leak by construction; `db_backend.reset_schema()` drops and recreates the schema per run instead, which costs a few hundred KB.
+- **What went.** `APP_DB`/`DB_FILE` branching in `app.py`, `outbox.py` and `leave_accrual.py`; `duckdb>=1.0` from `requirements.txt`; `docker-compose.legacy.yml` (the DuckDB rollback profile); `scripts/migrate_duckdb_to_postgres.py` (the Phase-1 ETL, which needed the driver to read its source); the `--duckdb-file`/`--require-legacy-read-only` pair in `cutover_preflight.py`; and `hrms.duckdb` itself (28 MB, **76 rows of boot seed only** — 2 demo users and 2 rows per table, no production data).
+- **What stayed, and why it is not DuckDB.** `db_backend.py` remains: it is still the SQL dialect adapter the app depends on (`strftime` → `to_char`, `date()` two-arg form, boolean-literal rewrites, `TIMESTAMPTZ` → naive on read), not a backend switch. Its docstrings still say "DuckDB-flavoured SQL" because that is literally what the v1.0 code emits — rewording them would make the adapter's job harder to see, not easier.
+- **Two flags were deleted rather than left as no-ops.** Five `skipif(APP_DB == postgres)` guards in the unit suite became unconditionally true and were removed. `cutover_preflight.py`'s `--require-legacy-read-only` was the other: with the fallback gone it could never be satisfied, and a preflight flag that always fails is worse than no flag.
+- **One test could not survive and was deleted:** `test_etl_allows_missing_post_v1_payroll_approval_table` existed only to prove the ETL tolerated a missing table.
+- **CI is now one job, not two.** The `duckdb` job's unique steps — ruff, `docker compose config`, the image build — moved into the `postgres` job rather than being dropped, so that coverage is intact.
+- **The browser suite got faster for free.** The Playwright `server` fixture ran single-threaded on DuckDB because DuckDB attaches a file once per process (two overlapping requests → "Unique file handle conflict"). That conditional is gone, so the fixture is threaded unconditionally — and the whole suite was previously serialised behind one request thread for no reason.
+- **The unit suite went from ~31 minutes to 67 seconds.** The DuckDB run was the slow one; PostgreSQL always was the fast path.
+- Also removed: generated `uploads/` (6.5 MB of payslip PDFs), `reports/` (256 KB of preflight/migration JSON — nothing references it) and the `__pycache__`/cache directories. Repo working size 53 MB → 17 MB.

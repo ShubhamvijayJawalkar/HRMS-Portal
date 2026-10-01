@@ -89,7 +89,6 @@ _PREFIX_RULES = (
     ('FEEDBACK', 'Performance'),
     ('HOLIDAY_OPTIN', 'Holiday'),
     ('EXPENSE', 'Expenses'),
-    ('BREAK', 'Leave'),
     ('ONBOARDING', 'Onboarding'),
     ('OFFER', 'Onboarding'),
     ('CANDIDATE', 'Onboarding'),
@@ -100,7 +99,17 @@ _PREFIX_RULES = (
     # exists to remove.
     ('OFFBOARD', 'Onboarding'),
     ('PAYROLL', 'Payroll'),
-    ('PUNCH', 'Leave'),
+    # Deliberately NO break or punch rule, though the earlier substring derivation
+    # produced a `BREAK -> Leave` mapping and the category `'Leave'` is not even in
+    # the taxonomy. Break decisions are attendance events the SRS gives no category
+    # of their own; routing them under `Leaves` would have let an employee mute
+    # "my break was approved" with a switch labelled *leave*, and `'Leave'` is a
+    # name no preference can be stored against, so the notification was unmuteable
+    # by construction while appearing to belong somewhere real. Leaving them
+    # unmapped sends them to the catch-all, which is delivered — the honest answer
+    # for an event with no category of its own. Nothing emits these types today;
+    # if a break notification is added, `_emitted_notification_types` in the tests
+    # will fail and force a decision rather than let it land as a silent `General`.
 )
 
 # Exact type -> category, checked first. These are the names that would otherwise
@@ -118,7 +127,6 @@ _EXACT = {
     'HOLIDAY_OPTIN_REQUESTED': 'Holiday',
     'HOLIDAY_OPTIN_APPROVED': 'Holiday',
     'HOLIDAY_OPTIN_REJECTED': 'Holiday',
-    'BREAK_APPROVED': 'Leave',
     'PAYROLL': 'Payroll',
     'PAYSLIP': 'Payroll',
 }
@@ -237,7 +245,14 @@ def wants_in_app(effective: dict, category: str) -> bool:
     """
     if category == FALLBACK:
         return True
-    return bool(effective.get(category, {}).get('in_app', True))
+    # A category outside the taxonomy is treated as the catch-all rather than
+    # looked up: `effective.get` would answer `True` anyway, but saying so here
+    # keeps the intent explicit. This is reachable — historical rows carry the old
+    # derivations (`Leave`, `Break`, `Offer`) — and silently muting a notification
+    # because of a renamed category is the failure mode to avoid.
+    if category not in effective:
+        return True
+    return bool(effective[category].get('in_app', True))
 
 
 # Every notification type the app raises **today**, read off the actual call sites

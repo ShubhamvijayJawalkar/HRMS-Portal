@@ -2,18 +2,19 @@
 
 Web application for the Human Resource Management System.
 
-## Runtime profiles
+## Runtime
 
-- **Production cutover target:** PostgreSQL 17 schema `public` with Redis-backed
-  sessions. Production defaults `APP_DB_SCHEMA` to `public` when
-  `FLASK_ENV=production`; set `APP_DB=postgres`, `APP_DB_SCHEMA=public`,
-  `DATABASE_URL`, and `REDIS_URL` explicitly in deployment secrets.
-- **Development/compatibility:** DuckDB remains available locally. The
-  PostgreSQL test harness uses the disposable `legacy` schema by default.
-- **Rollback:** `docker-compose.legacy.yml` is the temporary DuckDB audit
-  fallback profile (`docker compose --profile legacy-rollback -f
-  docker-compose.legacy.yml up`). Do not remove the legacy data until the
-  Phase 5 fallback window has elapsed.
+**PostgreSQL 17 is the only backend.** The app runs on schema `public` (the v2.0
+target) with Redis-backed sessions. Production defaults `APP_DB_SCHEMA` to
+`public` when `FLASK_ENV=production`; set `APP_DB_SCHEMA=public`,
+`DATABASE_URL`, and `REDIS_URL` explicitly in deployment secrets.
+
+The PostgreSQL test harness uses the disposable `legacy` schema (the v1.0 shape
+the application code still speaks) by default.
+
+DuckDB was the original runtime and was removed at the Phase-6 decommission.
+There is no `APP_DB` switch and no DuckDB rollback profile; see
+[`docs/MIGRATION.md`](docs/MIGRATION.md) §"Phase 6".
 
 ## Start the PostgreSQL cutover profile
 
@@ -47,12 +48,10 @@ The preflight command is read-only and emits a JSON reconciliation report:
 DATABASE_URL=postgresql://... \
 python scripts/cutover_preflight.py \
   --schema public --legacy-schema legacy \
-  --duckdb-file /data/hrms.duckdb \
-  --require-legacy-read-only \
   --report reports/cutover-preflight.json
 ```
 
-The actual final delta sync, maintenance-window health check, traffic switch,
-and DuckDB read-only lock are operator actions documented in
+The actual final delta sync, maintenance-window health check, and traffic
+switch are operator actions documented in
 [`docs/MIGRATION.md`](docs/MIGRATION.md). The preflight never drops a schema,
 mutates data, or changes traffic.

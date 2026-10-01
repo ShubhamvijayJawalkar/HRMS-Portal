@@ -285,7 +285,7 @@ TASKS = [
     ("Phase 4", "Corrected ATS / onboarding / offboarding flows", "FR-ATS/FR-ONB/FR-OFF acceptance suite + 94/42 public probe", DONE),
     # ── Phase 5-6 ────────────────────────────────────────────────────────
     ("Phase 5", "Final cutover: flip APP_DB_SCHEMA to public, retire legacy", "Disposable rehearsal passed ETL/preflight/94-42 probe/authenticated smoke/CC-01 sequence check; maintenance-window traffic switch pending", IN_PROGRESS),
-    ("Phase 6", "Decommission DuckDB runtime", "Out of the ETL blueprint; tracked in SRS", PENDING),
+    ("Phase 6", "Decommission DuckDB runtime", "PostgreSQL-only: APP_DB/DB_FILE, driver, legacy compose profile, ETL script and fallback lock removed; the per-session 50MB test-file leak is gone with the backend; 217 passed / 1 skipped in 67s", DONE),
     # ── Follow-up backend hardening ────────────────────────────────────────
     ("Follow-up", "FR-USR archive/restore and session revocation", "Hard delete replaced with retained archive/restore; admin UI and cross-backend tests updated", DONE),
     ("Follow-up", "FR-USR directory contract (bounded pagination, sorting, validation)", "per_page capped at 200, allow-listed sorting, EMP/email/role/department validation, case-insensitive uniqueness, partial PUT with role-change audit, CSV import under the same contract", DONE),
@@ -299,11 +299,9 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "DuckDB", "199 passed, 6 skipped (PG-gated compatibility/public tests)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "204 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "204 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "DuckDB", "21 passed (single-threaded, scheduler off)"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL", "217 passed, 1 skipped (public-only shift test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "217 passed, 1 skipped"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed (threaded server, live scheduler)"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
     ("CI PostgreSQL job", "postgres:17 + redis services", "Unit suite on legacy (with and without Redis), browser suite, and the preflight/CC-01/probe gates on a clean v2.0 target"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "97/97 GET + 44/44 write flows; lifecycle + permission + import paths included"),
@@ -359,7 +357,7 @@ def build_pdf(path: str) -> None:
     summary_rows = [
         ["Completed tasks", f"{done_total} / {len(TASKS)}"],
         ["Current branch", _current_branch()],
-        ["Next task", "Phase 5: final cutover to public, then Phase 6 DuckDB decommission"],
+        ["Next task", "Phase 5: final cutover to public (traffic switch is the last operator action)"],
     ]
     for phase in sorted(TOTAL_BY_PHASE):
         summary_rows.append([f"{phase} progress", f"{DONE_BY_PHASE[phase]} / {TOTAL_BY_PHASE[phase]} done"])

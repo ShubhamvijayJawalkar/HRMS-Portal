@@ -1,53 +1,45 @@
 import os
 import sys
-import tempfile
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+os.environ.setdefault(
+    'DATABASE_URL',
+    'postgresql+psycopg://postgres:postgres@localhost:55432/hrms',
+)
 os.environ['SECRET_KEY'] = 'test-secret-key'
-# Dot-free, millisecond-unique file name: DuckDB derives its in-process database
-# name from the file stem with dots stripped, so a dotted name (e.g. a float
-# timestamp) makes two spellings of the same path collide with
-# "Unique file handle conflict" when a connection is opened from another thread.
-os.environ['DB_FILE'] = os.path.join(tempfile.gettempdir(), f'hrms_pw_{int(datetime.now().timestamp() * 1000)}.duckdb')
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
-os.environ.setdefault('APP_DB', 'duckdb')
 os.environ['APP_DB_SCHEMA'] = 'legacy'
-if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-    import db_backend
-    db_backend.reset_schema()
 
-import threading
-import time
+import db_backend
 
-import pytest
-from playwright.sync_api import sync_playwright
+db_backend.reset_schema()
 
-from app import app
+import threading  # noqa: E402
+import time  # noqa: E402
+
+import pytest  # noqa: E402
+from playwright.sync_api import sync_playwright  # noqa: E402
+
+from app import app  # noqa: E402
 
 BASE_URL = 'http://localhost:8787'
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
-    # DuckDB attaches a database file once per process, so two overlapping
-    # requests raise "Unique file handle conflict" and the server is run
-    # single-threaded there. PostgreSQL has no such constraint, so it keeps a
-    # threaded server -- which also stops a background job tick (the import
-    # dispatcher runs every 15s) from stalling the whole suite behind the only
-    # request thread.
-    _is_duckdb = os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg')
-    # On DuckDB the scheduler is off as well: a background job opens its own
-    # connection while a request is being served, and DuckDB attaches a file
-    # once per process, which is the original "Unique file handle conflict". The
-    # import test presses "run now" instead of waiting for a tick.
-    if _is_duckdb:
-        os.environ['HRMS_DISABLE_SCHEDULER'] = '1'
-    threaded = not _is_duckdb
+    # Threaded, unconditionally. This was conditional only because DuckDB
+    # attaches a database file once per process, so two overlapping requests
+    # raised "Unique file handle conflict" and the server had to be
+    # single-threaded there. PostgreSQL has no such constraint, so the whole
+    # suite was serialised behind one request thread for no reason — which also
+    # meant a background scheduler tick (the import dispatcher runs every 15s)
+    # stalled everything behind it. The import test presses "run now" rather than
+    # waiting for a tick either way.
     t = threading.Thread(target=lambda: app.run(host='127.0.0.1', port=8787, debug=False,
-                                              use_reloader=False, threaded=threaded), daemon=True)
+                                              use_reloader=False, threaded=True), daemon=True)
     t.start()
     time.sleep(2)
     yield
@@ -217,9 +209,12 @@ def test_admin_assigns_a_leave_policy(page):
         })
     """)
     page.goto(BASE_URL + '/admin/users')
-    page.wait_for_timeout(1500)
+    # Wait for the button itself rather than a fixed sleep. The user list is
+    # rendered by JS from `/api/users`, so a fixed timeout races the CDN load and
+    # the search filter; this failed once on exactly that and passed in isolation.
+    page.wait_for_selector('#searchInput', timeout=15000)
     page.fill('#searchInput', 'EMP904')
-    page.wait_for_timeout(1500)
+    page.wait_for_selector("button[title='Leave policy']", timeout=15000)
     page.click("button[title='Leave policy']")
     page.wait_for_timeout(1500)
     assert page.is_visible('#leavePolicyModal'), 'leave policy modal did not open'

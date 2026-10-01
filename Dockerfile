@@ -17,11 +17,9 @@ USER hrms
 ENV FLASK_DEBUG=0
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
-# Phase 5 production target. Override APP_DB/APP_DB_SCHEMA only for the
-# explicitly retained DuckDB rollback image.
-ENV APP_DB=postgres
+# The production target is the v2.0 schema. PostgreSQL is the only backend:
+# DuckDB was removed at the Phase-6 decommission.
 ENV APP_DB_SCHEMA=public
-ENV DB_FILE=/data/hrms.duckdb
 ENV PORT=10000
 
 EXPOSE 10000

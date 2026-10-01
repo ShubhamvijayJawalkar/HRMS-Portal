@@ -8,12 +8,17 @@ data, drops a schema, or switches traffic.
 Typical maintenance-window sequence::
 
     alembic -c migrations/alembic.ini upgrade head
-    python scripts/cutover_preflight.py --require-legacy-read-only \
-        --duckdb-file /data/hrms.duckdb --report reports/cutover-preflight.json
+    python scripts/cutover_preflight.py --report reports/cutover-preflight.json
 
 The operator then starts the public image, performs the health check, and
-switches traffic only after the report has no failed checks. The DuckDB file
-and legacy schema remain available for the defined audit-fallback period.
+switches traffic only after the report has no failed checks.
+
+This script used to also take ``--duckdb-file``/``--require-legacy-read-only``
+to assert the DuckDB rollback file was present and mounted read-only. DuckDB
+was removed at the Phase-6 decommission, so that pair was deleted rather than
+left in place: ``--require-legacy-read-only`` could never be satisfied again,
+and a preflight flag that always fails is worse than no flag. The ``legacy``
+schema is still compared for row-count deltas.
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ import argparse
 import json
 import os
 import re
-import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -159,23 +163,6 @@ def _alembic_version(conn: psycopg.Connection, schema: str) -> str | None:
     return row[0] if row else None
 
 
-def _read_only_file(path: str | None) -> dict[str, Any]:
-    if not path:
-        return {"checked": False, "ready": None, "path": None}
-    file_path = Path(path)
-    if not file_path.exists():
-        return {"checked": True, "ready": False, "path": str(file_path), "reason": "missing"}
-    mode = file_path.stat().st_mode
-    writable = bool(mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    return {
-        "checked": True,
-        "ready": not writable,
-        "path": str(file_path),
-        "mode": oct(stat.S_IMODE(mode)),
-        "writable": writable,
-    }
-
-
 def _schema_report(conn: psycopg.Connection, schema: str) -> dict[str, Any]:
     schema = _validate_schema(schema)
     tables = _table_names(conn, schema)
@@ -239,10 +226,7 @@ def _run(args: argparse.Namespace) -> int:
         if active_duplicates:
             failures.append(f"public has {active_duplicates} candidates with multiple active offers")
 
-    duckdb = _read_only_file(args.duckdb_file)
     deltas = _count_deltas(public, legacy_report)
-    if args.require_legacy_read_only and duckdb["ready"] is not True:
-        failures.append("DuckDB fallback is not present and read-only")
     if args.fail_on_count_delta:
         changed = [table for table, values in deltas.items() if values["delta"]]
         if changed:
@@ -252,7 +236,6 @@ def _run(args: argparse.Namespace) -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "target": public,
         "legacy": legacy_report,
-        "duckdb_fallback": duckdb,
         "count_deltas": deltas,
         "failures": failures,
         "ready": not failures,
@@ -296,8 +279,6 @@ def main() -> int:
         default="0008_notification_preferences",
         help="required Alembic head on the target schema",
     )
-    parser.add_argument("--duckdb-file", help="optional legacy DuckDB fallback path")
-    parser.add_argument("--require-legacy-read-only", action="store_true")
     parser.add_argument(
         "--fail-on-count-delta",
         action="store_true",

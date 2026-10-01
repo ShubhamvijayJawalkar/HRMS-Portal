@@ -6,65 +6,15 @@ on:
   pull_request:
     branches: [main, master]
 
+# One job, one backend. This used to be two parallel jobs, `duckdb` and
+# `postgres`, because the app could run on either. DuckDB was removed at the
+# Phase-6 decommission, so the `duckdb` job is gone and its steps — lint, compose
+# validation, the image build — moved here rather than being dropped. What that
+# job uniquely provided was the fast signal; what this one uniquely provided was
+# the only backend, so it is now the whole gate.
 jobs:
-  # Fast feedback on the default local/CI backend (DuckDB, compatibility schema).
   test:
-    name: duckdb
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
-
-      - name: Lint with ruff
-        run: |
-          ruff check . --ignore E501
-
-      - name: Validate cutover tooling
-        run: |
-          python -m py_compile scripts/cutover_preflight.py
-          SECRET_KEY=ci-compose-secret POSTGRES_PASSWORD=ci-compose-password \
-            docker compose -f docker-compose.yml config >/dev/null
-          SECRET_KEY=ci-compose-secret \
-            docker compose -f docker-compose.legacy.yml config >/dev/null
-
-      - name: Run unit tests
-        run: |
-          python -m pytest tests/test_app.py -v
-        env:
-          SECRET_KEY: ci-secret-key
-          FLASK_DEBUG: 0
-
-      - name: Install Playwright browsers
-        run: |
-          python -m playwright install chromium
-
-      - name: Run browser tests
-        run: |
-          python -m pytest tests/test_playwright.py -v
-        env:
-          SECRET_KEY: ci-secret-key
-          FLASK_DEBUG: 0
-
-      - name: Build Docker image
-        run: |
-          docker build -t hrms .
-
-  # The v2.0 target. Everything the adapter, the identity/boolean rewrites and
-  # the Alembic migrations touch is invisible to the DuckDB job, so PostgreSQL
-  # (both the compatibility `legacy` schema and a clean v2.0 `public` one) runs
-  # on every push as well.
-  postgres:
-    name: postgres
+    name: test
     runs-on: ubuntu-latest
 
     services:
@@ -94,7 +44,6 @@ jobs:
     env:
       SECRET_KEY: ci-secret-key
       FLASK_DEBUG: 0
-      APP_DB: postgres
       APP_DB_SCHEMA: legacy
       # Disposable validation database: the demo seed is what the suites expect.
       HRMS_ALLOW_DEMO_SEED: "1"
@@ -113,6 +62,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Lint with ruff
+        run: ruff check . --ignore E501
+
+      - name: Validate cutover tooling
+        run: |
+          python -m py_compile scripts/cutover_preflight.py scripts/check_cc_rules.py scripts/probe_public_flip.py
+          SECRET_KEY=ci-compose-secret POSTGRES_PASSWORD=ci-compose-password \
+            docker compose config >/dev/null
+
       - name: Wait for PostgreSQL
         run: |
           for i in $(seq 1 30); do
@@ -122,10 +80,11 @@ jobs:
           echo "PostgreSQL did not become ready" >&2
           exit 1
 
-      # The PG-gated unit tests assert against the v2.0 target (identity keys,
-      # BOOLEAN columns, the canonical data types), so the `public` schema has
-      # to exist in this database before the suite runs. This mirrors the real
-      # deployment: `public` = v2.0 target, `legacy` = migrated v1.0.
+      # The unit suite asserts against the v2.0 target as well as the
+      # compatibility schema (identity keys, BOOLEAN columns, the canonical data
+      # types), so `public` has to exist in this database before it runs. This
+      # mirrors the real deployment: `public` = v2.0 target, `legacy` = the
+      # v1.0 shape the app code still speaks.
       - name: Create the v2.0 public schema
         run: python -m alembic -c migrations/alembic.ini upgrade head
 
@@ -148,12 +107,13 @@ jobs:
       - name: Install Playwright browsers
         run: python -m playwright install chromium
 
-      - name: Run browser tests on PostgreSQL
+      - name: Run browser tests
         run: python -m pytest tests/test_playwright.py -v
 
       # A clean v2.0 database created by Alembic, then the three cutover gates:
       # the read-only preflight, the CC-01 rule checker and the public-flip
-      # probe (every authenticated GET route + the core write flows).
+      # probe (every authenticated GET route + the core write flows). All three
+      # exit non-zero on failure, so a step turns red on its own.
       - name: Create the v2.0 target and run the cutover gates
         run: |
           # psycopg rather than the psql client: the service container
@@ -168,12 +128,14 @@ jobs:
           PY
           export PROBE_URL=postgresql+psycopg://postgres:postgres@localhost:5432/hrms_probe
           DATABASE_URL=$PROBE_URL python -m alembic -c migrations/alembic.ini upgrade head
-          python -m py_compile scripts/check_cc_rules.py scripts/probe_public_flip.py
           echo "--- read-only preflight ---"
           DATABASE_URL=$PROBE_URL python scripts/cutover_preflight.py --schema public
           echo "--- CC-01 rule checker ---"
           DATABASE_URL=postgresql://postgres:postgres@localhost:5432/hrms_probe \
             python scripts/check_cc_rules.py
           echo "--- public-flip probe ---"
-          DATABASE_URL=$PROBE_URL APP_DB=postgres APP_DB_SCHEMA=public \
+          DATABASE_URL=$PROBE_URL APP_DB_SCHEMA=public \
             python scripts/probe_public_flip.py
+
+      - name: Build Docker image
+        run: docker build -t hrms .

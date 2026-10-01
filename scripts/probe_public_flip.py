@@ -1412,8 +1412,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
 
 def main() -> int:
-    if os.getenv("APP_DB", "duckdb").lower() not in ("postgres", "postgresql", "pg"):
-        print("should run with APP_DB=postgres and APP_DB_SCHEMA=public")
+    if os.getenv("APP_DB_SCHEMA", "public") != "public":
+        print("should run with APP_DB_SCHEMA=public")
         return 1
     schema = os.getenv("APP_DB_SCHEMA", "public")
     dsn = (os.getenv("DATABASE_URL") or "").replace("postgresql+psycopg://", "postgresql://")

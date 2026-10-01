@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -35,39 +34,19 @@ MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 30
 
 
-def _is_postgres() -> bool:
-    return os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg')
-
-
-def _db_file() -> str:
-    return os.getenv('DB_FILE', 'hrms.duckdb')
-
-
 @contextmanager
 def transaction():
-    """Open a DB transaction on whichever backend is configured.
+    """Open a DB transaction.
 
     Yields a connection on which the map-me business change and its outbox
     event are atomic (CC-09): the transaction is committed on clean exit and
-    rolled back on exception. DuckDB tracks explicit ``BEGIN``/``COMMIT``;
-    PostgreSQL uses a dedicated non-autocommit connection.
+    rolled back on exception. PostgreSQL uses a dedicated non-autocommit
+    connection; the DuckDB backend this used to also serve tracked explicit
+    ``BEGIN``/``COMMIT`` and was removed at the Phase-6 decommission.
     """
-    if _is_postgres():
-        import db_backend
-        with db_backend.transaction() as conn:
-            yield conn
-        return
-    import duckdb
-    conn = duckdb.connect(_db_file())
-    conn.execute("BEGIN")
-    try:
+    import db_backend
+    with db_backend.transaction() as conn:
         yield conn
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    finally:
-        conn.close()
 
 
 def _table_exists(conn) -> bool:
@@ -329,12 +308,8 @@ def run_dispatch(limit: int = 50) -> dict:
 
     Opens its own connection on the configured backend and closes it.
     """
-    if _is_postgres():
-        import db_backend
-        conn = db_backend.connect()
-    else:
-        import duckdb
-        conn = duckdb.connect(_db_file())
+    import db_backend
+    conn = db_backend.connect()
     try:
         return dispatch_once(conn, limit=limit)
     finally:

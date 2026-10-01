@@ -586,11 +586,11 @@ schemas and the v2.0 `public` schema:
 
 ## 13. Phase 5 — final PostgreSQL cutover (readiness implemented; switch pending)
 
-The application and deployment profiles now default production PostgreSQL to
-`APP_DB_SCHEMA=public`, while development/tests retain `legacy` and
-`docker-compose.legacy.yml` provides the temporary DuckDB rollback profile.
-The default Compose stack runs an expand/contract Alembic migration service
-before the web process and uses PostgreSQL plus Redis.
+The application and deployment profiles default production to
+`APP_DB_SCHEMA=public`, while development/tests retain `legacy`. The Compose
+stack runs an expand/contract Alembic migration service before the web process
+and uses PostgreSQL plus Redis. (The temporary `docker-compose.legacy.yml`
+DuckDB rollback profile was removed at Phase 6, §16.)
 
 The read-only preflight is:
 
@@ -598,8 +598,6 @@ The read-only preflight is:
 DATABASE_URL=postgresql://... \\
   python scripts/cutover_preflight.py \\
     --schema public --legacy-schema legacy \\
-    --duckdb-file /data/hrms.duckdb \\
-    --require-legacy-read-only \\
     --report reports/cutover-preflight.json
 ```
 
@@ -625,20 +623,19 @@ confirmed every identity sequence remained ahead of `MAX(id)`.
 
 ### Maintenance-window sequence
 
-1. Stop web and scheduler writes; take the final DuckDB snapshot and retain the
-   legacy PostgreSQL schema unchanged.
+1. Stop web and scheduler writes and retain the legacy PostgreSQL schema
+   unchanged. (The "take the final DuckDB snapshot" step no longer applies —
+   the runtime was decommissioned at Phase 6, §16.)
 2. Run the final ETL/delta sync and `alembic -c migrations/alembic.ini upgrade
    head` against the production-shaped target.
 3. Run `scripts/cutover_preflight.py` and archive its JSON report.
-4. Start the public image with `APP_DB=postgres`, `APP_DB_SCHEMA=public`,
-   `DATABASE_URL`, and `REDIS_URL`; verify `/login` and the authenticated
-   health/API smoke checks.
+4. Start the public image with `APP_DB_SCHEMA=public`, `DATABASE_URL` and
+   `REDIS_URL`; verify `/login` and the authenticated health/API smoke checks.
 5. Switch DNS/load-balancer traffic during the maintenance window.
-6. Keep the DuckDB file and `legacy` schema mounted read-only for the defined
-   audit-fallback period. On the VM, use
-   `deploy/lock_fallback.sh /data/hrms.duckdb`; the file is an archive, not a
-   writable live database. Roll back by restoring the previous image and
-   `APP_DB_SCHEMA=legacy`; do not delete the fallback during this phase.
+6. Keep the `legacy` schema unmodified for the defined audit period. Roll back
+   by repointing the previous application build at `APP_DB_SCHEMA=legacy`;
+   do not delete it during this phase. (The DuckDB read-only lock and
+   `deploy/lock_fallback.sh` were removed at Phase 6, §16.)
 
 ## 14. FR-USR employee-management hardening (follow-up slices)
 
@@ -1319,7 +1316,9 @@ into the rest of the suite. It is varargs now and removes the user.
 
 1. Complete the Phase 5 maintenance-window final delta sync and traffic
    switch, then record the production cutover evidence.
-2. Phase 6 — decommission the DuckDB runtime after the audit-fallback window.
+2. Phase 6 (DuckDB runtime decommission) is **done** — see §16. The
+   audit-fallback window it waited for was never used, because there is no
+   production deployment yet.
 3. The FR-USR follow-up is complete: archive/restore, the directory contract,
    the permission policy and its enforcement, the audited PII reveal (employees,
    dependents and the ATS contact details), policy-derived leave balances,
@@ -1328,3 +1327,60 @@ into the rest of the suite. It is varargs now and removes the user.
    recorded open items are the trade-offs chosen in `docs/ANONYMISATION.md`
    (keeping `emp_id` as the seven-year join key, leaving free text in place) and
    the year-end carry-forward, which the ledger now records the data for.
+
+## 16. Phase 6 — DuckDB runtime decommission (done)
+
+DuckDB was the v1.0 runtime. It is gone: there is no `APP_DB`, no `DB_FILE`,
+no DuckDB driver in `requirements.txt`, and no DuckDB rollback profile. The
+application is PostgreSQL-only, and `db_backend.py` remains purely as the SQL
+dialect adapter the v1.0-shaped code still needs (`strftime` → `to_char`, the
+two-argument `date()` form, boolean-literal rewrites, `TIMESTAMPTZ` returned as
+naive datetimes).
+
+### The storage problem was a test leak, not the runtime
+
+Each unit-suite session created a unique `hrms_test_<timestamp>.duckdb` in the
+temp directory — around 50 MB — and the `cleanup()` helper that deleted it was
+**defined but never wired as a fixture teardown**, so every run left its file
+behind. 19 orphans had reached 923 MB in `/tmp`. PostgreSQL has no equivalent
+cost: `db_backend.reset_schema()` drops and recreates the `legacy` schema per
+run, which is a few hundred KB, so removing the backend removes the leak by
+construction rather than by fixing the teardown that should have existed.
+
+### What was removed
+
+| Item | Reason |
+|---|---|
+| `APP_DB` / `DB_FILE` branching in `app.py`, `outbox.py`, `leave_accrual.py` | backend selection is no longer a choice |
+| `duckdb>=1.0` from `requirements.txt` | no driver needed |
+| `docker-compose.legacy.yml` | the DuckDB audit-fallback profile |
+| `deploy/lock_fallback.sh` | made the fallback file read-only; no file, no purpose |
+| `scripts/migrate_duckdb_to_postgres.py` | the Phase-1 ETL read its source through the driver |
+| `--duckdb-file` / `--require-legacy-read-only` in `cutover_preflight.py` | see below |
+| `hrms.duckdb` (28 MB) | 76 rows of boot seed data — the 2 demo users and 2 rows per table; no production data |
+
+Two things were deleted rather than left in place. Five
+`skipif(APP_DB == postgres)` guards in the unit suite became unconditionally
+true and were removed. `cutover_preflight.py`'s
+`--require-legacy-read-only` was the other: with the fallback gone it could
+never be satisfied again, and a preflight flag that always fails is worse than
+no flag. The `legacy`-schema comparison and count-delta reporting are unchanged.
+
+One test could not survive: `test_etl_allows_missing_post_v1_payroll_approval_table`
+existed only to prove the ETL tolerated a missing table.
+
+### Verification
+
+- Unit suite: **217 passed / 1 skipped in 67 s** (was 199 / 6 in ~31 min on
+  DuckDB). The skip is `test_shift_assignments_path_on_public`, which asserts
+  against `APP_DB_SCHEMA=public`; it runs in the public-flip probe instead.
+- `ruff check . --ignore E501` clean; `docker compose config` valid; the image
+  builds; all three cutover gates compile.
+- The browser suite is unchanged in coverage but runs **threaded
+  unconditionally** — the Playwright `server` fixture had to be single-threaded
+  on DuckDB because DuckDB attaches a file once per process, so two overlapping
+  requests raised "Unique file handle conflict". Removing the backend removes
+  that constraint and the serialisation it caused.
+- CI is one job rather than two. The `duckdb` job's unique steps — ruff, compose
+  validation, the image build — moved into the PostgreSQL job instead of being
+  dropped.

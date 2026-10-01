@@ -10,9 +10,8 @@ APP_DIR="/opt/hrms"
 DB_DIR="/opt/hrms/data"
 APP_USER="hrms"
 
-# Phase 5 production cutover requires managed PostgreSQL/Redis endpoints.
-# Export these before running this script; the legacy DuckDB profile remains
-# available in docker-compose.legacy.yml for the audit-fallback window.
+# Production requires managed PostgreSQL/Redis endpoints. Export these before
+# running this script.
 : "${DATABASE_URL:?Set DATABASE_URL to the production PostgreSQL DSN}"
 : "${REDIS_URL:?Set REDIS_URL to the production Redis DSN}"
 
@@ -57,11 +56,9 @@ sudo -u $APP_USER tee "$APP_DIR/.env.production" > /dev/null <<EOF
 SECRET_KEY=$SECRET_VALUE
 FLASK_ENV=production
 FLASK_DEBUG=0
-APP_DB=postgres
 APP_DB_SCHEMA=public
 DATABASE_URL=$DATABASE_URL
 REDIS_URL=$REDIS_URL
-DB_FILE=$DB_DIR/hrms.duckdb
 EOF
 sudo chown $APP_USER:$APP_USER "$APP_DIR/.env.production"
 sudo chmod 600 "$APP_DIR/.env.production"

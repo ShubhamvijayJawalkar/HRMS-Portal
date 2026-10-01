@@ -11,7 +11,6 @@ from functools import wraps
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
-import duckdb
 import pandas as pd
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -95,7 +94,6 @@ if os.getenv('FLASK_ENV') == 'production':
 init_csrf(app)
 maybe_enable_redis_sessions(app)
 
-DB_FILE = os.getenv('DB_FILE', 'hrms.duckdb')
 IST = ZoneInfo('Asia/Kolkata')
 
 # ── Rate Limiter ──────────────────────────────────────────────────────
@@ -149,43 +147,36 @@ STARTED = False
 # ══════════════════════════════════════════════════════════════════════
 
 def get_db():
-    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-        import db_backend
-        return db_backend.connect()
-    # NOTE: a process-wide shared DuckDB connection was tried and reverted. The
-    # threaded dev server interleaves `execute()` and `fetchall()` across
-    # requests, and one connection means one cursor state, so results get
-    # corrupted (`ValueError: not enough values to unpack`) under load. DuckDB
-    # also attaches a file only once per process, so a *concurrent* second
-    # connect raises "Unique file handle conflict" - which is why the browser
-    # suite runs the dev server single-threaded on this backend.
-    conn = duckdb.connect(DB_FILE)
-    try:
-        conn.execute("PRAGMA enable_progress_bar")
-    except Exception:
-        pass
-    return conn
+    """A connection to the PostgreSQL backend.
+
+    DuckDB was the original runtime and was removed at the Phase-6 decommission,
+    so this no longer branches. What the branch *was* hiding is worth recording:
+    a process-wide shared DuckDB connection was tried and reverted, because the
+    threaded server interleaves `execute()` and `fetchall()` across requests and
+    one connection means one cursor state, so results got corrupted
+    (`ValueError: not enough values to unpack`) under load. DuckDB also attached
+    a file only once per process, so a concurrent second connect raised
+    "Unique file handle conflict" — which is why the browser suite had to run the
+    dev server single-threaded on that backend. PostgreSQL has no such
+    constraint, so the suite is threaded again.
+    """
+    import db_backend
+    return db_backend.connect()
 
 
 def _is_public_target_schema():
     """True when the app is serving the immutable v2.0 ``public`` schema."""
-    if os.getenv('APP_DB', 'duckdb').lower() not in ('postgres', 'postgresql', 'pg'):
-        return False
     import db_backend
     return db_backend.app_schema() == 'public'
 
 
 def _has_column(conn, table, column):
-    if os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg'):
-        import db_backend
-        return bool(conn.execute(
-            "SELECT 1 FROM information_schema.columns WHERE table_schema = ? "
-            "AND table_name = ? AND column_name = ?",
-            [db_backend.app_schema(), table, column],
-        ).fetchone())
-    return bool(conn.execute(f'PRAGMA table_info("{table}")').fetchall()) and any(
-        row[1] == column for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-    )
+    import db_backend
+    return bool(conn.execute(
+        "SELECT 1 FROM information_schema.columns WHERE table_schema = ? "
+        "AND table_name = ? AND column_name = ?",
+        [db_backend.app_schema(), table, column],
+    ).fetchone())
 
 
 def _advance_public_identity_sequences(conn):
@@ -232,14 +223,9 @@ def _shift_model() -> bool:
     Introspected once per process per backend+schema and cached — the same
     pattern the DB adapter uses for boolean columns.
     """
-    backend = os.getenv('APP_DB', 'duckdb').lower()
-    is_pg = backend in ('postgres', 'postgresql', 'pg')
-    if is_pg:
-        import db_backend
-        schema = db_backend.app_schema()
-    else:
-        schema = 'main'
-    key = f"{backend}:{schema}"
+    import db_backend
+    schema = db_backend.app_schema()
+    key = schema
     if key not in _SHIFT_MODEL_CACHE:
         conn = get_db()
         try:
@@ -260,13 +246,9 @@ _PAYROLL_MODEL_CACHE: dict = {}
 
 def _payroll_v2_model() -> bool:
     """True when payroll runs use the v2.0 maker-checker columns."""
-    backend = os.getenv('APP_DB', 'duckdb').lower()
-    is_pg = backend in ('postgres', 'postgresql', 'pg')
-    schema = 'main'
-    if is_pg:
-        import db_backend
-        schema = db_backend.app_schema()
-    key = f"{backend}:{schema}"
+    import db_backend
+    schema = db_backend.app_schema()
+    key = schema
     if key not in _PAYROLL_MODEL_CACHE:
         conn = get_db()
         try:
@@ -289,13 +271,9 @@ _SALARY_MODEL_CACHE: dict = {}
 
 def _salary_v2_model() -> bool:
     """True when salary structures carry effective-dated end dates."""
-    backend = os.getenv('APP_DB', 'duckdb').lower()
-    is_pg = backend in ('postgres', 'postgresql', 'pg')
-    schema = 'main'
-    if is_pg:
-        import db_backend
-        schema = db_backend.app_schema()
-    key = f"{backend}:{schema}"
+    import db_backend
+    schema = db_backend.app_schema()
+    key = schema
     if key not in _SALARY_MODEL_CACHE:
         conn = get_db()
         try:
@@ -1006,8 +984,7 @@ def init_db():
             if not _has_column(conn, 'offer_letters', column):
                 conn.execute(f"ALTER TABLE offer_letters ADD COLUMN {column} {definition}")
 
-    if (not _is_public_target_schema()
-            and os.getenv('APP_DB', 'duckdb').lower() in ('postgres', 'postgresql', 'pg')):
+    if not _is_public_target_schema():
         conn.execute(
             """WITH ranked AS (
                    SELECT offer_id,
@@ -1978,34 +1955,27 @@ _ATTENDANCE_IDENTITY_CACHE: dict = {}
 def _attendance_id_is_identity() -> bool:
     """True when the target schema generates ``attendance_id`` itself.
 
-    PostgreSQL ``public`` uses the CC-01 identity key. DuckDB and the legacy
-    PostgreSQL schema use the v1.0 integer key and need a caller-supplied ID.
+    PostgreSQL ``public`` uses the CC-01 identity key. The compatibility
+    ``legacy`` PostgreSQL schema uses the v1.0 integer key and needs a
+    caller-supplied ID.
     """
-    backend = os.getenv('APP_DB', 'duckdb').lower()
-    is_pg = backend in ('postgres', 'postgresql', 'pg')
-    schema = 'main'
-    if is_pg:
-        import db_backend
-        schema = db_backend.app_schema()
-    key = f"{backend}:{schema}"
+    import db_backend
+    schema = db_backend.app_schema()
+    key = schema
     if key not in _ATTENDANCE_IDENTITY_CACHE:
-        if not is_pg:
+        conn = db_backend.connect()
+        try:
+            row = conn.execute(
+                "SELECT is_identity FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = 'attendance_days' "
+                "AND column_name = 'attendance_id'",
+                [schema],
+            ).fetchone()
+            _ATTENDANCE_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
+        except Exception:
             _ATTENDANCE_IDENTITY_CACHE[key] = False
-        else:
-            import db_backend
-            conn = db_backend.connect()
-            try:
-                row = conn.execute(
-                    "SELECT is_identity FROM information_schema.columns "
-                    "WHERE table_schema = ? AND table_name = 'attendance_days' "
-                    "AND column_name = 'attendance_id'",
-                    [schema],
-                ).fetchone()
-                _ATTENDANCE_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
-            except Exception:
-                _ATTENDANCE_IDENTITY_CACHE[key] = False
-            finally:
-                conn.close()
+        finally:
+            conn.close()
     return _ATTENDANCE_IDENTITY_CACHE[key]
 
 
@@ -6561,31 +6531,23 @@ _PAYROLL_APPROVAL_IDENTITY_CACHE: dict = {}
 
 def _payroll_approval_id_is_identity() -> bool:
     """Detect the v2.0 identity key without mutating either schema."""
-    backend = os.getenv('APP_DB', 'duckdb').lower()
-    is_pg = backend in ('postgres', 'postgresql', 'pg')
-    schema = 'main'
-    if is_pg:
-        import db_backend
-        schema = db_backend.app_schema()
-    key = f"{backend}:{schema}"
+    import db_backend
+    schema = db_backend.app_schema()
+    key = schema
     if key not in _PAYROLL_APPROVAL_IDENTITY_CACHE:
-        if not is_pg:
+        conn = db_backend.connect()
+        try:
+            row = conn.execute(
+                "SELECT is_identity FROM information_schema.columns "
+                "WHERE table_schema = ? AND table_name = 'payroll_approvals' "
+                "AND column_name = 'approval_id'",
+                [schema],
+            ).fetchone()
+            _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
+        except Exception:
             _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = False
-        else:
-            import db_backend
-            conn = db_backend.connect()
-            try:
-                row = conn.execute(
-                    "SELECT is_identity FROM information_schema.columns "
-                    "WHERE table_schema = ? AND table_name = 'payroll_approvals' "
-                    "AND column_name = 'approval_id'",
-                    [schema],
-                ).fetchone()
-                _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = bool(row and str(row[0]).upper() == 'YES')
-            except Exception:
-                _PAYROLL_APPROVAL_IDENTITY_CACHE[key] = False
-            finally:
-                conn.close()
+        finally:
+            conn.close()
     return _PAYROLL_APPROVAL_IDENTITY_CACHE[key]
 
 

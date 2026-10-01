@@ -1,8 +1,9 @@
-"""Phase-2 service-layer cutover adapter (SRS v2.0 §14, Phase 2).
+"""SQL dialect adapter for PostgreSQL 17 (SRS v2.0 §14, Phase 2; Phase 6).
 
-Runs app.py's existing DuckDB-flavoured SQL against PostgreSQL 17 without
-touching the application's queries. It is a drop-in for the connection that
-``get_db()`` returns, preserving DuckDB semantics:
+Runs app.py's existing DuckDB-flavoured SQL against PostgreSQL without touching
+the application's queries. It is a drop-in for the connection that ``get_db()``
+returns, preserving the SQL semantics the v1.0-shaped code was written
+against:
 
 * ``?`` placeholders  -> psycopg ``%s``  (only when parameters are passed;
   a literal ``%`` in the SQL then also becomes ``%%``, as psycopg requires)
@@ -20,12 +21,16 @@ The Phase 0-1 work built the v2.0 target schema in ``public`` (from
 Phase 2 deliberately serves the *v1.0 data model* from a separate schema
 (``legacy``) so the unchanged app code runs on PostgreSQL today. Phase 5
 flips the production default to ``public`` when ``FLASK_ENV=production`` and
-``APP_DB_SCHEMA`` is omitted; development and compatibility tests retain the
-legacy fallback until the announced decommission.
+``APP_DB_SCHEMA`` is omitted; development and tests retain ``legacy``.
 
-Run the existing unit suite against PostgreSQL::
+DuckDB was decommissioned at Phase 6, so this module is no longer a backend
+switch — it is the only database adapter, and the SQL it translates is what the
+v1.0 code in ``app.py`` still emits. The "DuckDB-flavoured" wording throughout is
+therefore a statement about the SQL, not about a live backend.
 
-    APP_DB=postgres DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \\
+Run the existing unit suite::
+
+    DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \\
         python -m pytest tests/test_app.py -v
 
 The test harness calls :func:`reset_schema` before importing ``app`` so each

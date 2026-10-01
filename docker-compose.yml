@@ -65,7 +65,6 @@ services:
       # Required only to anonymise an employee (FR-USR); without it the
       # anonymisation routes refuse to run rather than use a weak mapping.
       ANONYMISATION_SALT: ${ANONYMISATION_SALT:-}
-      DB_FILE: /data/hrms.duckdb
       PORT: 10000
     depends_on:
       migrate:

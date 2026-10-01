@@ -1,5 +1,4 @@
 flask>=3.0
-duckdb>=1.0
 bcrypt>=4.0
 python-dotenv>=1.0
 flask-limiter>=3.0
@@ -10,7 +9,7 @@ APScheduler>=3.10
 sentry-sdk>=2.0
 reportlab>=4.0
 gunicorn>=22.0
-# ── Phase 0-1 migration tooling (DuckDB → Postgres) ──
+# ── PostgreSQL driver + migration tooling ──
 alembic>=1.13
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1
