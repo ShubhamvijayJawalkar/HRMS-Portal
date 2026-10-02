@@ -4776,6 +4776,15 @@ def regularization_api():
         [rid, emp_id, d, data['reason']]
     )
     conn.close()
+    # The employee-side half of the pair the approve/reject audit rows belong to. A
+    # regularization request is what authorises an attendance correction, so the
+    # request and the decision both belong on the record.
+    audit_log(
+        emp_id, 'REGULARIZATION_REQUEST',
+        f'Requested a correction for {d}',
+        entity='regularization_requests', entity_id=rid,
+        after={'emp_id': emp_id, 'request_date': str(d), 'status': 'Pending'},
+    )
     return jsonify({'message': 'Request submitted', 'id': rid}), 201
 
 
@@ -5052,6 +5061,12 @@ def cancel_import_job(job_id):
         return jsonify({
             'error': f"Job is {existing['status']} and can no longer be cancelled",
         }), 409
+    audit_log(
+        session['emp_id'], 'IMPORT_JOB_CANCEL',
+        f'Cancelled queued import job {job_id}',
+        entity='import_jobs', entity_id=job_id,
+        before={'status': 'pending'}, after={'status': job.get('status')},
+    )
     return jsonify(job), 200
 
 
@@ -5067,6 +5082,13 @@ def run_import_job(job_id):
     job = imports.dispatch_job(job_id)
     if not job:
         return jsonify({'error': 'Import job not found'}), 404
+    audit_log(
+        session['emp_id'], 'IMPORT_JOB_RUN',
+        f'Ran queued import job {job_id} on demand',
+        entity='import_jobs', entity_id=job_id,
+        after={'status': job.get('status'), 'imported': job.get('imported'),
+               'skipped': job.get('skipped')},
+    )
     return jsonify(job), 200
 
 
@@ -5159,10 +5181,36 @@ def assets_api():
         conn.close()
         return jsonify({'error': 'Employee not found or inactive'}), 400
     aid = _next_generated_id(conn, 'assets', 'asset_id')
-    conn.execute("INSERT INTO assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                 [aid, data['emp_id'], data['asset_type'], data.get('asset_tag'), data.get('brand'), data.get('model'), data.get('serial_number'),
-                  parse_date(data.get('issued_date'), datetime.now().date()), None, 'Issued', data.get('notes')])
+    conn.execute(
+        # An explicit column list. `assets` has eleven columns in this order on both
+        # schemas today, so a bare VALUES would work right up until someone adds one —
+        # the latent version of the goals and add_holiday defects.
+        'INSERT INTO assets (asset_id, emp_id, asset_type, asset_tag, brand, model, '
+        'serial_number, issued_date, return_date, status, notes) '
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Issued', ?)",
+        # Ten parameters for eleven columns: `status` is the SQL literal above, so
+        # it takes no parameter, but `return_date` is still a placeholder and gets
+        # its explicit None. Getting that count wrong is the very class of defect
+        # this edit exists to remove — the first version of this line had nine
+        # parameters for ten placeholders and raised on every call.
+        [aid, data['emp_id'], data['asset_type'], data.get('asset_tag'),
+         data.get('brand'), data.get('model'), data.get('serial_number'),
+         parse_date(data.get('issued_date'), datetime.now().date()),
+         None, data.get('notes')],
+    )
     conn.close()
+    # `status` is a literal rather than a parameter: an asset is created Issued, and
+    # saying so in the SQL is clearer than passing `'Issued'` and hoping the caller's
+    # dict cannot drift.
+    audit_log(
+        session['emp_id'], 'ASSET_ISSUE',
+        f'Issued {data["asset_type"]} asset {aid} to {data["emp_id"]}'
+        + (f' (tag {data["asset_tag"]})' if data.get('asset_tag') else ''),
+        entity='assets', entity_id=aid,
+        after={'emp_id': data['emp_id'], 'asset_type': data['asset_type'],
+               'asset_tag': data.get('asset_tag'), 'serial_number': data.get('serial_number'),
+               'status': 'Issued'},
+    )
     return jsonify({'message': 'Asset issued', 'id': aid}), 201
 
 
@@ -5171,8 +5219,39 @@ def assets_api():
 @admin_required
 def return_asset(aid):
     conn = get_db()
-    conn.execute("UPDATE assets SET return_date = ?, status = 'Returned' WHERE asset_id = ?", [datetime.now().date(), aid])
+    info = conn.execute(
+        "SELECT emp_id, asset_type, asset_tag, status, return_date FROM assets "
+        "WHERE asset_id = ?", [aid],
+    ).fetchone()
+    if not info:
+        conn.close()
+        return jsonify({'error': 'Asset not found'}), 404
+    if info[3] == 'Returned':
+        # Not a success. This used to update unconditionally and answer 200
+        # {"message": "Asset returned"} whether or not it returned anything — the
+        # always-200 lie, third sighting. A returned asset is a custody record:
+        # telling an admin it came back when it did not is how a laptop goes
+        # missing quietly.
+        conn.close()
+        returned_on = info[4].isoformat() if info[4] else 'an earlier date'
+        return jsonify({
+            'error': f'Asset was already returned on {returned_on}',
+            'status': 'Returned', 'return_date': returned_on,
+        }), 409
+    conn.execute(
+        "UPDATE assets SET return_date = ?, status = 'Returned' "
+        "WHERE asset_id = ? AND status <> 'Returned'",
+        [datetime.now().date(), aid],
+    )
     conn.close()
+    audit_log(
+        session['emp_id'], 'ASSET_RETURN',
+        f'Recorded return of {info[1]} asset {aid} from {info[0]}'
+        + (f' (tag {info[2]})' if info[2] else ''),
+        entity='assets', entity_id=aid,
+        before={'status': info[3], 'return_date': None},
+        after={'status': 'Returned'},
+    )
     return jsonify({'message': 'Asset returned'}), 200
 
 
@@ -7234,6 +7313,16 @@ def revoke_offboarding_workflow_access(offboard_id):
     if not row:
         return jsonify({'error': 'Offboarding workflow not found'}), 404
     revoked = revoke_offboarding_access(datetime.now(IST).date(), offboard_id=offboard_id)
+    # The nightly job does this on its own schedule; this route is the manual path,
+    # and a manual revocation of someone's access is exactly the event an
+    # investigation needs to place on a timeline.
+    audit_log(
+        session['emp_id'], 'OFFBOARDING_ACCESS_REVOKE',
+        f'Manual access-revocation pass for offboarding {offboard_id}: '
+        f'{revoked} employee(s) revoked',
+        entity='offboarding_workflow', entity_id=offboard_id,
+        after={'revoked': revoked, 'trigger': 'manual'},
+    )
     return jsonify({'message': 'Access revocation pass completed', 'revoked': revoked}), 200
 
 
@@ -7285,6 +7374,19 @@ def salary_api():
                   parse_date(data.get('effective_from'), datetime.now().date()),
                   parse_date(data.get('effective_to'))])
     conn.close()
+    # A salary structure is the input to every payroll run, so a change to one is
+    # the highest-value thing to be able to reconstruct afterwards. The amounts are
+    # deliberately NOT copied into the audit row: audit_log is retained for years and
+    # must not become a second, weaker copy of the payroll tables.
+    _from = parse_date(data.get('effective_from')) or datetime.now().date()
+    _to = parse_date(data.get('effective_to'))
+    audit_log(
+        session['emp_id'], 'SALARY_STRUCTURE_CREATE',
+        f'Created salary structure {sid} for {data["emp_id"]}',
+        entity='salary_structures', entity_id=sid,
+        after={'emp_id': data['emp_id'], 'effective_from': _from.isoformat(),
+               'effective_to': _to.isoformat() if _to else None},
+    )
     return jsonify({'message': 'Salary structure saved', 'id': sid}), 201
 
 
@@ -7456,6 +7558,17 @@ def payroll_runs_api():
     except Exception:
         conn.close()
         raise
+    audit_log(
+        session['emp_id'], 'PAYROLL_RUN_CREATE',
+        f'Created payroll run {rid} for {month}/{year}'
+        + (f' as an adjustment of run {adjustment_of_run_id}'
+           if adjustment_of_run_id else '')
+        + f' with {len(employees)} employee item(s)',
+        entity='payroll_runs', entity_id=rid,
+        after={'month': month, 'year': year, 'status': 'Draft',
+               'adjustment_of_run_id': adjustment_of_run_id,
+               'employee_count': len(employees)},
+    )
     return jsonify({
         'message': f'Payroll run created for {month}/{year}',
         'run_id': rid,
@@ -9649,6 +9762,13 @@ def break_approvals_api():
         [aid, emp_id, bt, shift_date, data.get('reason', '')]
     )
     conn.close()
+    audit_log(
+        emp_id, 'BREAK_APPROVAL_REQUEST',
+        f'Requested approval for a {bt} break on {shift_date}',
+        entity='break_approvals', entity_id=aid,
+        after={'emp_id': emp_id, 'break_type': bt, 'break_date': str(shift_date),
+               'status': 'Pending'},
+    )
     return jsonify({'message': 'Lunch break approval requested', 'approval_id': aid}), 201
 
 

@@ -1039,6 +1039,14 @@ def test_reviewing_a_break_twice_is_a_conflict_not_a_second_success(client):
             conn.execute('DELETE FROM break_approvals WHERE approval_id = ?', [aid])
             conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?',
                          [str(aid)])
+            # The approval notification too. Leaving it behind broke an unrelated
+            # test that reads EMP002's newest notification and expected its own — the
+            # fourth time a fixture in this file has leaked rows into whatever ran
+            # next, which is why the cleanup helpers exist at all.
+            conn.execute(
+                "DELETE FROM notifications WHERE type = 'BREAK_APPROVAL_APPROVED' "
+                "AND emp_id = 'EMP002'"
+            )
         finally:
             conn.close()
 
@@ -1287,6 +1295,139 @@ def test_holiday_creation_is_audited(client):
             conn.close()
 
 
+def test_returning_an_asset_twice_is_a_conflict_not_a_second_success(client):
+    """The always-200 lie, third sighting — and the one with a custody consequence.
+
+    `return_asset` updated unconditionally and answered 200 `{"message": "Asset
+    returned"}` whether or not it returned anything, including for an id that does
+    not exist. An asset is a custody record: an admin who is told a laptop came back
+    when it did not is how one goes missing quietly.
+    """
+    _set_admin_session(client, 99171)
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM assets WHERE asset_id IN (?, ?)', [991710, 991711])
+        conn.execute(
+            "INSERT INTO assets (asset_id, emp_id, asset_type, asset_tag, issued_date, "
+            "status) VALUES (991710, 'EMP002', 'Laptop', 'LT-1', ?, 'Issued')",
+            [datetime.now().date()],
+        )
+        conn.execute(
+            "INSERT INTO assets (asset_id, emp_id, asset_type, asset_tag, issued_date, "
+            "status) VALUES (991711, 'EMP002', 'Monitor', 'MN-1', ?, 'Returned')",
+            [datetime.now().date()],
+        )
+    finally:
+        conn.close()
+    try:
+        first = client.post('/api/assets/991710/return')
+        assert first.status_code == 200, first.get_json()
+
+        again = client.post('/api/assets/991710/return')
+        assert again.status_code == 409, again.get_json()
+        assert again.get_json()['status'] == 'Returned'
+        assert again.get_json()['return_date'], 'the 409 must say when it was returned'
+
+        # An asset that was never issued out is a 404, not a success.
+        ghost = client.post('/api/assets/991711/return')
+        assert ghost.status_code == 409, ghost.get_json()
+        missing = client.post('/api/assets/99999999/return')
+        assert missing.status_code == 404, missing.get_json()
+
+        conn = get_db()
+        try:
+            rows = [r[0] for r in conn.execute(
+                "SELECT action FROM audit_log WHERE CAST(entity_id AS VARCHAR) IN "
+                "('991710', '991711') ORDER BY log_id"
+            ).fetchall()]
+        finally:
+            conn.close()
+        # One ASSET_RETURN, for the one call that actually returned something.
+        assert rows.count('ASSET_RETURN') == 1, rows
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM assets WHERE asset_id IN (991710, 991711)')
+            conn.execute(
+                "DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) IN "
+                "('991710', '991711')"
+            )
+        finally:
+            conn.close()
+
+
+def _audit_actions(*entity_ids):
+    conn = get_db()
+    try:
+        return {
+            eid: [r[0] for r in conn.execute(
+                'SELECT action FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ? '
+                'ORDER BY log_id', [str(eid)],
+            ).fetchall()]
+            for eid in entity_ids
+        }
+    finally:
+        conn.close()
+
+
+def test_payroll_asset_and_salary_writes_are_audited_without_copying_the_amounts(client):
+    """FR-AUD-01 on the three highest-value writes in the product.
+
+    Salary amounts are deliberately **not** copied into the audit row. The log is
+    retained for years and must not become a second, weaker copy of the payroll
+    tables — the audit records *that* a structure changed and for which period, and
+    `salary_structures` remains the record of what it is.
+    """
+    _set_admin_session(client, 99172)
+    run = client.post('/api/payroll-runs', json={'month': 6, 'year': 2033})
+    assert run.status_code == 201, run.get_json()
+    rid = run.get_json()['run_id']
+
+    asset = client.post('/api/assets', json={
+        'emp_id': 'EMP002', 'asset_type': 'Laptop', 'asset_tag': 'LT-9',
+    })
+    assert asset.status_code == 201, asset.get_json()
+
+    salary = client.post('/api/salary-structures', json={
+        'emp_id': 'EMP002', 'basic': 50000, 'hra': 20000,
+    })
+    assert salary.status_code == 201, salary.get_json()
+
+    aid = asset.get_json()['id']
+    sid = salary.get_json()['id']
+    actions = _audit_actions(rid, aid, sid)
+    conn = get_db()
+    try:
+        salary_rows = conn.execute(
+            'SELECT "after" FROM audit_log WHERE action = ? ORDER BY log_id DESC LIMIT 1',
+            ['SALARY_STRUCTURE_CREATE'],
+        ).fetchone()
+    finally:
+        conn.close()
+    try:
+        assert 'PAYROLL_RUN_CREATE' in actions[rid], actions
+        assert 'ASSET_ISSUE' in actions[aid], actions
+        assert 'SALARY_STRUCTURE_CREATE' in actions[sid], actions
+
+        after = json.loads(salary_rows[0])
+        assert after['emp_id'] == 'EMP002', after
+        # The amounts must NOT be in the audit trail.
+        assert 'basic' not in after and 'hra' not in after, after
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM payroll_items WHERE run_id = ?', [rid])
+            conn.execute('DELETE FROM payroll_runs WHERE run_id = ?', [rid])
+            conn.execute('DELETE FROM assets WHERE asset_tag = ?', ['LT-9'])
+            conn.execute('DELETE FROM salary_structures WHERE struct_id = ?', [sid])
+            conn.execute(
+                "DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) IN (?, ?, ?)",
+                [str(rid), str(aid), str(sid)],
+            )
+        finally:
+            conn.close()
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
@@ -1299,13 +1440,19 @@ def test_holiday_creation_is_audited(client):
 #: state had no test either way, and the absence of a test read as "nothing to
 #: check", which is how an unevidenced IMPLEMENTED row survived.
 KNOWN_UNAUDITED_MUTATIONS = {
-    # `mark_notifications_read` is a deliberate exemption, not an oversight: it is a
-    # read receipt on the caller's own notifications, and a row per click would be
-    # noise that makes the real entries harder to find. The other 14 are gaps.
+    # Every mutating handler now writes an audit row except one, and that one is a
+    # deliberate exemption rather than an oversight.
+    #
+    # `mark_notifications_read` is a read receipt on the caller's **own**
+    # notifications. Auditing it would write a row per click for the life of the
+    # table, and noise that makes the real entries harder to find is the opposite of
+    # what an audit trail is for. The SRS's "every mutating action" is a reason to
+    # record decisions about the business, not to log a user clearing their own badge.
+    #
+    # It is kept in this list rather than deleted so the exemption stays *visible*
+    # and reviewed: a name here is a claim someone has to re-justify, whereas an
+    # absence is indistinguishable from having been forgotten.
     'mark_notifications_read',
-    'regularization_api', 'cancel_import_job', 'run_import_job', 'assets_api',
-    'return_asset', 'revoke_offboarding_workflow_access', 'salary_api',
-    'payroll_runs_api', 'break_approvals_api',
 }
 
 

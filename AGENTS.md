@@ -1808,3 +1808,40 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
 - 3 new tests, one of which reads the canonical schema. Unit **256 passed / 1
   skipped**, browser **22/22**, Redis **10/10**, v2.0 gates **109/109 GET + 55/55
   write**.
+
+## FR-AUD-01 Group 3: every mutating handler audits but one
+- **The audit pass is finished: 20 → 1.** Every POST/PUT/PATCH/DELETE handler in
+  `app.py` now writes an audit row except one **deliberate exemption**, so the SRS's
+  "every mutating action" holds in substance. `FR-AUD-01` stays `PARTIAL` for a
+  different reason, stated in the row: the SRS asks for the row to be written **via
+  the transactional outbox (CC-09)** and `audit_log()` writes straight to the table.
+  That is architectural and still open.
+- **The exemption is `mark_notifications_read`, and it stays on the ratchet list
+  rather than being deleted.** A name on that list is a claim somebody has to
+  re-justify; an absence is indistinguishable from having been forgotten. That is the
+  whole difference between a documented decision and a drift nobody notices.
+- **`return_asset` had the always-200 lie for the third time**, and it is the one with
+  a custody consequence: it updated unconditionally and answered
+  `200 {"message": "Asset returned"}` whether or not it returned anything, *including
+  for an id that does not exist*. An administrator who is told a laptop came back when
+  it did not is how one goes missing quietly. Now 404 for unknown, 409 naming **the
+  date it was already returned**, conditional write.
+- **Nine more handlers audited**: payroll run creation, asset issue, salary
+  structure, import job cancel and on-demand run, the manual offboarding
+  access-revocation pass, the break-approval request, and the regularization request.
+- **Salary amounts are deliberately *not* copied into the audit row**, and a test
+  asserts that. `audit_log` is retained for years; a second, weaker copy of the
+  payroll tables inside it would eventually drift from the real figures and then be
+  quoted as authoritative. The audit records *that* a structure changed and for which
+  period; `salary_structures` remains the record of what it is.
+- **Two bugs of my own in this slice, both caught within a minute, both recorded:**
+  - the `assets` insert I wrote to *replace* a bare `VALUES` had **nine parameters for
+    ten placeholders**, because `return_date` is still a placeholder and only
+    `status` is a literal. That is the exact class of defect the edit existed to
+    remove, committed while fixing it.
+  - a break test leaked a `BREAK_APPROVAL_APPROVED` notification, which broke an
+    unrelated test that reads EMP002's newest notification and expected its own. The
+    **fourth fixture leak in this file**, and the reason the cleanup helpers exist.
+- 2 new tests. Unit **258 passed / 1 skipped**, browser **22/22**, Redis **10/10**, v2.0
+  gates **109/109 GET + 55/55 write**, run sequentially — the earlier parallel run is
+  the documented cause of two spurious browser failures.
