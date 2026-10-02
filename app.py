@@ -2629,7 +2629,25 @@ def _wants_json():
     lives under that prefix (checked: every ``/api/`` rule returns JSON or a
     file), so widening the test to the path is safe and makes the answer depend on
     *what was asked for* rather than on *how it was encoded*.
+
+    The ``Accept`` header is honoured too, and that is the SRS's own wording for
+    FR-AUTH-07: "unauthenticated requests get 302 (page) or 401 (API, **Accept:
+    application/json**)". It was missing, so ``GET /dashboard`` with
+    ``Accept: application/json`` answered **302 to the login page** — an HTML body
+    for a client that asked for JSON. That is the identical failure the multipart
+    case above was fixed for: the client follows the redirect and receives a page it
+    cannot parse, with a success-looking status. The matrix row claimed the correct
+    behaviour while the handler did the opposite for the exact request the
+    requirement names.
+
+    Order matters: an explicit request for anything other than HTML wins, so a
+    browser sending a combined ``Accept`` header that happens to mention JSON among
+    other types is still treated as a page request.
     """
+    accept = (request.headers.get('Accept') or '').lower()
+    if accept and 'text/html' not in accept:
+        if 'application/json' in accept or accept.strip() == '':
+            return True
     return bool(request.is_json) or request.path.startswith('/api/')
 
 
@@ -3749,9 +3767,31 @@ def dependents_api():
 @app.route('/api/dependents/<int:did>', methods=['DELETE'])
 @login_required
 def delete_dependent(did):
+    # The name is read before the delete so the audit row can name *whose* record
+    # went. `dependents` is classified as PII by `policy.PII_FIELDS` — a third party
+    # with no statutory retention of their own — so erasing one is exactly the kind
+    # of irreversible change that must not be invisible. It did not audit, and the
+    # row is gone immediately after, so there was no way to find out afterwards.
     conn = get_db()
-    conn.execute("DELETE FROM dependents WHERE dependent_id = ? AND emp_id = ?", [did, session['emp_id']])
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT name, relationship FROM dependents "
+            "WHERE dependent_id = ? AND emp_id = ?", [did, session['emp_id']],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Dependent not found'}), 404
+        conn.execute(
+            "DELETE FROM dependents WHERE dependent_id = ? AND emp_id = ?",
+            [did, session['emp_id']],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'DEPENDENT_DELETE',
+        f'Deleted dependent {row[0]} ({row[1]}) of {session["emp_id"]}',
+        entity='dependents', entity_id=did,
+        before={'name': row[0], 'relationship': row[1]},
+    )
     return jsonify({'message': 'Deleted'}), 200
 
 
@@ -4698,26 +4738,45 @@ def regularization_api():
 @admin_required
 def approve_regularization(rid):
     conn = get_db()
-    row = conn.execute(
-        "SELECT emp_id, request_date, status FROM regularization_requests WHERE request_id = ?",
-        [rid],
-    ).fetchone()
-    if row and row[2] == 'Pending':
+    try:
+        row = conn.execute(
+            "SELECT emp_id, request_date, status FROM regularization_requests "
+            "WHERE request_id = ?", [rid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Regularization request not found'}), 404
+        if row[2] != 'Pending':
+            # The decision has already been made, so there is nothing to approve.
+            # This used to fall through to `200 {"message": "Approved"}`, which
+            # made a no-op indistinguishable from a real approval — and the same
+            # shape on the reject route answered "Rejected" for a request that was
+            # still sitting there as Approved. A client checking `status_code`
+            # would have believed a decision it had not made.
+            return jsonify({
+                'error': f'Request is already {row[2].lower()}',
+                'status': row[2],
+            }), 409
+        # Conditional on `status = 'Pending'`, so two approvers racing give one
+        # winner and one 409 rather than two successes.
         conn.execute(
-            "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, updated_at = ? "
-            "WHERE request_id = ? AND status = 'Pending'",
-            [session['emp_id'], datetime.now(), rid]
+            "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, "
+            "updated_at = ? WHERE request_id = ? AND status = 'Pending'",
+            [session['emp_id'], datetime.now(), rid],
         )
+    finally:
         conn.close()
-        # FR-JOB-01/FR-REG-03: a later approved correction recomputes only
-        # the affected employee/date, rather than waiting for the next night.
-        try:
-            finalize_attendance_for_date(row[1], employee_ids=[row[0]])
-        except Exception as exc:
-            logger.warning('attendance recompute after regularization failed: %s', exc)
-        return jsonify({'message': 'Approved'}), 200
-    conn.close()
-    return jsonify({'message': 'Approved'}), 200
+    audit_log(
+        session['emp_id'], 'REGULARIZATION_APPROVE',
+        f'Approved regularization request {rid} for {row[0]}', entity='regularization_requests',
+        entity_id=rid, before={'status': 'Pending'}, after={'status': 'Approved'},
+    )
+    # FR-JOB-01/FR-REG-03: a later approved correction recomputes only
+    # the affected employee/date, rather than waiting for the next night.
+    try:
+        finalize_attendance_for_date(row[1], employee_ids=[row[0]])
+    except Exception as exc:
+        logger.warning('attendance recompute after regularization failed: %s', exc)
+    return jsonify({'message': 'Approved', 'status': 'Approved'}), 200
 
 
 @app.route('/api/v1/regularization/<int:rid>/reject', methods=['POST'])
@@ -4725,12 +4784,31 @@ def approve_regularization(rid):
 @admin_required
 def reject_regularization(rid):
     conn = get_db()
-    conn.execute(
-        "UPDATE regularization_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE request_id = ? AND status = 'Pending'",
-        [session['emp_id'], datetime.now(), rid]
+    try:
+        row = conn.execute(
+            "SELECT emp_id, request_date, status FROM regularization_requests "
+            "WHERE request_id = ?", [rid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Regularization request not found'}), 404
+        if row[2] != 'Pending':
+            return jsonify({
+                'error': f'Request is already {row[2].lower()}',
+                'status': row[2],
+            }), 409
+        conn.execute(
+            "UPDATE regularization_requests SET status = 'Rejected', approved_by = ?, "
+            "updated_at = ? WHERE request_id = ? AND status = 'Pending'",
+            [session['emp_id'], datetime.now(), rid],
+        )
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'REGULARIZATION_REJECT',
+        f'Rejected regularization request {rid} for {row[0]}', entity='regularization_requests',
+        entity_id=rid, before={'status': 'Pending'}, after={'status': 'Rejected'},
     )
-    conn.close()
-    return jsonify({'message': 'Rejected'}), 200
+    return jsonify({'message': 'Rejected', 'status': 'Rejected'}), 200
 
 
 
@@ -8368,16 +8446,26 @@ def download_document(did):
 @login_required
 def delete_document(did):
     conn = get_db()
-    row = conn.execute("SELECT emp_id, file_path FROM documents WHERE doc_id = ?", [did]).fetchone()
+    row = conn.execute("SELECT emp_id, name, category, file_path FROM documents WHERE doc_id = ?", [did]).fetchone()
     actor = _lifecycle_actor()
     if not row or not _can_access_document(actor, row[0], write=True):
         conn.close()
         return jsonify({'error': 'Not found'}), 404
     conn.execute("DELETE FROM documents WHERE doc_id = ?", [did])
     conn.close()
-    filepath = os.path.join(UPLOAD_FOLDER, os.path.basename(row[1]))
+    filepath = os.path.join(UPLOAD_FOLDER, os.path.basename(row[3]))
     if os.path.exists(filepath):
         os.remove(filepath)
+    # Irreversible: the row *and* the file are gone, and a document can be payroll
+    # evidence or an identity document. The download of a document was audited
+    # (FR-DOC-03) while the deletion was not, which is the wrong way round — reading
+    # is reversible by definition and deleting is not.
+    audit_log(
+        session['emp_id'], 'DOCUMENT_DELETE',
+        f'Deleted document {did} ({row[1]}, {row[2]}) belonging to {row[0]}',
+        entity='documents', entity_id=did,
+        before={'name': row[1], 'category': row[2], 'owner_emp_id': row[0]},
+    )
     return jsonify({'message': 'Document deleted'}), 200
 
 

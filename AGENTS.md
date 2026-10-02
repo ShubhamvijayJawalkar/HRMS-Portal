@@ -1621,3 +1621,74 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   `alembic upgrade head` has to have run; CI does it first for exactly this reason,
   and a local failure in `test_a_boolean_column_name_does_not_rewrite_another_tables_
   column` is that, not a regression.
+
+## Auditing the IMPLEMENTED rows (`FR-AUTH-07`, `FR-REG-03`, `FR-AUD-01`, `FR-AUTH-12`, `FR-USR-06`)
+- **The premise, and why it was worth doing instead of FR-AUTH-01.** Three
+  requirements in a row (FR-AUTH-11, FR-AUTH-08, FR-AUTH-02) were recorded as done
+  or missing and were not. None was found by reading the code for *its own*
+  requirement; each was found by reading a handler for a *neighbouring* one. So the
+  next slice read the handlers of rows that already claimed `IMPLEMENTED`, and that
+  is where it found four more.
+- **FR-AUTH-07 — the row described behaviour the handler did not have.** The note
+  said "unauthenticated gets 302 for a page and 401 for JSON". `_wants_json()`
+  checked `request.is_json` and the `/api/` path but **not the `Accept` header the
+  SRS names**, so `GET /dashboard` with `Accept: application/json` answered **302 to
+  the login page** — HTML for a caller that asked for JSON, which follows the
+  redirect and receives a page it cannot parse. That is the *identical* failure the
+  FR-HOL-01 slice fixed for multipart uploads, one trigger earlier, and it was fixed
+  by widening the same predicate without noticing the second trigger. Now honoured,
+  with an explicit `Accept` rule that keeps a combined `text/html,application/json`
+  header on the redirect path so a browser mentioning JSON is unaffected.
+- **FR-REG-03 — the success return sat outside the `if` that did the work.** Both
+  approve and reject ended with `return jsonify({'message': 'Approved'}), 200`
+  *after* the conditional, so every outcome was a 200 with a success message:
+  approving a request that did not exist, approving one already decided, and — the
+  one that actually mattered — **rejecting an already-approved request, which
+  answered `{"message": "Rejected"}` while the row still said Approved.** A client
+  checking `status_code` believed a decision it had not made, on the one action where
+  believing it is dangerous. This is the same class as the `jsonify(body, status)`
+  bug from FR-TKT-03: a success response that is not a success. Now 404 for unknown,
+  409 naming the state found, conditional write, before/after audit.
+- **FR-AUD-01 downgraded IMPLEMENTED → PARTIAL**, because "every mutating action"
+  was false and the matrix said otherwise. Two of the gaps were the striking ones:
+  **document *deletion* wrote no audit row while document *download* did** — the
+  wrong way round, since deleting removes the row *and* the file — and **deleting a
+  dependent erased `policy`-classified PII with no trail at all**. Both fixed. The
+  remaining 20 are named in the row rather than glossed.
+- **The instrument is a ratchet, and encoding the known gap is the point.** An AST
+  sweep of `app.py` finds every mutating handler that cannot reach `audit_log`, with
+  one level of delegation resolved. Without that resolution the sweep reports
+  `block_user` and `approve_holiday_optin` as unaudited — both delegate to helpers
+  that *do* audit — and a ratchet full of false positives is a ratchet nobody
+  trusts. The test asserts the found set is a **subset** of a recorded list (so a new
+  unaudited route fails the build) *and* that no recorded name is stale (so fixing a
+  handler forces the list and the matrix row to be updated). The previous state had
+  no test either way, and **the absence of a test read as "nothing to check"**, which
+  is precisely how an unevidenced `IMPLEMENTED` row survived.
+- **FR-AUTH-12's note was wrong in the safest possible direction.** It called the
+  mechanism "double-submit", which specifically means the comparison source is a
+  cookie. It is a **per-session synchroniser token** instead, and enforcement is
+  **app-wide** rather than scoped to `/api/*` — both *stricter* than the SRS asks, so
+  the verdict stands and the description did not. The `/api/preboarding/*` exemption
+  was checked rather than assumed: those requests carry a signed, expiring token of
+  their own (`URLSafeTimedSerializer`, `max_age`), so they cannot be forged
+  cross-site.
+- **FR-USR-06 names "bank details" among the identifiers to scrub, and no such
+  column exists** anywhere in the schema — so that clause is vacuous *today* and
+  would stay vacuous silently forever. A test now fails if a personal-looking column
+  is ever added to `users` without being taught to `anonymise.ERASED_FIELDS`. The
+  same test would have caught the three times this file's cleanup helper was wrong
+  about which tables reference an employee, had it existed for those. The name
+  replacement is also a recorded deviation: the SRS says `Former Employee #id`, the
+  code uses a salted HMAC pseudonym (`ANON-<16 hex>`).
+- **Two notes corrected that were not defects but would have misled the next reader**
+  — the CSRF mechanism above, and FR-AUD-01's "never purged" (verified true: no
+  `DELETE FROM audit_log` in the app) alongside its "via the transactional outbox"
+  (verified **false**: `audit_log()` writes straight to the table). A matrix is only
+  worth having if it is corrected when the code turns out to disagree with it.
+- 4 new tests, including the Accept-header matrix (9 cases, so the combinations are
+  asserted and not just the two the SRS names). Unit **249 passed / 1 skipped**,
+  browser green. Matrix is now **58 IMPLEMENTED / 37 PARTIAL / 8 NOT_STARTED /
+  1 RETIRED** — *down* one, which is the correct direction for an audit.
+- **What is left, and it is the obvious next slice:** auditing the 20 remaining
+  mutating handlers, and routing the audit row through the outbox as the SRS asks.

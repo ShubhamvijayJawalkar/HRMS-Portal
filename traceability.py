@@ -49,7 +49,15 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-USR-06': ('H', 'C', 'IMPLEMENTED', ('/api/users/<emp_id>/anonymise',),
                   'Purge replaced by anonymisation: a dry-run plan, a required salt, '
                   'and an audit history scrubbed by value substitution. Trade-offs '
-                  '(emp_id kept, free text left) are recorded in docs/ANONYMISATION.md §8.'),
+                  '(emp_id kept, free text left) are recorded in docs/ANONYMISATION.md §8. '
+                  'Two deviations found by auditing this row against the requirement text. '
+                  'The SRS spells the replacement as name -> "Former Employee #id"; the code '
+                  'substitutes a salted HMAC pseudonym (ANON-<16 hex>), which is stable per '
+                  'employee without restating an identifier in every row. And the SRS names '
+                  'bank details among the identifiers to scrub - no bank or account column '
+                  'exists anywhere in the schema, so that clause is vacuous today; a test now '
+                  'fails if a personal-looking column is ever added without being taught to '
+                  'the eraser.'),
     'FR-USR-06a': ('H', 'N', 'IMPLEMENTED', ('/api/anonymisation/<int:request_id>/confirm',),
                    'Two-person state machine proposed -> confirmed -> applied; the '
                    'confirmer must be a different user, and only an archived account qualifies.'),
@@ -129,8 +137,17 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'logout - login and audits the action.'),
     'FR-AUTH-06': ('M', 'R', 'IMPLEMENTED', ('/',), 'Redirects by session state.'),
     'FR-AUTH-07': ('M', 'N', 'IMPLEMENTED', ('/dashboard',),
-                   'Admin vs self dashboard chosen by policy.sees_admin_surface(); '
-                   'unauthenticated gets 302 for a page and 401 for JSON.'),
+                   'Admin vs self dashboard chosen by policy.sees_admin_surface(). '
+                   'Unauthenticated gets 302 for a page and 401 for JSON - and the '
+                   'Accept header the SRS names is now honoured, so this row was '
+                   'previously describing behaviour the handler did not have: '
+                   '_wants_json checked is_json and the /api/ path but not Accept, so '
+                   'GET /dashboard with Accept: application/json answered 302 to the '
+                   'login page - HTML for a caller that asked for JSON, which then '
+                   'follows the redirect and cannot parse what it got. Same failure the '
+                   'multipart case was fixed for, one trigger earlier. A combined Accept '
+                   'still redirects, so a browser mentioning JSON among other types is '
+                   'unaffected.'),
     'FR-AUTH-08': ('M', 'N', 'IMPLEMENTED', ('/api/forgot-password', '/reset-password'),
                    'Always 202 with the SRS\'s own sentence and never a token, so the '
                    'request has nothing to compare between a real and an unknown '
@@ -197,9 +214,17 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    '(so it cannot be used to find out who is protected) and writes a '
                    'before/after audit row. A mandatory role cannot disable its own factor.'),
     'FR-AUTH-12': ('M', 'C', 'IMPLEMENTED', ('/api/csrf-token',),
-                   'Double-submit on every mutating /api request; a fetch wrapper '
-                   'attaches the header and native forms carry the hidden field. '
-                   'Asserted end to end with server-side sessions too.'),
+                   'A per-session synchroniser token, compared with hmac.compare_digest '
+                   'on every mutating request. Note the shape differs from the SRS, which '
+                   'names "a csrf_token cookie plus X-CSRF-Token header (double-submit)": '
+                   'the token lives in the session rather than in a separate cookie, and '
+                   'enforcement is app-wide rather than scoped to /api/* - both stricter '
+                   'than asked, and session storage is the stronger of the two patterns. '
+                   'An HTML response gets a script that attaches the header to fetch, and '
+                   'native forms carry a hidden field. /api/preboarding/* is exempt because '
+                   'those requests authenticate with a signed, expiring token of their own '
+                   'and cannot be forged cross-site. Asserted end to end with server-side '
+                   'sessions too.'),
     'FR-AUTH-13': ('H', 'N', 'PARTIAL', ('/api/credentials',),
                    'Restricted by the permission policy and no longer returns '
                    'passwords or hashes. Missing the 5-minute re-authentication and '
@@ -273,8 +298,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   '"a specific corrected time is required" rule is not enforced: a '
                   'reason-only request is accepted.'),
     'FR-REG-03': ('H', 'C', 'IMPLEMENTED', ('/api/regularization/<int:rid>/approve',),
-                  'Approval writes the corrected time and triggers the FR-JOB-01 '
-                  'recompute for that day.'),
+                  'Approval writes the corrected time, is conditional on status = '
+                  'Pending, and triggers the FR-JOB-01 recompute for that employee and '
+                  'date. This row was IMPLEMENTED with a note mentioning none of that, and '
+                  'reading the handler found every outcome was a 200: the success return '
+                  'sat outside the if that did the work, so approving a non-existent '
+                  'request, approving one already decided, and rejecting an '
+                  'already-approved request all answered 200 - and the rejection answered '
+                  '{"message": "Rejected"} while the row still said Approved, so a client '
+                  'checking status_code believed a decision it had not made. Now a 404 for '
+                  'an unknown request and a 409 naming the state found. Neither route '
+                  'audited anything either, so an attendance correction that feeds payroll '
+                  'left no trail; both now write a before/after row.'),
     'FR-REG-04': ('M', 'N', 'NOT_STARTED', (), 'No regularization Excel export.'),
 
     # ── FR-LEA: leave ───────────────────────────────────────────────────
@@ -565,10 +600,26 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'async job for ranges beyond a month or 200 employees.'),
 
     # ── FR-AUD: audit ───────────────────────────────────────────────────
-    'FR-AUD-01': ('H', 'C', 'IMPLEMENTED', ('/api/audit-log',),
-                  'actor/action/entity/entity_id/before/after/ip/request_id/created_at on '
-                  'every mutating action, including from a scheduler thread (which used '
-                  'to raise and be swallowed, so those rows never existed).'),
+    'FR-AUD-01': ('H', 'C', 'PARTIAL', ('/api/audit-log',),
+                  'actor/action/entity/entity_id/before/after/ip/request_id/created_at, '
+                  'written from a scheduler thread without raising (which it used to, and '
+                  'its own except swallowed it, so those rows never existed), and the log is '
+                  'never purged by the application. Downgraded from IMPLEMENTED by the audit '
+                  'pass, which found "every mutating action" was false. Fixed here: '
+                  'regularization approve/reject returned 200 whatever happened - including '
+                  '{"message": "Rejected"} for a request still Approved - and audited nothing; '
+                  'document *deletion* wrote no row while document *download* did, which is '
+                  'backwards, since deleting removes the row and the file; and deleting a '
+                  'dependent erased classified PII with no trail. Still unaudited, by an AST '
+                  'sweep of every mutating handler with delegation resolved: dependents_api '
+                  '(POST), documents_api (POST), add_holiday, mark_notifications_read, '
+                  'regularization_api (POST), cancel_import_job, run_import_job, assets_api, '
+                  'return_asset, revoke_offboarding_workflow_access, salary_api, '
+                  'payroll_runs_api, send_notification_email, start_break, end_break, '
+                  'break_approvals_api, approve_break, reject_break, admin_dispose_break, '
+                  'admin_outbox_dispatch. A ratchet test holds that list so it can only '
+                  'shrink. Separately, the SRS asks for the row to be written *via the '
+                  'transactional outbox* (CC-09) and it is written straight to audit_log.'),
 }
 
 

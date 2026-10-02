@@ -924,6 +924,304 @@ def test_import_job_can_be_run_on_demand(client):
 
 # ── FR-USR two-person anonymisation ────────────────────────────────────────
 
+#: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
+#: delegation resolved (a handler counts as audited if it calls `audit_log` directly
+#: or calls a module-level function that does). FR-AUD-01 says "every mutating
+#: action"; it is not true yet, and this list is the honest statement of the gap.
+#:
+#: This is a **ratchet**, not a target. It asserts the unaudited set is a *subset* of
+#: this list, so it fails if a new mutating route is added without an audit row, and
+#: it does not fail if one of these is fixed — fixing an entry means deleting it here,
+#: which shows up in the diff. Encoding the known gap is the point: the previous
+#: state had no test either way, and the absence of a test read as "nothing to
+#: check", which is how an unevidenced IMPLEMENTED row survived.
+KNOWN_UNAUDITED_MUTATIONS = {
+    'dependents_api', 'documents_api', 'add_holiday', 'mark_notifications_read',
+    'regularization_api', 'cancel_import_job', 'run_import_job', 'assets_api',
+    'return_asset', 'revoke_offboarding_workflow_access', 'salary_api',
+    'payroll_runs_api', 'send_notification_email', 'start_break', 'end_break',
+    'break_approvals_api', 'approve_break', 'reject_break',
+    'admin_dispose_break', 'admin_outbox_dispatch',
+}
+
+
+def _mutating_handlers_without_an_audit_row():
+    """Every POST/PUT/PATCH/DELETE route handler that cannot reach `audit_log`."""
+    import ast
+    import re
+
+    path = os.path.join(os.path.dirname(__file__), '..', 'app.py')
+    src = open(path, encoding='utf-8').read()
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    mutating = {'POST', 'PUT', 'DELETE', 'PATCH'}
+
+    def audits(fn, depth=0):
+        # One level of delegation: `block_user` reaches `audit_log` through
+        # `_set_user_access_status`, and without this the sweep reports it as
+        # unaudited — which is a false positive, and a ratchet full of false
+        # positives is a ratchet nobody trusts.
+        if depth > 1:
+            return False
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(getattr(node, 'func', None), 'id', None)
+            if name == 'audit_log':
+                return True
+            if name and name != fn.name and name in funcs and audits(funcs[name], depth + 1):
+                return True
+        return False
+
+    missing = set()
+    for node in funcs.values():
+        methods = set()
+        for dec in node.decorator_list:
+            text = ast.get_source_segment(src, dec) or ''
+            m = re.search(r'app\.route\((.*?)\)', text, re.S)
+            if m:
+                methods |= set(re.findall(r"'(POST|PUT|DELETE|PATCH)'", m.group(1)))
+        if methods & mutating and not audits(node):
+            missing.add(node.name)
+    return missing
+
+
+def test_no_new_mutating_route_can_skip_the_audit_log():
+    """FR-AUD-01's ratchet. See KNOWN_UNAUDITED_MUTATIONS."""
+    found = _mutating_handlers_without_an_audit_row()
+    new = sorted(found - KNOWN_UNAUDITED_MUTATIONS)
+    assert not new, (
+        f'these mutating handlers write no audit row and are not on the known-gap '
+        f'list: {new}. FR-AUD-01 requires an audit row per mutating action; either '
+        f'add one or, if it is deliberately unaudited, add the name to '
+        f'KNOWN_UNAUDITED_MUTATIONS so the gap stays visible.'
+    )
+    # A stale entry is its own failure: the handler was either fixed (so the entry
+    # should go and the matrix row should say so) or renamed, and a ratchet that
+    # silently keeps a dead name is a ratchet that stops tracking anything.
+    stale = sorted(KNOWN_UNAUDITED_MUTATIONS - found)
+    assert not stale, (
+        f'KNOWN_UNAUDITED_MUTATIONS lists handlers that now audit, or no longer '
+        f'exist: {stale}. Remove them and update the FR-AUD-01 row.'
+    )
+
+
+def test_irreversible_deletions_are_audited(client):
+    import app as app_module
+    """Deleting PII and payroll evidence left no trail; reading a document did.
+
+    Both routes were found by the audit pass rather than by a failing test, because
+    nothing asserted either way — the absence of a test read as "nothing to check".
+    The asymmetry is the finding: a document *download* writes a `DOCUMENT_DOWNLOAD`
+    row, while its *deletion* wrote nothing at all, even though deleting removes
+    both the row and the file from disk.
+
+    `dependents` is classified as PII by `policy.PII_FIELDS` and is a third party
+    with no statutory retention of their own, so a silent erase there is the more
+    serious of the two.
+    """
+    _set_admin_session(client, 99141)
+
+    # A dependent, deleted through the real route.
+    created = client.post('/api/dependents', json={'name': 'Dep To Delete',
+                                                    'relationship': 'Spouse'})
+    assert created.status_code == 201, created.get_json()
+    did = created.get_json()['id']
+    before = client.get('/api/dependents').get_json()
+    assert any(d['name'] == 'Dep To Delete' for d in before), before
+
+    removed = client.delete(f'/api/dependents/{did}')
+    assert removed.status_code == 200, removed.get_json()
+    conn = get_db()
+    try:
+        gone = conn.execute(
+            'SELECT 1 FROM dependents WHERE dependent_id = ?', [did]
+        ).fetchone()
+        row = conn.execute(
+            'SELECT details, "before" FROM audit_log WHERE action = ? '
+            'ORDER BY log_id DESC LIMIT 1', ['DEPENDENT_DELETE'],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert gone is None, 'the dependent was not actually deleted'
+    assert row is not None, 'deleting a PII record left no audit row'
+    # The audit row names *whose* record went, which is the point of reading it
+    # before the delete.
+    assert json.loads(row[1])['name'] == 'Dep To Delete', row
+
+    # Deleting it twice is a 404, not a second success.
+    assert client.delete(f'/api/dependents/{did}').status_code == 404
+
+    # And the document: the download audits, the deletion now does too.
+    _cleanup_document_fixture_rows()
+    path = os.path.join(app_module.UPLOAD_FOLDER, 'audit_probe.txt')
+    with open(path, 'wb') as handle:
+        handle.write(b'evidence')
+    conn = get_db()
+    try:
+        doc_id = _next_generated_id(conn, 'documents', 'doc_id')
+        conn.execute(
+            'INSERT INTO documents (doc_id, emp_id, name, category, file_path) '
+            "VALUES (?, 'EMP001', 'Salary Slip', 'Salary', ?)",
+            [doc_id, 'audit_probe.txt'],
+        )
+    finally:
+        conn.close()
+    try:
+        assert client.delete(f'/api/documents/{doc_id}').status_code == 200
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT "before" FROM audit_log WHERE action = ? '
+                'ORDER BY log_id DESC LIMIT 1', ['DOCUMENT_DELETE'],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'deleting a document left no audit row'
+        assert json.loads(row[0])['owner_emp_id'] == 'EMP001', row
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def _cleanup_document_fixture_rows():
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM documents WHERE name = 'Salary Slip'")
+        conn.execute("DELETE FROM audit_log WHERE action = 'DOCUMENT_DELETE'")
+        conn.execute("DELETE FROM dependents WHERE name = 'Dep To Delete'")
+        conn.execute("DELETE FROM audit_log WHERE action = 'DEPENDENT_DELETE'")
+    finally:
+        conn.close()
+
+
+def test_regularization_approval_is_a_real_state_machine_and_is_audited(client):
+    """FR-REG-03, and FR-AUD-01's claim that mutating actions are audited.
+
+    Both routes ended with `return jsonify({'message': 'Approved'}), 200` *outside*
+    the `if` that did the work, so **every** outcome was a 200 with a success
+    message: approving a request that did not exist, approving one already decided,
+    and — the worst — rejecting an already-approved request, which answered
+    `{"message": "Rejected"}` while the row still said Approved. A client checking
+    `status_code` believed a decision it had not made, and the one that mattered was
+    the rejection.
+
+    Neither route wrote an audit row either, so an attendance correction that feeds
+    payroll left no trail. FR-REG-03 was recorded IMPLEMENTED with a note that did
+    not mention either.
+    """
+    _set_admin_session(client, 99140)
+    conn = get_db()
+    try:
+        rid = _next_generated_id(conn, 'regularization_requests', 'request_id')
+        conn.execute(
+            'INSERT INTO regularization_requests (request_id, emp_id, request_date, '
+            "reason, status) VALUES (?, 'EMP002', '2026-03-02', 'state machine', 'Pending')",
+            [rid],
+        )
+    finally:
+        conn.close()
+    try:
+        ok = client.post(f'/api/regularization/{rid}/approve')
+        assert ok.status_code == 200, ok.get_json()
+        assert ok.get_json()['status'] == 'Approved'
+
+        # Deciding twice is a conflict, and it names the state it found.
+        again = client.post(f'/api/regularization/{rid}/approve')
+        assert again.status_code == 409, again.get_json()
+        assert again.get_json()['status'] == 'Approved'
+        assert 'already approved' in again.get_json()['error']
+
+        # A rejection of an approved request must not claim to have happened.
+        wrong_way = client.post(f'/api/regularization/{rid}/reject')
+        assert wrong_way.status_code == 409, wrong_way.get_json()
+
+        # A request that does not exist is a 404, not a success.
+        ghost = client.post('/api/regularization/99999999/approve')
+        assert ghost.status_code == 404, ghost.get_json()
+        ghost_reject = client.post('/api/regularization/99999999/reject')
+        assert ghost_reject.status_code == 404, ghost_reject.get_json()
+
+        # The record still says what actually happened.
+        conn = get_db()
+        try:
+            status = conn.execute(
+                'SELECT status FROM regularization_requests WHERE request_id = ?', [rid],
+            ).fetchone()[0]
+            # CAST because `audit_log.entity_id` is VARCHAR on the compatibility
+            # schema and BIGINT on v2.0, so a bare `entity_id = ?` only binds on
+            # one of them.
+            decisions = conn.execute(
+                'SELECT action FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ? '
+                'ORDER BY log_id', [str(rid)],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert status == 'Approved', status
+        assert ('REGULARIZATION_APPROVE',) in [tuple(r) for r in decisions], decisions
+        # The refused rejection wrote nothing, which is the point of the audit row.
+        assert ('REGULARIZATION_REJECT',) not in [tuple(r) for r in decisions], decisions
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM regularization_requests WHERE request_id = ?', [rid])
+            conn.execute("DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?", [str(rid)])
+        finally:
+            conn.close()
+
+
+def test_anonymisation_erases_every_personal_column_users_has(client):
+    """The SRS names the identifiers to scrub — name, email, phone, address and
+    **bank details** — and `ERASED_FIELDS` is a hand-written tuple, so a column
+    added to `users` later would sit there unscrubbed and nothing would say so.
+
+    That is not hypothetical bookkeeping. It is the same shape as the three tables
+    this file already had to discover rather than list (`user_sessions`,
+    `notifications`, `holiday_optins`, `notification_preferences` — each one raised a
+    foreign-key error and left a fixture behind). This test is the version of that
+    lesson for *this* module: it fails the moment a personal column appears that the
+    erasure list has not been taught about.
+
+    The allow-list is explicit rather than a regex, so a genuinely non-personal
+    column (`first_login`, `created_at`) does not have to be enumerated and a
+    personal one cannot slip past by not matching a pattern.
+    """
+    import anonymise
+
+    conn = get_db()
+    try:
+        columns = {r[0] for r in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'users'"
+        ).fetchall()}
+    finally:
+        conn.close()
+
+    # Columns on `users` that are deliberately kept, or are not personal data.
+    not_personal = {
+        'emp_id', 'role', 'department', 'designation', 'grade',
+        'date_of_joining', 'status', 'allow_login', 'allow_breaks',
+        'first_login', 'created_at', 'password',
+        'failed_attempts', 'last_failed_login', 'locked_until',
+        'is_super_admin', 'candidate_id', 'manager_emp_id',
+    }
+    # Anything that looks like it holds a personal identifier and is not erased.
+    personal_markers = ('name', 'email', 'phone', 'address', 'dob', 'birth',
+                        'bank', 'account', 'ifsc', 'pan', 'aadhaar', 'ssn',
+                        'contact', 'emergency', 'photo')
+    unaccounted = sorted(
+        c for c in columns - not_personal
+        if c not in anonymise.ERASED_FIELDS
+        and any(m in c.lower() for m in personal_markers)
+    )
+    assert not unaccounted, (
+        f'users has personal-looking columns the anonymiser does not erase: '
+        f'{unaccounted}. The SRS names bank details explicitly, so a new one must '
+        f'be added to anonymise.ERASED_FIELDS and to the UPDATE in apply() — or '
+        f'proved harmless here on purpose.'
+    )
+
+
 def test_anonymisation_refuses_without_a_strong_salt(client):
     """A missing/short salt would make the mapping guessable, so it stops."""
     import os
@@ -4930,6 +5228,47 @@ def test_admin_operations_endpoints_follow_the_directory_permission(client):
     finally:
         _clear_permission_rows('EMP931')
         _cleanup_user_contract_rows('EMP931')
+
+
+def test_a_json_caller_gets_a_401_and_a_browser_gets_a_redirect(client):
+    """FR-AUTH-07's exact wording, which the handler did not implement.
+
+    The SRS says an unauthenticated request gets "302 (page) or 401 (API, **Accept:
+    application/json**)" — it names the header. `_wants_json` checked `is_json` and
+    the `/api/` path but not `Accept`, so `GET /dashboard` with
+    `Accept: application/json` answered **302 to the login page**: HTML, for a
+    client that asked for JSON, which then follows the redirect and cannot parse
+    what it got. The same failure the multipart case was fixed for, one trigger
+    earlier.
+
+    The `Accept` cases are asserted explicitly rather than only the two SRS names,
+    because the interesting cases are the combinations: a browser that sends
+    `text/html, application/json` must still get the redirect, and `/api/` must
+    stay 401 whatever it is asked for.
+    """
+    with _fresh_client() as anon:
+        cases = [
+            ('/dashboard', {'Accept': 'application/json'}, 401),
+            ('/admin/users', {'Accept': 'application/json'}, 401),
+            ('/api/users', {'Accept': 'application/json'}, 401),
+            ('/api/documents', {'Accept': 'text/html'}, 401),
+            ('/dashboard', {'Accept': 'text/html'}, 302),
+            ('/dashboard', None, 302),
+            ('/dashboard', {'Accept': '*/*'}, 302),
+            # A combined header that mentions JSON is still a browser request.
+            ('/dashboard', {'Accept': 'text/html,application/json'}, 302),
+            # And the denial is JSON, not a redirect body.
+            ('/dashboard', {'Accept': 'application/json'}, 401),
+        ]
+        for path, headers, expected in cases:
+            resp = anon.get(path, headers=headers or {})
+            assert resp.status_code == expected, (
+                f'GET {path} with Accept={headers and headers.get("Accept")} '
+                f'answered {resp.status_code}, expected {expected}'
+            )
+        denial = anon.get('/dashboard', headers={'Accept': 'application/json'})
+        assert denial.is_json, 'the 401 must carry a JSON body'
+        assert denial.get_json() == {'error': 'Authentication required'}
 
 
 def test_department_grant_keeps_hr_department_access(client):
