@@ -8764,6 +8764,17 @@ SMTP_USER = os.getenv('SMTP_USER', '')
 SMTP_PASS = os.getenv('SMTP_PASS', '')
 EMAIL_FROM = os.getenv('EMAIL_FROM', 'noreply@hrms.com')
 
+#: `None` means "decide from the port": 465 is implicit TLS (SMTP_SSL), everything
+#: else is STARTTLS. Set explicitly for a provider that offers either on an
+#: unconventional port.
+_SSL_FLAG = os.getenv('SMTP_USE_SSL')
+SMTP_USE_SSL = None if _SSL_FLAG is None else _SSL_FLAG.strip().lower() in ('1', 'true', 'yes')
+
+#: A hung mail server must not hold the outbox dispatcher's thread open forever.
+#: Without this the dispatcher stalls on delivery and every subsequent event backs
+#: up behind it — a mail outage turning into an application outage.
+SMTP_TIMEOUT_SECONDS = float(os.getenv('SMTP_TIMEOUT_SECONDS', '15'))
+
 
 def email_configured() -> bool:
     """Is there a real transport behind `send_email`?
@@ -8808,9 +8819,22 @@ def send_email(to, subject, body):
         msg['To'] = to
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'html'))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
+        # **Implicit TLS on port 465**, STARTTLS everywhere else. Calling
+        # `starttls()` on a 465 connection fails, and port 465 is the default most
+        # providers document — so the transport is chosen from the port rather than
+        # hardcoded to STARTTLS. Setting `SMTP_USE_SSL` forces it either way for the
+        # providers that offer 465 on a different port.
+        implicit_tls = SMTP_USE_SSL if SMTP_USE_SSL is not None else (SMTP_PORT == 465)
+        smtp_cls = smtplib.SMTP_SSL if implicit_tls else smtplib.SMTP
+        with smtp_cls(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
+            if not implicit_tls:
+                server.starttls()
+            # Login only when credentials were supplied. An on-premise relay
+            # commonly accepts mail from the host with no authentication at all, and
+            # `login('', '')` against one raises — so a configuration that is
+            # perfectly valid upstream was refused here.
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         logger.info("Email sent to %s: %s", to, subject)
         return True

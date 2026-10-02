@@ -71,6 +71,16 @@ services:
       # its scheduler down if the lease is lost, so this bounds how long a crashed
       # leader's jobs go unowned.
       SCHEDULER_LEASE_TTL: ${SCHEDULER_LEASE_TTL:-60}
+      # Outbound mail. Password resets, welcome tokens and payroll notifications
+      # are all delivered through the outbox, so an unset SMTP_HOST now makes those
+      # events retry and dead-letter rather than falsely report delivered. Verify a
+      # real provider with `python scripts/check_smtp.py --to <an address you control>`.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-noreply@hrms.com}
+      SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-15}
       # Rate limits (SRS §10 / FR-AUTH-01). Per-employee once authenticated,
       # per-address while anonymous; 200/min is the shift-start burst target.
       DEFAULT_RATE_LIMIT: ${DEFAULT_RATE_LIMIT:-600 per minute}

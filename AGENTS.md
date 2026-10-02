@@ -2042,3 +2042,40 @@ for itself by finding a launch blocker that no amount of reading would have.
   file has listed the referencing tables wrongly three times. The cleanup now
   *discovers* every table with an `emp_id` column from `information_schema` (35 of
   them) instead of listing them, so the next person does not have to know.
+
+## SMTP: making a provider configuration that actually works
+Asked how to configure SMTP, which turned into three real defects in `send_email`
+that would have made a configuration matching a provider's own documentation fail.
+
+- **Port 465 was broken.** `send_email` called `server.starttls()` unconditionally.
+  That is correct for 587 and **raises for 465**, which is the implicit-TLS port
+  most providers document first — so a deployment configured exactly as instructed
+  would have failed every send, and the log would have shown a TLS error rather
+  than anything about the port. The transport is now selected from the port
+  (`SMTP_SSL` on 465, STARTTLS otherwise) with `SMTP_USE_SSL` to override.
+- **An unauthenticated relay was refused.** `server.login(SMTP_USER, SMTP_PASS)`
+  ran unconditionally, and `login('', '')` against an open relay raises. An on-prem
+  MTA that legitimately accepts mail from the host with no credentials produced an
+  authentication error that gave no hint the fix was to send no credentials at all.
+  Login is now attempted only when `SMTP_USER` is set — which is also what the
+  application means elsewhere, since `email_configured()` keys on `SMTP_HOST`.
+- **A hung relay could stall the queue.** `smtplib.SMTP` was called with no
+  `timeout`, so a mail server that accepted the TCP connection and then stopped
+  responding held the dispatcher's thread open indefinitely. The failure mode is
+  not one lost email but a **growing queue during a mail outage**, which turns a
+  mail problem into an application one. Now `SMTP_TIMEOUT_SECONDS` (default 15).
+- **`scripts/check_smtp.py`** verifies a real configuration by performing the same
+  handshake the application will: connectivity, TLS negotiation (and it detects the
+  465-vs-587 mismatch explicitly), authentication, then one actual delivery.
+  `--to` is **required** so it cannot accidentally mail an employee. It stops at
+  the first failure and names the likely cause, because "it doesn't work" from a
+  mail server is otherwise a slow debugging session.
+- Two tests assert the transport selection against a stand-in rather than a live
+  server: the property is *which class the configuration picks and in what order it
+  is driven*, and a real handshake would test the provider rather than this code.
+  The no-auth and timeout properties are asserted the same way.
+- `load_dotenv()` is already called at module level in `app.py`, so a `.env` file
+  works under gunicorn as well as `flask run` — worth stating because Flask's CLI
+  loads it automatically and people reasonably assume gunicorn does too. It does
+  not, and this project would have been the exception.
+- Unit **272 passed / 2 skipped**.

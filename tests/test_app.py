@@ -1970,6 +1970,149 @@ def test_an_orphaned_session_cannot_be_used_to_lose_the_address_key():
         assert app_module.rate_limit_key() != 'user:'
 
 
+def test_smtp_transport_is_chosen_by_port_not_hardcoded_to_starttls():
+    """Port 465 is implicit TLS; calling `starttls()` on it raises.
+
+    `send_email` used to call `server.starttls()` unconditionally, which is correct
+    for 587 and **fails for 465** — and 465 is the default most providers document.
+    A deployment configured exactly as the provider's own documentation says would
+    have failed every send.
+
+    Asserted against a stand-in rather than a live server: the property under test
+    is *which transport class the configuration selects and in what order it is
+    driven*, and a real handshake would test the provider, not this code.
+    """
+    import smtplib
+
+    import app as app_module
+
+    calls: list[tuple[str, tuple]] = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append(('init', (host, port, timeout)))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, **kw):
+            calls.append(('starttls', ()))
+
+        def login(self, user, password):
+            calls.append(('login', (user, password)))
+
+        def send_message(self, msg):
+            calls.append(('send', (msg['To'],)))
+
+    saved = (app_module.SMTP_HOST, app_module.SMTP_PORT, app_module.SMTP_USER,
+             app_module.SMTP_PASS, app_module.SMTP_USE_SSL,
+             smtplib.SMTP, smtplib.SMTP_SSL)
+    try:
+        smtplib.SMTP = FakeSMTP
+        smtplib.SMTP_SSL = FakeSMTP
+
+        # Port 465: implicit TLS, and STARTTLS must NOT be attempted.
+        calls.clear()
+        app_module.SMTP_HOST, app_module.SMTP_PORT = 'smtp.example.com', 465
+        app_module.SMTP_USER, app_module.SMTP_PASS = 'u@example.com', 'secret'
+        app_module.SMTP_USE_SSL = None
+        assert app_module.send_email('a@example.com', 's', 'b') is True
+        assert [c[0] for c in calls] == ['init', 'login', 'send'], calls
+        assert calls[0][1][0] == 'smtp.example.com' and calls[0][1][1] == 465
+        assert calls[0][1][2] is not None, 'no timeout — a hung relay stalls the dispatcher'
+
+        # Port 587: STARTTLS, before authenticating.
+        calls.clear()
+        app_module.SMTP_PORT = 587
+        assert app_module.send_email('a@example.com', 's', 'b') is True
+        assert [c[0] for c in calls] == ['init', 'starttls', 'login', 'send'], calls
+
+        # An explicit override wins over the port.
+        calls.clear()
+        app_module.SMTP_USE_SSL = True
+        app_module.SMTP_PORT = 587
+        assert app_module.send_email('a@example.com', 's', 'b') is True
+        assert 'starttls' not in [c[0] for c in calls], (
+            'SMTP_USE_SSL=true must select implicit TLS even on 587'
+        )
+    finally:
+        (app_module.SMTP_HOST, app_module.SMTP_PORT, app_module.SMTP_USER,
+         app_module.SMTP_PASS, app_module.SMTP_USE_SSL,
+         smtplib.SMTP, smtplib.SMTP_SSL) = saved
+
+
+def test_an_unauthenticated_relay_is_not_refused_for_having_no_credentials():
+    """An on-premise relay commonly accepts mail from the host with no auth at all.
+
+    `server.login('', '')` against one raises, so a configuration that is perfectly
+    valid upstream — a local MTA, a relay on the same subnet — was refused here with
+    an authentication error that gave no hint the fix was to send no credentials.
+    """
+    import smtplib
+
+    import app as app_module
+
+    calls: list[str] = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            calls.append('init')
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, **kw):
+            calls.append('starttls')
+
+        def login(self, user, password):
+            calls.append('login')
+            raise AssertionError('login must not be attempted without SMTP_USER')
+
+        def send_message(self, msg):
+            calls.append('send')
+
+    saved = (app_module.SMTP_HOST, app_module.SMTP_PORT, app_module.SMTP_USER,
+             app_module.SMTP_PASS, app_module.SMTP_USE_SSL,
+             smtplib.SMTP, smtplib.SMTP_SSL)
+    try:
+        smtplib.SMTP = FakeSMTP
+        smtplib.SMTP_SSL = FakeSMTP
+        app_module.SMTP_HOST, app_module.SMTP_PORT = 'relay.internal', 25
+        app_module.SMTP_USER, app_module.SMTP_PASS = '', ''
+        app_module.SMTP_USE_SSL = False
+        assert app_module.send_email('a@example.com', 's', 'b') is True
+        assert 'login' not in calls, calls
+        assert calls[-1] == 'send', calls
+    finally:
+        (app_module.SMTP_HOST, app_module.SMTP_PORT, app_module.SMTP_USER,
+         app_module.SMTP_PASS, app_module.SMTP_USE_SSL,
+         smtplib.SMTP, smtplib.SMTP_SSL) = saved
+
+
+def test_a_hung_mail_server_cannot_stall_the_outbox_dispatcher():
+    """A mail outage must not become an application outage.
+
+    The dispatcher processes events on one thread, so a `smtplib` call with no
+    timeout blocks delivery of every event behind it — the failure mode is not one
+    lost email but a growing queue during a mail outage.
+    """
+    import app as app_module
+
+    assert app_module.SMTP_TIMEOUT_SECONDS > 0
+    assert app_module.SMTP_TIMEOUT_SECONDS <= 60, (
+        'a timeout long enough to outlive several dispatcher passes defeats the point'
+    )
+    # And it is reachable from configuration, since a slow relay in one region may
+    # need a different budget than a fast one.
+    assert 'SMTP_TIMEOUT_SECONDS' in pathlib.Path(app_module.__file__).read_text()
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
