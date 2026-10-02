@@ -682,18 +682,42 @@ TASKS = [
     ("Follow-up", "FR-LEA-06/08 policy-derived leave balances", "Entitlement derived from the effective leave_policy_assignments; reserved ledger enforced; audited policy API + admin modal", DONE),
     ("Follow-up", "FR-USR-04 background bulk import jobs", "202 + queued import_jobs, single-claim dispatcher, progress/history/cancel, upload deleted, audited completion", DONE),
     ("Follow-up", "FR-USR two-person anonymisation", "proposed -> confirmed by a different approver -> applied; archived-only; dry run; value-scrubbed audit history; required salt; trade-offs recorded in docs/ANONYMISATION.md", DONE),
+    # ── SRS audit pass: claimed-IMPLEMENTED rows re-read against their handlers ──
+    ("Audit pass", "FR-AUTH-11 TOTP MFA (two-phase enrolment, parked half-session refused by construction)", "mfa.py + 7 routes; admin reset is audited and answers identically either way; 14 unit tests + the browser suite's real MFA panel (8fbe0-series)", DONE),
+    ("Audit pass", "FR-AUTH-03 account lockout + FR-AUTH-02 uniform 401s", "lockout.py + Alembic 0009; all six refusal paths byte-identical; streak resets on success and on apply; admin unlock is NOT a status change (423bfb5)", DONE),
+    ("Audit pass", "FR-AUTH-08/09 password reset: enumeration oracle closed, digest-only lookup", "Uniform 202 with no token, delivery via outbox, sibling tokens invalidated, reset page added; the previous 200-with-token was recorded as IMPLEMENTED and was not (6fdd9ed)", DONE),
+    ("Audit pass", "FR-AUD-01 audit ratchet over every mutating handler", "AST sweep with one-level delegation resolution; subset-AND-no-stale assertion; 20 handlers -> 1 documented exemption (2b8e7e0, a754e9d, 999ff75, c464415)", DONE),
+    ("Audit pass", "FR-EXP-03 expense state machine, FR-PERF-01/02, FR-TKT-03/04, FR-LEA-05, FR-HOL-01/02/03, FR-NOT-03", "Each found by reading the handler for a neighbouring requirement; gate + state-machine + audit gaps closed; matrix 50 -> 58 IMPLEMENTED", DONE),
+    # ── Go-live review ───────────────────────────────────────────────────────
+    ("Go-live", "1. Honest email transport: send_email cannot report a send that never happened", "Unconfigured SMTP is now a FAILURE, so the event retries and dead-letters; /api/health reports degraded; three tests including end-to-end dead-lettering (0e064d4)", DONE),
+    ("Go-live", "2. Security response headers (SRS 11.3) - none of the five shipped", "Flask-Talisman; CSP is a module constant the test asserts against; no unsafe-inline for scripts; disabled outside production on purpose (0e064d4)", DONE),
+    ("Go-live", "3. FR-JOB-05 scheduler leader election", "Redis lease, token-fenced Lua renewal, lost lease shuts the scheduler down, unreachable Redis refuses to start; SRS chaos test with 3 real processes (0e064d4)", DONE),
+    ("Go-live", "4. Backup + a restore drill that can fail", "scripts/backup.py verify restores to a scratch DB and runs the app's own gates; row-count check; verified green AND red (dbd669c)", DONE),
+    ("Go-live", "5. Load test + the blocker it found: rate limits could not meet the SRS NFRs", "k6 scenario + measurable harness; FR-AUTH-01 per-account keying; 175 of 375 requests were being locked out behind shared NAT (2ed778e)", DONE),
+    ("Go-live", "SMTP configuration that actually works (port 465, open relays, hung-relay timeout)", "Transport selected by port, login skipped without credentials, SMTP_TIMEOUT_SECONDS; scripts/check_smtp.py verifies a real provider (d39b3b3)", DONE),
+    ("Go-live", "Admin-set password: the recovery path that needs no mail server", "Sessions closed, lockout cleared, self-target needs current password, 409 names the right button; probe flow proves it on v2.0 (8f9b90b)", DONE),
+    # ── Still open ───────────────────────────────────────────────────────────
+    ("Go-live", "Configure real SMTP credentials and confirm a reset email is delivered", "OPERATOR. Until SMTP_HOST is set, /api/forgot-password cannot deliver anything. scripts/check_smtp.py --to <you> then /api/health must show email_configured: true", PENDING),
+    ("Go-live", "Install ops/cron.example (daily backup + quarterly restore drill)", "OPERATOR. A backup that has never run is indistinguishable from a backup that does not exist", PENDING),
+    ("Go-live", "Run ops/load/load.js against staging (sustained 150 req/s + 1,000-login burst)", "OPERATOR. Needs a dedicated account whose role is NOT in mfa.MANDATORY_ROLES, or the scenario refuses to run", PENDING),
+    ("Go-live", "WAL archiving / point-in-time recovery", "OPERATOR DECISION, deliberately not implemented: PITR needs a WAL destination and retention policy belonging to whoever owns the storage. Base backups and the restore drill do not cover RPO <= 15 min", PENDING),
+    ("Go-live", "Delta sync -> maintenance window -> DNS/load-balancer traffic switch", "OPERATOR. Only a disposable rehearsal (hrms_cutover_rehearsal) has run. Phase 5 stays IN PROGRESS until the switch is verified in production", IN_PROGRESS),
+    ("Go-live", "K6 against staging before release + Schemathesis contract tests", "OPERATOR/TOOLING. The SRS names both; the k6 scenario is written and the local harness measures the same targets, but no staging environment exists yet", PENDING),
 ]
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL", "217 passed, 1 skipped (public-only shift test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "217 passed, 1 skipped"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL", "21 passed (threaded server, live scheduler)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "280 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "280 passed, 1 skipped"),
+    ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
+    ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
-    ("CI PostgreSQL job", "postgres:17 + redis services", "Unit suite on legacy (with and without Redis), browser suite, and the preflight/CC-01/probe gates on a clean v2.0 target"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "97/97 GET + 44/44 write flows; lifecycle + permission + import paths included"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms (public)", "Ready: head 0005, identity/sequence rules, required tables, and delta report generated"),
-    ("Disposable Phase 5 rehearsal", "hrms_cutover_rehearsal", "ETL Phase-1/2 + CC-05 cleanup + preflight + 94/42 probe + authenticated smoke + CC-01 sequence check passed"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0009_account_lockout, identity/sequence rules, required tables, count deltas"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "111/111 GET + 56/56 write flows; run twice to confirm idempotency"),
+    ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
+    ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
+    ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),
+    ("CI PostgreSQL job", "postgres:17 + redis services", "Lint, compose config, alembic upgrade head, unit (with and without Redis), browser, and the preflight/CC-01/probe gates on a clean v2.0 target"),
 ]
 
 DONE_BY_PHASE = {p: sum(1 for t in TASKS if t[0] == p and t[3] == DONE) for p in sorted({t[0] for t in TASKS})}
