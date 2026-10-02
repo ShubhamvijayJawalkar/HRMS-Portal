@@ -2151,3 +2151,66 @@ Asked to make the admin panel the way a user's password is changed, because
   also proves the lockout clears on the canonical schema.
 - Unit **280 passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET +
   56/56 write**, probe run twice for idempotency, preflight and CC-01 green.
+
+## FR-AUTH-14 / FR-JOB-02: breaks left `Active` are now auto-closed
+Working down the PARTIAL rows, starting with the highest-risk one. The SRS names both
+duties in a single sentence at **High** priority — *"a scheduled job purges expired
+reset tokens hourly **and** auto-closes breaks Active for more than 12 hours"* — and
+only the first shipped. These two matrix rows were **the same unimplemented
+requirement counted twice**.
+
+- **What "indefinitely" cost.** A break whose end was never pressed stayed `Active`
+  for ever. That row is what attendance and the payroll loss-of-pay calculation both
+  read, and FR-ATT-09's shift summary adds its open time to the hours an employee
+  appears to have worked — inflating their hours on paper, against them in reality,
+  and impossible to detect without finding the row. Nothing else revisited it:
+  `endBreak` auto-ends a stale break, but only when the employee next presses one.
+- **The schema had already anticipated this.** `breaks.ended_reason` exists in the
+  canonical target with the vocabulary documented *on the column*
+  (`orphan_timeout|admin_dispose|auto_end_new_break`) and **no writer anywhere** — so
+  a break could be closed four different ways with no way to tell which applied. It
+  gets its first value here, and the compat schema gained the column additively
+  (`ALTER ... IF NOT EXISTS`, because `CREATE TABLE IF NOT EXISTS` does nothing for a
+  table that already exists).
+- **Why 12 hours is a threshold and not a duration** — the decision that carries the
+  slice. The gap between `start_time` and the sweep says how long the **row** was
+  open, not how long the **break** was. An employee who forgot at 11:00 and whose row
+  is swept at 23:00 has not taken a 12-hour break, and recording one would manufacture
+  an absence and a loss-of-pay deduction out of a forgotten button press. So the sweep
+  decides **status** (this row can no longer be believed to be running) and records
+  **duration** from the break type's own `daily_limit_minutes`, capped by elapsed
+  time — the most the break could have been worth. A test asserts a 30-hour-old `Tea`
+  row records 15 minutes, not 1,800 and not zero.
+- **Conditional write.** `UPDATE ... WHERE status = 'Active'`, so a repeat pass or a
+  racing pod is a no-op rather than a double notification and a double audit row.
+  Asserted by running the sweep twice and checking the second reports `closed == 0`.
+- **A guess is recorded, not absorbed.** Every closure is audited with
+  `actor = SYSTEM` and before/after, and **notified to the employee**, because the
+  recorded duration is derived and they are the only party who knows when they came
+  back. FR-ATT-16's admin disposal is the route to correct a wrong record, and an
+  employee who was never told cannot ask for it.
+- **The taxonomy test forced a decision on the first run**, for the fourth time. It is
+  `Attendance`, and the trade-off is recorded rather than glossed: naming the category
+  makes break events **preferenceable**, so an employee who mutes `Attendance` will
+  not be told their break was closed for them. That cost is **real here in a way it
+  was not for `BREAK_DISPOSED`**, because the duration is a guess and the notice is
+  what makes it correctable. They can still see the break in their own record and ask
+  an admin, so muting delays the correction rather than preventing it — which is why
+  `Attendance` is still right rather than inventing a category for one unmutable
+  notice.
+- **Third instance of this specific shape.** The job is wrapped in an application
+  context, because a scheduler thread has no request context and `audit_log`'s
+  degradation covers *request* metadata only. Without it the audit rows raised
+  `Working outside of application context`, were swallowed by `audit_log`'s own
+  `except`, and **silently did not exist** — which is the very failure mode this
+  audit trail exists to prevent, committed by the audit trail.
+- A probe flow `attendance(orphan break auto-closed)` is the only real proof it works
+  on the canonical table: **writing `ended_reason` is the assertion**, since a sweep
+  that updated `status` alone would pass on `legacy` and produce a row that records
+  nothing about *why* the break was closed. It also had to age `start_time` with SQL
+  interval arithmetic rather than a Python subtraction, because the column is
+  `TIMESTAMPTZ` on v2.0 and `TIMESTAMP` on `legacy` — the first attempt left the row
+  an hour old and the sweep correctly declined to close it, which is the sweep working.
+- Matrix **62 IMPLEMENTED / 34 PARTIAL / 7 NOT_STARTED / 1 RETIRED**. Unit **285
+  passed / 2 skipped**, v2.0 gates **111/111 GET + 57/57 write**, probe run twice for
+  idempotency, preflight and CC-01 green.

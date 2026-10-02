@@ -1657,6 +1657,62 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return 200
     run("auth(admin sets a password)", admin_set_password)
 
+    def orphan_break_sweep():
+        """FR-AUTH-14 / FR-JOB-02: auto-close a break left Active with no break-end.
+
+        Only meaningful on the canonical schema, which is the shape that already
+        carries `breaks.ended_reason`; the compatibility schema needed a compat DDL
+        added for it. Writing that column is the assertion — a sweep that updated
+        `status` alone would pass on `legacy` and silently produce a row that records
+        nothing about *why* the break was closed.
+        """
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            # `start_time` matters as much as `status`: the sweep is defined on a row
+            # left Active for more than 12 hours, so a fresh seeded break would not
+            # qualify and the flow would prove nothing. The interval arithmetic is in
+            # SQL because the column is TIMESTAMPTZ on v2.0 and TIMESTAMP on legacy, and
+            # a Python-side subtraction would carry the wrong type across backends.
+            pc.execute(
+                "UPDATE breaks SET status = 'Active', end_time = NULL, "
+                "duration_minutes = NULL, ended_reason = NULL, "
+                "start_time = now() - interval '20 hours', "
+                "break_date = (now() - interval '20 hours')::date "
+                "WHERE break_id = (SELECT min(break_id) FROM breaks)"
+            )
+            row = pc.execute(
+                "SELECT break_id FROM breaks WHERE status = 'Active' "
+                "ORDER BY break_id LIMIT 1"
+            ).fetchone()
+        if not row:
+            return 404
+
+        # The sweep needs an application context (it opens a connection through the
+        # app's own getter), exactly like the scheduler thread it normally runs on.
+        import orphan_breaks as orphan_breaks_module
+        from app import app as flask_app
+        from app import get_db
+
+        with flask_app.app_context():
+            result = orphan_breaks_module.close_orphaned_breaks(get_db())
+        if result["closed"] < 1:
+            return 409  # nothing was closed, so the flow proved nothing
+
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            got = pc.execute(
+                "SELECT status, end_time, duration_minutes, ended_reason FROM breaks "
+                "WHERE break_id = %s", (row[0],),
+            ).fetchone()
+        if got[0] != "Orphaned":
+            return 409  # status was not closed
+        if got[1] is None:
+            return 409  # closed with no end_time
+        if got[3] != "orphan_timeout":
+            return 409  # the canonical column was not written
+        if got[2] is None or got[2] < 0:
+            return 409  # no duration recorded
+        return 200
+    run("attendance(orphan break auto-closed)", orphan_break_sweep)
+
     return out
 
 

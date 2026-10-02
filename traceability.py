@@ -267,12 +267,27 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'Restricted by the permission policy and no longer returns '
                    'passwords or hashes. Missing the 5-minute re-authentication and '
                    'the audit row for a credential read.'),
-    'FR-AUTH-14': ('H', 'N', 'PARTIAL', (),
-                   'An hourly job purges expired reset and idempotency tokens. It does '
-                   'not auto-close breaks Active for more than 12 hours, so a '
-                   'forgotten break-end leaves a row Active indefinitely.'),
-
-    # ── FR-ATT: attendance, breaks, shifts ──────────────────────────────
+    'FR-AUTH-14': ('M', 'C', 'IMPLEMENTED', ('/api/admin/users/<emp_id>/unlock',),
+                  'Hourly job does both duties the SRS names in one sentence: purge '
+                  'expired reset tokens AND idempotency keys (CC-07), and auto-close '
+                  'breaks left Active for more than 12 hours. The sweep is '
+                  'orphan_breaks.close_orphaned_breaks: the write is conditional on '
+                  'status = Active so a repeat pass or a racing pod is a no-op rather '
+                  'than a double notification, and it sets status Orphaned plus '
+                  'ended_reason orphan_timeout - the canonical schema already carried '
+                  'that column and documented the vocabulary on it '
+                  '(orphan_timeout|admin_dispose|auto_end_new_break) with no writer '
+                  'anywhere, so a break could be closed four ways and there was no way '
+                  'to tell which. Duration is derived from the break TYPE daily limit, '
+                  'capped by elapsed time, and never from the 12 hours itself: that '
+                  'number is a threshold for when a row can no longer be believed to be '
+                  'running, not a length of break, and closing at start_time + 12h '
+                  'would manufacture an absence and a loss-of-pay deduction out of a '
+                  'forgotten button press. Every closure is audited with actor SYSTEM '
+                  '(before/after) and notified to the employee, because the recorded '
+                  'duration is a guess and they are the only party who knows when they '
+                  'came back - FR-ATT-16 admin disposal is how a wrong record is '
+                  'corrected, and an employee never told cannot ask.'),
     'FR-ATT-01': ('M', 'C', 'PARTIAL', ('/api/break-types',),
                   'The three seeded types with their limits ship and Lunch requires '
                   'approval. The read endpoint exposes no per-location '
@@ -635,9 +650,15 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'priority order, groups per shift date so night shifts finalize '
                   'correctly, replaces the target date transactionally, and recomputes '
                   'on regularization approval.'),
-    'FR-JOB-02': ('H', 'C', 'PARTIAL', (),
-                  'Hourly purge of expired reset and idempotency tokens. The orphaned-break '
-                  'auto-close is not implemented (see FR-AUTH-14).'),
+    'FR-JOB-02': ('M', 'C', 'IMPLEMENTED', ('/api/health',),
+                  'Hourly: purge expired reset tokens; close orphaned breaks '
+                  '(FR-AUTH-14). Both now run in the same job the SRS describes, so this '
+                  'row and FR-AUTH-14 were the same unimplemented requirement counted '
+                  'twice. The job runs inside an application context - a scheduler '
+                  'thread has none, and audit_log degrades for *request* metadata only, '
+                  'so without it the audit rows raised, were swallowed by audit_log own '
+                  'except, and silently did not exist: the third instance of that shape '
+                  'in this codebase.'),
     'FR-JOB-03': ('S', 'R', 'NOT_STARTED', (),
                   'No quarterly job opens the next performance review cycle.'),
     'FR-JOB-04': ('H', 'C', 'IMPLEMENTED', ('/api/admin/offboarding/revoke',),

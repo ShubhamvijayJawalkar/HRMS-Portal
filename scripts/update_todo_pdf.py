@@ -40,6 +40,45 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "FR-AUTH-14 / FR-JOB-02: breaks left Active are now auto-closed. The SRS "
+     "names both duties in one sentence at HIGH priority - 'a scheduled job purges expired reset "
+     "tokens hourly AND auto-closes breaks Active for more than 12 hours' - and only the first "
+     "shipped, so a break whose end was never pressed stayed Active INDEFINITELY. The "
+     "consequences are not cosmetic: that row is what attendance and the payroll loss-of-pay "
+     "calculation both read, and FR-ATT-09's shift summary adds its open time to the hours an "
+     "employee appears to have worked, which inflates their hours on paper and is impossible "
+     "to spot without finding the row. Nothing else in the system ever revisited it. The "
+     "canonical schema had already anticipated this - breaks.ended_reason exists with the "
+     "vocabulary documented on it (orphan_timeout|admin_dispose|auto_end_new_break) and NO "
+     "WRITER anywhere, so a break could be closed four different ways with no way to tell "
+     "which applied; the column now gets its first value and the compat schema gained it "
+     "additively. The design decision worth recording is why 12 hours is a THRESHOLD and not "
+     "a duration: the gap between start_time and the sweep says how long the ROW was open, not "
+     "how long the break was. An employee who forgot at 11:00 and whose row is swept at 23:00 "
+     "has not taken a 12-hour break, and recording one would manufacture an absence and a "
+     "loss-of-pay deduction out of a forgotten button press. So the sweep decides STATUS (this "
+     "row can no longer be believed to be running) and records DURATION from the break type's "
+     "own daily limit, capped by elapsed time - the most the break could have been worth. The "
+     "write is conditional on status = Active, so a repeat pass or a racing pod is a no-op "
+     "rather than a double notification and a double audit row. Every closure is audited with "
+     "actor SYSTEM (before/after) and notified to the employee, because the recorded duration "
+     "is a guess and they are the only party who knows when they came back; FR-ATT-16 admin "
+     "disposal is how a wrong record is corrected, and an employee who was never told cannot "
+     "ask. That notification is Attendance, and the taxonomy test forced the decision on the "
+     "first run as it has three times before - naming the category makes break events "
+     "PREFERENCEABLE, so an employee who mutes Attendance will not be told their break was "
+     "closed for them. That cost is real here in a way it was not for BREAK_DISPOSED, because "
+     "the duration is a guess and the notice is what makes it correctable; they can still see "
+     "the break in their own record and ask an admin, so muting delays the correction rather "
+     "than preventing it. Third instance of a shape this codebase keeps hitting: the job is "
+     "wrapped in an application context because a scheduler thread has none, and audit_log "
+     "degrades for REQUEST metadata only - without it the audit rows raised, were swallowed by "
+     "audit_log own except, and silently did not exist. Five unit tests plus a probe flow "
+     "(attendance(orphan break auto-closed)) that is the only real proof it works on the "
+     "canonical table: writing ended_reason is the assertion, since a sweep that updated status "
+     "alone would pass on legacy and produce a row recording nothing about WHY it was closed. "
+     "Matrix 62 IMPLEMENTED / 34 PARTIAL / 7 NOT_STARTED / 1 RETIRED. Unit 285 passed / 2 "
+     "skipped, v2.0 gates 111/111 GET + 57/57 write, probe run twice for idempotency."),
     ("2026-10-02", "Admin-set password: the recovery path that does not need an email server. "
      "The gap is real and total - the reset link's only delivery is the outbox and every "
      "delivery goes through send_email, so on a deployment with no mail server a forgotten "
@@ -707,13 +746,13 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "280 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "280 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "285 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "285 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0009_account_lockout, identity/sequence rules, required tables, count deltas"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "111/111 GET + 56/56 write flows; run twice to confirm idempotency"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "111/111 GET + 57/57 write flows; run twice to confirm idempotency"),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
     ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),

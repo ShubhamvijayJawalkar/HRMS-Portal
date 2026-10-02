@@ -54,6 +54,7 @@ import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import notifications  # noqa: E402  # per-category notification preferences (FR-NOT-03)
+import orphan_breaks  # noqa: E402  # auto-close of breaks left Active (FR-AUTH-14/FR-JOB-02)
 import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
@@ -701,6 +702,13 @@ def init_db():
             duration_minutes INTEGER,
             break_date DATE,
             status VARCHAR DEFAULT 'Active',
+            -- FR-AUTH-14/FR-JOB-02. The canonical schema already carries this column
+            -- and documents the vocabulary on it
+            -- (orphan_timeout|admin_dispose|auto_end_new_break); it had no writer at
+            -- all, so a break could be closed for four different reasons with no way to
+            -- tell which applied. Added additively rather than by rewriting the CREATE,
+            -- because init_db must never reshape a table that already exists.
+            ended_reason VARCHAR,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id),
             FOREIGN KEY (break_type) REFERENCES break_types(break_type)
         )
@@ -1022,6 +1030,12 @@ def init_db():
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_attempts INTEGER DEFAULT 0',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS last_failed_login TIMESTAMP',
         'ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP',
+        # Idempotent add for a `breaks` table that predates the column. `CREATE TABLE
+        # IF NOT EXISTS` above does nothing for an existing table, so without this the
+        # FR-AUTH-14 sweep would raise "column ended_reason does not exist" on every
+        # deployment that already has the v1.0 shape - and the job's own `except` would
+        # swallow it, which is how this shipped broken in the first place.
+        'ALTER TABLE breaks ADD COLUMN IF NOT EXISTS ended_reason VARCHAR',
     ):
         conn.execute(ddl)
 
@@ -11678,14 +11692,83 @@ def get_csrf_token():
 # ══════════════════════════════════════════════════════════════════════
 
 def cleanup_expired_tokens():
+    """The hourly maintenance job — FR-AUTH-14 / FR-JOB-02.
+
+    The SRS names both duties in one sentence: "a scheduled job purges expired reset
+    tokens hourly **and** auto-closes breaks Active for more than 12 hours", and
+    FR-JOB-02 lists them together as one High-priority hourly entry. Only the first
+    shipped, so a break whose end was never pressed stayed ``Active`` indefinitely —
+    which attendance and the payroll loss-of-pay calculation both read.
+
+    The sweep lives in ``orphan_breaks.py``; the notification, audit and admin
+    fallback live here because they need the application's helpers. Each closed
+    break is **notified to the employee and audited with an actor of SYSTEM**, for
+    the same reason `audit_log` degrades outside a request: a guess recorded
+    silently is a guess nobody can correct.
+
+    Wrapped in an application context because a scheduler thread has no request
+    context — and `audit_log`'s own degradation covers the *request* metadata only.
+    Without this it raised `Working outside of application context`, was swallowed
+    by its own `except`, and the audit row silently did not exist, which is the
+    third instance of this specific shape in this codebase.
+    """
     try:
-        conn = get_db()
+        with app.app_context():
+            _run_hourly_maintenance()
+    except Exception as exc:
+        logger.warning('hourly maintenance failed: %s', exc)
+
+
+def _run_hourly_maintenance():
+    conn = get_db()
+    try:
         conn.execute("DELETE FROM password_reset_tokens WHERE expires_at < ?", [datetime.now()])
         conn.execute("DELETE FROM idempotency_keys WHERE expires_at < ?", [datetime.now()])  # CC-07
-        conn.close()
-        logger.info("Cleaned up expired password reset tokens and idempotency keys")
+        orphans = orphan_breaks.close_orphaned_breaks(conn)
+        conn.commit()
     except Exception as e:
+        conn.rollback()
         logger.warning("Cleanup failed: %s", e)
+        conn.close()
+        return
+    closed = []
+    try:
+        conn = get_db()
+        for row in conn.execute(
+            "SELECT break_id, emp_id, break_type, duration_minutes FROM breaks "
+            "WHERE ended_reason = 'orphan_timeout' AND end_time >= ?",
+            [datetime.now() - timedelta(minutes=5)],
+        ).fetchall():
+            closed.append(row)
+    except Exception as e:
+        logger.warning("Could not read back auto-closed breaks for notification: %s", e)
+    finally:
+        conn.close()
+
+    for break_id, emp_id, break_type, minutes in closed:
+        audit_log(
+            'SYSTEM', 'BREAK_AUTO_CLOSED',
+            f'Closed break {break_id} for {emp_id} left Active with no break-end',
+            entity='Breaks', entity_id=str(break_id),
+            before={'status': 'Active', 'end_time': None},
+            after={'status': 'Orphaned', 'duration_minutes': minutes,
+                   'ended_reason': 'orphan_timeout'},
+        )
+        add_notification(
+            emp_id, 'BREAK_AUTO_CLOSED',
+            f'A {break_type} break on your record was left open and has been closed '
+            f'after {orphan_breaks.ORPHAN_AFTER} hours, recorded as {minutes} minutes '
+            '(the maximum for that break type). If that is wrong, ask an administrator '
+            'to correct it.',
+        )
+    if orphans['closed']:
+        logger.info(
+            'Purged expired tokens; auto-closed %s orphaned break(s) totalling %s '
+            'minutes (%s capped at the break-type limit)',
+            orphans['closed'], orphans['minutes'], orphans['capped'],
+        )
+    else:
+        logger.info("Cleaned up expired password reset tokens and idempotency keys")
 
 
 def _register_scheduler_jobs(attendance_hour=2):

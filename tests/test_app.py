@@ -75,6 +75,7 @@ from app import (  # noqa: E402
     _token_digest,
     app,
     check_password,
+    cleanup_expired_tokens,
     gen_id,
     get_db,
     hash_password,
@@ -2427,6 +2428,263 @@ def test_creating_a_user_no_longer_claims_an_email_was_sent_when_none_was():
         f'that just failed: {body["notice"]}'
     )
     _cleanup_user_contract_rows('EMP976')
+
+
+def test_a_break_left_active_is_auto_closed_after_twelve_hours():
+    """FR-AUTH-14 / FR-JOB-02, High priority in the SRS and entirely unimplemented.
+
+    The SRS names both duties in one hourly job: "a scheduled job purges expired
+    reset tokens hourly **and** auto-closes breaks Active for more than 12 hours".
+    Only the purge shipped, so a break whose end was never pressed stayed `Active`
+    **indefinitely** — and that row is what attendance and the payroll loss-of-pay
+    calculation both read, while FR-ATT-09's shift summary adds its open time to the
+    hours an employee appears to have worked.
+    """
+    import orphan_breaks as orphan_breaks_module
+
+    assert orphan_breaks_module.ORPHAN_AFTER == timedelta(hours=12), (
+        'the SRS says 12 hours; this is the number the whole requirement turns on'
+    )
+
+    _cleanup_user_contract_rows('EMP980')
+    ph = hash_password('pass123')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP980', 'Forgetful', 'emp980@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [ph])
+        stale = datetime.now() - timedelta(hours=13)
+        fresh = datetime.now() - timedelta(hours=1)
+        # Allocated up front and incremented: the helper reads max(break_id), so calling
+        # it inside the loop before a commit returns the same value twice.
+        next_id = _next_test_break_id()
+        for when in (stale, fresh):
+            conn.execute(
+                "INSERT INTO breaks (break_id, emp_id, break_type, start_time, "
+                "break_date, status) VALUES (?, 'EMP980', 'Lunch', ?, ?, 'Active')",
+                [next_id, when, when.date()])
+            next_id += 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = orphan_breaks_module.close_orphaned_breaks(get_db())
+    assert result['closed'] == 1, result
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT status, end_time, duration_minutes, ended_reason FROM breaks "
+            "WHERE emp_id = 'EMP980' ORDER BY start_time").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 2, rows
+    closed, still_open = rows[0], rows[1]
+    assert closed[0] == 'Orphaned', closed
+    assert closed[1] is not None, 'an orphaned break was closed with no end_time'
+    # The canonical schema documents exactly this vocabulary on `ended_reason`
+    # (orphan_timeout|admin_dispose|auto_end_new_break), so writing it keeps a break
+    # closed for four different reasons distinguishable after the fact.
+    assert closed[3] == 'orphan_timeout', closed
+    assert still_open[0] == 'Active', (
+        f'a break only 1 hour old was auto-closed: {still_open}'
+    )
+    _cleanup_user_contract_rows('EMP980')
+
+
+def test_an_orphaned_break_is_never_recorded_as_twelve_hours():
+    """Why 12 hours is a threshold and not a duration.
+
+    The gap between `start_time` and the sweep says how long the *row* was open, not
+    how long the break was. An employee who forgot at 11:00 and whose row is swept at
+    23:00 has not taken a 12-hour break; recording one would manufacture an absence
+    and a loss-of-pay deduction out of a forgotten button press.
+
+    So duration comes from the break type's own daily limit — the most the break
+    could have been worth — capped by the time actually elapsed, whichever is
+    smaller.
+    """
+    import orphan_breaks as orphan_breaks_module
+
+    _cleanup_user_contract_rows('EMP981')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP981', 'Long Break', 'emp981@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        when = datetime.now() - timedelta(hours=30)
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, "
+            "status) VALUES (?, 'EMP981', 'Tea', ?, ?, 'Active')",
+            [_next_test_break_id(), when, when.date()])
+        conn.commit()
+    finally:
+        conn.close()
+
+    orphan_breaks_module.close_orphaned_breaks(get_db())
+    conn = get_db()
+    try:
+        minutes = conn.execute(
+            "SELECT duration_minutes FROM breaks WHERE emp_id = 'EMP981'").fetchone()[0]
+    finally:
+        conn.close()
+    # Tea is capped at 15 minutes a day. Thirty hours open is not 1,800 minutes of
+    # break, and it is certainly not 15 minutes of *absence* from the floor either.
+    assert minutes == 15, (
+        f'recorded {minutes} minutes for a Tea break left open 30 hours; the '
+        f'break type limit is 15 and that is the most it could have been worth'
+    )
+    _cleanup_user_contract_rows('EMP981')
+
+
+def test_the_orphan_sweep_is_idempotent_and_writes_one_audit_row():
+    """Two sweeps must not double-close, double-notify or double-audit.
+
+    The write is `UPDATE ... WHERE status = 'Active'`, so a second sweep finds
+    nothing to do. This is asserted by running it twice and checking the audit trail,
+    because a sweep that ran twice would also mean two notifications to the employee
+    and two "your break was closed" entries in their record.
+    """
+    import orphan_breaks as orphan_breaks_module
+
+    _cleanup_user_contract_rows('EMP982')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP982', 'Twice', 'emp982@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        when = datetime.now() - timedelta(hours=20)
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, "
+            "status) VALUES (?, 'EMP982', 'Tea', ?, ?, 'Active')",
+            [_next_test_break_id(), when, when.date()])
+        conn.commit()
+    finally:
+        conn.close()
+
+    first = orphan_breaks_module.close_orphaned_breaks(get_db())
+    assert first['closed'] == 1, first
+    second = orphan_breaks_module.close_orphaned_breaks(get_db())
+    assert second['closed'] == 0, (
+        f'the second sweep closed {second["closed"]} break(s); the conditional write '
+        f'should make a repeat pass a no-op'
+    )
+    assert second['scanned'] == 0, second
+    _cleanup_user_contract_rows('EMP982')
+
+
+def test_the_hourly_job_audits_and_notifies_an_auto_closed_break():
+    """A guess recorded silently is a guess nobody can correct.
+
+    The duration is derived, not measured — the employee is the only party who knows
+    when they actually came back. So the closure is notified to them and audited with
+    `actor = SYSTEM`, which is what makes it correctable: FR-ATT-16's admin disposal
+    is the route to fix a wrong record, and an employee who was never told cannot ask
+    for it.
+    """
+    _cleanup_user_contract_rows('EMP983')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP983', 'Audited Break', 'emp983@company.com', "
+            "'Employee', ?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        when = datetime.now() - timedelta(hours=14)
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, "
+            "status) VALUES (?, 'EMP983', 'Personal', ?, ?, 'Active')",
+            [_next_test_break_id(), when, when.date()])
+        conn.commit()
+    finally:
+        conn.close()
+
+    cleanup_expired_tokens()
+
+    conn = get_db()
+    try:
+        audits = conn.execute(
+            "SELECT actor, action, details, before, after FROM audit_log "
+            "WHERE action = 'BREAK_AUTO_CLOSED'").fetchall()
+        notes = conn.execute(
+            "SELECT message FROM notifications WHERE emp_id = 'EMP983' "
+            "AND type = 'BREAK_AUTO_CLOSED'").fetchall()
+    finally:
+        conn.close()
+
+    assert len(audits) == 1, f'expected one audit row, got {audits}'
+    assert audits[0][0] == 'SYSTEM', audits[0]
+    # The reason lives in the after-state, which is where a correction can find it.
+    # `ended_reason` is the canonical schema's own column for exactly this
+    # (orphan_timeout|admin_dispose|auto_end_new_break), so recording the guess as
+    # data is what lets FR-ATT-16's disposal distinguish it from an admin action.
+    after = str(audits[0][4])
+    assert 'orphan_timeout' in after, audits[0]
+    assert 'Orphaned' in after, audits[0]
+    # And the before-state records what it replaced, so the trail reads as a change
+    # rather than as an unexplained state.
+    assert 'Active' in str(audits[0][3]), audits[0]
+    assert len(notes) == 1, f'the employee was not told: {notes}'
+    assert 'administrator' in notes[0][0].lower(), notes[0]
+    _cleanup_user_contract_rows('EMP983')
+
+
+def test_the_orphan_break_sweep_never_touches_a_closed_break():
+    """A completed break must be invisible to the sweep, whatever its age.
+
+    The filter is `status = 'Active'`, so this is belt-and-braces on the read side —
+    but the read path is what an admin-facing "what would this job do?" question would
+    use, and a completed break from last month appearing in that list would be a real
+    defect, not a cosmetic one.
+    """
+    import orphan_breaks as orphan_breaks_module
+
+    _cleanup_user_contract_rows('EMP984')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP984', 'Done', 'emp984@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        old = datetime.now() - timedelta(days=3)
+        next_id = _next_test_break_id()
+        for status in ('Completed', 'Orphaned'):
+            conn.execute(
+                "INSERT INTO breaks (break_id, emp_id, break_type, start_time, end_time, "
+                "duration_minutes, break_date, status, ended_reason) "
+                "VALUES (?, 'EMP984', 'Tea', ?, ?, 15, ?, ?, ?)",
+                [next_id, old, old + timedelta(minutes=15),
+                 old.date(), status,
+                 'admin_dispose' if status == 'Orphaned' else None])
+            next_id += 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = get_db()
+    try:
+        found = orphan_breaks_module.orphaned_breaks(conn)
+    finally:
+        conn.close()
+    assert [f['emp_id'] for f in found if f['emp_id'] == 'EMP984'] == [], found
+    _cleanup_user_contract_rows('EMP984')
+
+
+def _next_test_break_id():
+    """A ``breaks.break_id`` that will not collide, on either backend.
+
+    The compat column is a bare ``INTEGER PRIMARY KEY`` with no default, so a test
+    cannot rely on a sequence the way it can for the v2.0 identity key — the same
+    constraint that forces ``_next_generated_id`` in the write paths.
+    """
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT COALESCE(max(break_id), 0) + 1 FROM breaks").fetchone()
+        return int(row[0])
+    finally:
+        conn.close()
 
 
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with

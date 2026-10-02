@@ -165,6 +165,19 @@ _EXACT = {
     # administrator helping them after a forgotten password.
     'ADMIN_PASSWORD_SET': 'Security',
     'BREAK_DISPOSED': 'Attendance',
+    # FR-AUTH-14's auto-close notice. Same class as the disposal notice above, and the
+    # same trade-off was accepted for it: naming the category makes break events
+    # *preferenceable*, so an employee who mutes `Attendance` will not be told their
+    # break was closed for them.
+    #
+    # That is a real cost here in a way it was not for `BREAK_DISPOSED`, because the
+    # recorded duration is a **guess** derived from the break type's limit — the
+    # employee is the only party who knows when they came back, so the notice is what
+    # makes the record correctable. They can still see the break in their own record
+    # and ask an admin to fix it (FR-ATT-16), so muting delays the correction rather
+    # than preventing it, which is why `Attendance` is still the right answer rather
+    # than inventing a category for one unmutable notice.
+    'BREAK_AUTO_CLOSED': 'Attendance',
 }
 
 
@@ -312,6 +325,7 @@ KNOWN_TYPES = (
     'ACCOUNT_LOCKED',
     'ACCOUNT_UNLOCKED',
     'BREAK_DISPOSED',
+    'BREAK_AUTO_CLOSED',
     # outbox.py
     'PAYROLL', 'ONBOARDING',
 )
