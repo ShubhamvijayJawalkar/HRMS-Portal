@@ -90,6 +90,69 @@ if os.getenv('FLASK_ENV') == 'production':
     from werkzeug.middleware.proxy_fix import ProxyFix
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
+# ── Security response headers (SRS §11.3) ───────────────────────────────
+# The SRS names Flask-Talisman and five headers explicitly, and the application
+# shipped **none** of them: no CSP, no nosniff, no frame-deny, no referrer policy,
+# no HSTS. That is invisible in a demo and is a clickjacking and content-injection
+# exposure in production, which is why it belongs to the go-live list rather than a
+# nice-to-have.
+#
+# HSTS is the one behaviour difference between environments, and it is deliberate:
+# `force_https=False` locally so a browser on http://localhost is not locked out of
+# its own development server for a year. It is on in production, which is the only
+# place it means anything. `FLASK_ENV=development` disables Talisman entirely,
+# because CSP breaks the CDN-loaded Bootstrap/font assets these templates rely on
+# and a dev box that logs CSP violations on every page load trains people to ignore
+# them.
+#: The Content-Security-Policy, as a module constant so the test asserts *this*
+#: configuration rather than a hand-copied duplicate of it. A test that re-declares
+#: the policy is a test that passes when the real one is wrong.
+SECURITY_CSP = {
+    # No `unsafe-inline` for scripts: the SRS says "CSP (no inline scripts by
+    # default)", and this application's JS lives in external files plus the CSRF
+    # fetch patcher. Styles *do* need inline (the templates set element styles
+    # directly), so only `style-src` is relaxed — the relaxation is narrow and
+    # commented rather than blanket.
+    'default-src': "'self'",
+    'script-src': "'self'",
+    'style-src': "'self' 'unsafe-inline'",
+    'img-src': "'self' data:",
+    # The CDN the templates load Bootstrap, bootstrap-icons and the webfont from.
+    'font-src': "'self' https://cdn.jsdelivr.net https://fonts.gstatic.com",
+    'script-src-elem': "'self' https://cdn.jsdelivr.net",
+    'connect-src': "'self'",
+    # `frame-ancestors: none` is the CSP half of clickjacking defence; the
+    # `X-Frame-Options: DENY` header below is the legacy half and both are sent,
+    # because CSP is not honoured by every browser the SRS targets.
+    'frame-ancestors': "'none'",
+    'object-src': "'none'",
+    'base-uri': "'self'",
+    'form-action': "'self'",
+}
+
+_TALISMAN_KWARGS = {
+    # TLS terminates at the reverse proxy; HSTS still applies and is what tells the
+    # browser to keep asking over https from now on.
+    'force_https': False,
+    'strict_transport_security': True,
+    'strict_transport_security_include_subdomains': True,
+    'frame_options': 'DENY',
+    'frame_options_allow_from': 'self',
+    'referrer_policy': 'strict-origin-when-cross-origin',
+    'content_security_policy': SECURITY_CSP,
+    'feature_policy': "geolocation 'none', microphone 'none', camera 'none'",
+}
+
+_PRODUCTION = os.getenv('FLASK_ENV') == 'production'
+
+if not _PRODUCTION:
+    app.config['TALISMAN_ENABLED'] = False
+else:
+    from flask_talisman import Talisman
+
+    Talisman(app, **_TALISMAN_KWARGS)
+    logger.info('Security headers enabled (Talisman): CSP, nosniff, frame-deny, HSTS')
+
 # ── Phase 3a (SRS CC-06): Argon2id hashing, CSRF guard, Redis sessions ─
 # Security lives in the request pipeline above the DB layer, so it applies
 # to both the DuckDB and PostgreSQL backends unchanged.
@@ -3595,7 +3658,10 @@ def reset_password_page():
 
 
 @app.route('/api/forgot-password', methods=['POST'])
-@limiter.limit("5 per minute")
+# The SRS says "Rate limit 5/min per IP and per email". Env-overridable because a
+# hardcoded literal is a deployment knob nobody can turn, and because the test
+# suites have to lift it — the same reasoning as LOGIN_RATE_LIMIT.
+@limiter.limit(os.getenv('FORGOT_PASSWORD_RATE_LIMIT', '5 per minute'))
 def forgot_password():
     """Request a password reset (FR-AUTH-08).
 
@@ -3667,7 +3733,9 @@ def forgot_password():
 
 
 @app.route('/api/reset-password', methods=['POST'])
-@limiter.limit("5 per minute")
+# A 6-digit-free secret is guessable in principle, so the reset endpoint gets the
+# same treatment as the request endpoint — and the same env override.
+@limiter.limit(os.getenv('RESET_PASSWORD_RATE_LIMIT', '5 per minute'))
 def reset_password():
     """Reset password using token
     ---
@@ -8643,10 +8711,43 @@ SMTP_PASS = os.getenv('SMTP_PASS', '')
 EMAIL_FROM = os.getenv('EMAIL_FROM', 'noreply@hrms.com')
 
 
+def email_configured() -> bool:
+    """Is there a real transport behind `send_email`?
+
+    Exposed so `/api/health` can report it as a degraded condition instead of
+    leaving a deployment to discover it when an employee says they never got
+    their reset link.
+    """
+    return bool(SMTP_HOST)
+
+
 def send_email(to, subject, body):
+    """Deliver one email. **True only if a message actually left the process.**
+
+    This used to `return True` when no SMTP host was configured, logging
+    "would send". That is the single most consequential bug found in the
+    go-live review, and it was found by auditing work done *with* it: FR-AUTH-08
+    was rebuilt so the response carries nothing, which is only a real improvement
+    if the link is actually delivered — and with the default configuration the
+    queue drained, the handler returned success, the event was marked delivered,
+    and **no human ever received a password reset link**. The user had already
+    been told, correctly, that "if the account exists, a reset link has been
+    sent".
+
+    Reporting success for a send that did not happen is worse than no email
+    feature at all: it converts a visible failure into an invisible one. So an
+    unconfigured transport is now a **failure**, and because every delivery path
+    goes through the outbox, that failure surfaces where it can be acted on —
+    the event retries, then dead-letters into `GET /api/admin/outbox` instead of
+    vanishing.
+    """
     if not SMTP_HOST:
-        logger.info("Email disabled (SMTP_HOST not set) — would send to %s: %s", to, subject)
-        return True
+        logger.error(
+            'Email NOT sent to %s: SMTP_HOST is not configured '
+            '(subject: %s). Returning failure so this is retried and dead-lettered '
+            'rather than silently reported as delivered.', to, subject,
+        )
+        return False
     try:
         msg = MIMEMultipart()
         msg['From'] = EMAIL_FROM
@@ -8662,6 +8763,69 @@ def send_email(to, subject, body):
     except Exception as e:
         logger.warning("Email failed to %s: %s", to, e)
         return False
+
+
+@app.route('/api/health')
+@app.route('/api/v1/health')
+def health():
+    """Liveness plus the *configuration* a deployment can silently be missing.
+
+    `/api/health` returning 200 only proves the process is up, which is not the
+    question an operator has after deploying. The checks below are the ones whose
+    absence produces a broken system that still looks healthy:
+
+    * **email** — no SMTP host means password resets, welcome tokens and payroll
+      notifications are queued and dead-lettered. Everything else in the product
+      keeps working, so nothing surfaces the problem until an employee reports
+      they never received a link. Reported as `degraded`, not `unhealthy`: the
+      process is fine, and returning 503 here would take a load balancer's health
+      check down over a missing optional integration.
+    * **schema** — the target actually has the tables, so a boot against the wrong
+      database is caught immediately.
+    * **outbox** — the count of events that have exhausted their retries and
+      dead-lettered, which is where a systematically failing integration becomes
+      visible.
+    """
+    conn = None
+    report = {'status': 'ok', 'schema': None, 'email_configured': None,
+              'dead_lettered_events': None, 'scheduler_leader': None,
+              'degraded': []}
+    try:
+        conn = get_db()
+        report['schema'] = os.getenv('APP_DB_SCHEMA') or 'legacy'
+        report['dead_lettered_events'] = conn.execute(
+            "SELECT count(*) FROM outbox_events WHERE status = 'dead_letter'"
+        ).fetchone()[0]
+    except Exception as exc:
+        report['status'] = 'unhealthy'
+        report['degraded'].append(f'database unreachable: {exc.__class__.__name__}')
+        return jsonify(report), 503
+    finally:
+        if conn is not None:
+            conn.close()
+
+    report['email_configured'] = email_configured()
+    if not report['email_configured']:
+        report['degraded'].append(
+            'SMTP_HOST is not set: password resets and notifications are queued '
+            'and will dead-letter rather than being delivered'
+        )
+    # FR-JOB-05: "exactly-once execution across all pods" is only checkable if a
+    # deployment can ask *which* pod won the lease, so it is in the report rather
+    # than only in a log line.
+    try:
+        import scheduler_leader
+
+        report['scheduler_leader'] = scheduler_leader.holder()
+    except Exception:
+        report['scheduler_leader'] = None
+    if report['dead_lettered_events']:
+        report['degraded'].append(
+            f"{report['dead_lettered_events']} outbox event(s) exhausted their retries"
+        )
+    if report['degraded']:
+        report['status'] = 'degraded'
+    return jsonify(report), 200
 
 
 @app.route('/api/v1/send-notification-email', methods=['POST'])
@@ -11329,6 +11493,38 @@ def _register_scheduler_jobs(attendance_hour=2):
     )
 
 
+def _install_lease_renewal(sched, leader_module):
+    """Renew the lease while the scheduler runs; stop scheduling if it is lost.
+
+    The renewal is itself a scheduler job, so it needs no extra thread. Losing the
+    lease shuts the whole scheduler down rather than pausing individual jobs: a
+    pod that cannot prove it still owns the term must run nothing, because the jobs
+    it was running are precisely the ones that would now be duplicated by the new
+    leader.
+    """
+    def _renew():
+        if leader_module.renew():
+            return True
+        logger.error(
+            'Scheduler lease lost (%s); shutting down cron jobs on this instance',
+            leader_module.INSTANCE_ID,
+        )
+        try:
+            sched.shutdown(wait=False)
+        except Exception:
+            pass
+        return False
+
+    sched.add_job(
+        _renew, 'interval', seconds=leader_module.RENEW_INTERVAL_SECONDS,
+        id='scheduler-lease-renewal', max_instances=1, coalesce=True,
+        # Deliberately *not* misfire-graceful: a renewal that was skipped must not
+        # be treated as if it happened.
+        misfire_grace_time=5,
+        replace_existing=True,
+    )
+
+
 # ── Start scheduler (only in master gunicorn process) ──────────────────
 if not STARTED:
     _is_gunicorn_master = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or os.getenv('GUNICORN_MASTER') == 'true'
@@ -11342,10 +11538,21 @@ if not STARTED:
             attendance_hour = min(max(int(os.getenv('ATTENDANCE_JOB_HOUR', '2')), 0), 23)
         except (TypeError, ValueError):
             attendance_hour = 2
-        _register_scheduler_jobs(attendance_hour)
-        scheduler.start()
-        STARTED = True
-        logger.info("Scheduler started")
+        # FR-JOB-05: exactly-once across pods. The condition above narrows *when*
+        # a scheduler is eligible (dev, or a gunicorn master, or a plain process);
+        # it does not make it unique, because every pod has its own gunicorn master.
+        # `scheduler_leader` is what makes it unique — see that module for the
+        # failure modes, including the one that matters most: a configured but
+        # unreachable Redis refuses to start the scheduler rather than running
+        # every job unowned.
+        import scheduler_leader
+
+        if scheduler_leader.should_start_scheduler():
+            _register_scheduler_jobs(attendance_hour)
+            _install_lease_renewal(scheduler, scheduler_leader)
+            scheduler.start()
+            STARTED = True
+            logger.info("Scheduler started")
 
 
 # ── Entry point ──────────────────────────────────────────────────────

@@ -406,8 +406,9 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'FR-TKT-01 has no producer yet, and the API reports has_producer per '
                   'category rather than presenting a dead switch. MISSING: the `email` '
                   'channel has no automatic delivery path - POST /api/send-notification-'
-                  'email is a manual admin endpoint that picks its own recipient - so the '
-                  'column is stored and reported but nothing consumes it, which the PUT '
+                  'email is a manual admin endpoint that picks its own recipient, and the '
+                  'per-category `email` flag is stored and reported but nothing routes on it '
+                  '- so the column is stored and reported but nothing consumes it, which the PUT '
                   'response states explicitly.'),
 
     # ── FR-AST / FR-ATS: assets and recruitment ─────────────────────────
@@ -608,10 +609,22 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-JOB-04': ('H', 'C', 'IMPLEMENTED', ('/api/admin/offboarding/revoke',),
                   'The nightly job closes sessions, clears permissions, disables login and '
                   'marks the employee Inactive on their last working day.'),
-    'FR-JOB-05': ('H', 'C', 'NOT_STARTED', (),
-                  'No leader election. The scheduler starts in the gunicorn master, which '
-                  'is the usual single-instance answer, but a multi-pod deployment would '
-                  'run every cron job once per pod.'),
+    'FR-JOB-05': ('M', 'N', 'IMPLEMENTED', ('/api/health',),
+                  'Redis lease election (scheduler_leader.py): one key, SET NX with a TTL, '
+                  'renewed at a third of the TTL by a scheduler job that shuts the scheduler '
+                  'down if the lease is lost. Renewal is fenced by token via a Lua '
+                  'compare-then-extend, so a stale leader cannot resurrect its term and two '
+                  'pods cannot both believe they are leader. The previous heuristic - start in '
+                  'the gunicorn master - was correct for one instance and silently wrong for '
+                  'several, because every pod has its own gunicorn master, so an N-pod '
+                  'deployment ran every cron job N times. Duplication was mostly absorbed by '
+                  'idempotency built for other reasons (accrual grants, outbox claims), which '
+                  'is why it went unnoticed. A configured-but-unreachable Redis refuses to '
+                  'start the scheduler rather than running every job unowned; no Redis at all '
+                  'falls back to the single-process heuristic and logs the multi-pod '
+                  'restriction. The SRS chaos test is implemented literally: three competing '
+                  'OS processes race for the lease and exactly one wins, with three distinct '
+                  'identities.'),
 
     # ── FR-ANL / FR-RPT: analytics and reports ──────────────────────────
     'FR-ANL-01': ('M', 'C', 'PARTIAL', ('/api/analytics/headcount', '/api/analytics/leave-trends',

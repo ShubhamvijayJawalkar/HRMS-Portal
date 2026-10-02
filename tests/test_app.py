@@ -2,7 +2,9 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
+import textwrap
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
@@ -41,6 +43,12 @@ os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 # parked login state was never created. The same reason as the line above:
 # production limits are not what these tests are measuring.
 os.environ.setdefault('LOGIN_RATE_LIMIT', '100000 per minute')
+# The password-reset routes carry their own 5/min limit (the SRS's figure), and
+# neither suite lifted it. A full run makes several forgot-password calls inside a
+# minute, so it tripped and surfaced as a 429 on an unrelated assertion — the same
+# shape as the LOGIN_RATE_LIMIT gap above, found a second time.
+os.environ.setdefault('FORGOT_PASSWORD_RATE_LIMIT', '100000 per minute')
+os.environ.setdefault('RESET_PASSWORD_RATE_LIMIT', '100000 per minute')
 # `HRMS_DISABLE_SCHEDULER=1` is available for a fully deterministic run; the
 # suite keeps the scheduler on so the job-registration tests stay meaningful, and
 # the import tests below tolerate the dispatcher picking a job up first.
@@ -61,6 +69,7 @@ import pytest  # noqa: E402
 import lockout  # noqa: E402
 import mfa  # noqa: E402
 from app import (  # noqa: E402
+    SECURITY_CSP,
     _decrypt_lifecycle_secret,
     _next_generated_id,
     _token_digest,
@@ -1426,6 +1435,381 @@ def test_payroll_asset_and_salary_writes_are_audited_without_copying_the_amounts
             )
         finally:
             conn.close()
+
+
+def test_an_unconfigured_email_transport_is_a_failure_not_a_success():
+    """The bug this whole go-live review turned up, and it was mine.
+
+    `send_email` returned **True** when no SMTP host was configured, logging
+    "would send". Every delivery path goes through the outbox, so an unconfigured
+    transport meant: the event was marked delivered, `GET /api/admin/outbox`
+    showed nothing wrong, the queue drained cleanly — and **no human ever received a
+    password reset link**. The employee had already been told, correctly, that "if
+    the account exists, a reset link has been sent".
+
+    Reporting success for a send that did not happen is worse than having no email
+    feature, because it converts a visible failure into an invisible one. This was
+    found by auditing work done *with* the behaviour: FR-AUTH-08 was rebuilt so the
+    response carries nothing, which is only an improvement if the link is actually
+    delivered.
+    """
+    import app as app_module
+
+    previous = app_module.SMTP_HOST
+    app_module.SMTP_HOST = ''
+    try:
+        assert app_module.email_configured() is False
+        assert app_module.send_email('someone@example.com', 'Reset', 'link') is False, (
+            'an unconfigured transport reported success for a send that never happened'
+        )
+    finally:
+        app_module.SMTP_HOST = previous
+
+
+def test_health_reports_a_missing_transport_instead_of_hiding_it(client):
+    """/api/health returning 200 only proves the process is up.
+
+    The question an operator has after deploying is whether the deployment is
+    *whole*, and the failure this catches is invisible from the outside: with no
+    SMTP host the application still serves every page, every route, and the
+    dashboard, and only an employee who never received their reset link learns
+    about it. Reported as `degraded` rather than `unhealthy` on purpose — the
+    process is fine, and a load balancer should not take the instance down over a
+    missing optional integration.
+    """
+    import app as app_module
+
+    previous = app_module.SMTP_HOST
+    app_module.SMTP_HOST = ''
+    try:
+        resp = client.get('/api/health')
+        assert resp.status_code == 200, resp.get_json()
+        body = resp.get_json()
+        assert body['status'] == 'degraded', body
+        assert body['email_configured'] is False, body
+        assert any('SMTP_HOST' in d for d in body['degraded']), body
+        # It still answers the questions it can.
+        assert body['schema'] is not None, body
+        assert body['dead_lettered_events'] is not None, body
+    finally:
+        app_module.SMTP_HOST = previous
+
+    # Configured: the email half of the report flips. Asserted *narrowly*, because
+    # the report is global and other tests legitimately leave dead-lettered events
+    # behind — asserting `status == 'ok'` here would make this test depend on the
+    # order the suite runs in, which is the fourth time that would have bitten.
+    app_module.SMTP_HOST = 'smtp.example.com'
+    try:
+        body = client.get('/api/health').get_json()
+        assert body['email_configured'] is True, body
+        assert not any('SMTP_HOST' in d for d in body['degraded']), body
+    finally:
+        app_module.SMTP_HOST = previous
+
+
+def test_a_reset_whose_email_cannot_be_delivered_does_not_look_delivered(client):
+    """End to end: the 202 is still honest, and the failure is *visible*.
+
+    FR-AUTH-08's response cannot say "no SMTP configured" — that would be an
+    enumeration oracle, and it is the whole reason delivery moved out of band. So
+    the signal has to come from somewhere else, and it does: the outbox retries and
+    then dead-letters, which is exactly what `dead_lettered_events` in the health
+    report counts.
+    """
+    import app as app_module
+    import outbox
+
+    # EMP001, not EMP002: another test asserts on EMP002's *seeded* reset tokens,
+    # and deleting them here broke it. Reusing a shared fixture employee's rows is
+    # the exact mistake this file has now made four times.
+    conn = get_db()
+    try:
+        email = conn.execute(
+            "SELECT email FROM users WHERE emp_id = 'EMP001'").fetchone()[0]
+        conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP001'])
+        conn.execute("DELETE FROM outbox_events WHERE event_type = 'password.reset'")
+    finally:
+        conn.close()
+
+    previous = app_module.SMTP_HOST
+    app_module.SMTP_HOST = ''          # the unconfigured default
+    try:
+        asked = client.post('/api/forgot-password',
+                            json={'emp_id': 'EMP001', 'email': email})
+        # Still the uniform 202 with no token — the response must not become an
+        # oracle, and the honest answer cannot depend on the mail configuration.
+        assert asked.status_code == 202, asked.get_json()
+        assert 'token' not in asked.get_json(), asked.get_json()
+
+        conn = get_db()
+        try:
+            # The link exists and is queued even though it cannot be delivered.
+            queued = conn.execute(
+                "SELECT count(*) FROM outbox_events WHERE event_type = 'password.reset'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert queued == 1, 'the reset should still be queued'
+
+        # Dispatch it: the handler fails, so the event is retried rather than marked
+        # delivered. `next_attempt_at` is pushed forward by the exponential backoff
+        # after each failure, so the clock is advanced past it between attempts —
+        # otherwise only the first attempt is ever due and the loop below would be
+        # asserting nothing.
+        for attempt in range(outbox.MAX_ATTEMPTS + 1):
+            ahead = datetime.now() + timedelta(
+                seconds=outbox.BACKOFF_BASE_SECONDS * (2 ** attempt) + 5
+            )
+            conn = get_db()
+            try:
+                outbox.dispatch_once(conn, now=ahead)
+            finally:
+                conn.close()
+        conn = get_db()
+        try:
+            status = conn.execute(
+                "SELECT status FROM outbox_events WHERE event_type = 'password.reset'"
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert status == 'dead_letter', (
+            f'undeliverable email reported as {status!r}; it must dead-letter so the '
+            f'failure is visible instead of looking delivered'
+        )
+        body = client.get('/api/health').get_json()
+        assert body['dead_lettered_events'] >= 1, body
+        assert body['status'] == 'degraded', body
+    finally:
+        app_module.SMTP_HOST = previous
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP001'])
+            conn.execute("DELETE FROM outbox_events WHERE event_type = 'password.reset'")
+        finally:
+            conn.close()
+
+
+def test_production_sends_the_security_headers_the_srs_names():
+    """SRS §11.3 lists five headers. The application shipped **none** of them.
+
+    No CSP, no `X-Content-Type-Options`, no `X-Frame-Options`, no referrer policy and
+    no HSTS — invisible in a demo, and a clickjacking and content-injection exposure
+    in production.
+
+    This boots a **real production app in a subprocess** rather than re-initialising
+    Talisman onto the suite's already-built one. Attaching the middleware a second
+    time registered two `after_request` handlers that interfered with each other —
+    HSTS came back empty — which is an artefact of the test's own construction and
+    would have been easy to "fix" by loosening the assertion until it passed. The
+    question is "does a production deployment send these headers", so that is
+    literally what is asked.
+    """
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    probe = textwrap.dedent("""
+        import json as _json
+        import app
+        c = app.app.test_client()
+        r = c.get('/login')
+        print('HEADERS:' + _json.dumps({
+            'status': r.status_code,
+            'csp': r.headers.get('Content-Security-Policy'),
+            'nosniff': r.headers.get('X-Content-Type-Options'),
+            'frame': r.headers.get('X-Frame-Options'),
+            'referrer': r.headers.get('Referrer-Policy'),
+            'hsts': r.headers.get('Strict-Transport-Security'),
+            'policy': app.SECURITY_CSP,
+        }))
+    """)
+    env = dict(os.environ)
+    env.update({
+        'FLASK_ENV': 'production',
+        'FLASK_DEBUG': '0',
+        'APP_DB_SCHEMA': os.getenv('APP_DB_SCHEMA', 'legacy'),
+        'HRMS_DISABLE_SCHEDULER': '1',
+    })
+    out = subprocess.run(
+        [sys.executable, '-c', probe], cwd=repo, env=env,
+        capture_output=True, text=True, timeout=180,
+    )
+    line = next(
+        (ln for ln in out.stdout.splitlines() if ln.startswith('HEADERS:')), None)
+    assert line, (
+        f'production boot produced no headers\nstdout={out.stdout[-1500:]}\n'
+        f'stderr={out.stderr[-1500:]}'
+    )
+    got = json.loads(line[len('HEADERS:'):])
+
+    assert got['status'] == 200, got
+    csp = got['csp'] or ''
+    assert csp, 'no Content-Security-Policy'
+    # The SRS says "CSP (no inline scripts by default)" — so script-src must not
+    # carry unsafe-inline, and the single relaxation has to be styles.
+    assert "script-src 'self'" in csp, csp
+    assert "unsafe-inline" not in csp.split('style-src')[0], csp
+    assert "style-src 'self' 'unsafe-inline'" in csp, csp
+    assert "frame-ancestors 'none'" in csp, csp
+    assert "object-src 'none'" in csp, csp
+
+    assert got['nosniff'] == 'nosniff', got
+    assert got['frame'] == 'DENY', got
+    assert got['referrer'] == 'strict-origin-when-cross-origin', got
+    assert 'max-age=' in (got['hsts'] or ''), got
+    assert 'includeSubDomains' in (got['hsts'] or ''), got
+    # The CSP asserted is the one the app declares, not a copy of it.
+    assert got['policy'] == SECURITY_CSP, 'the booted CSP differs from SECURITY_CSP'
+
+
+def test_development_does_not_break_on_its_own_csp(client):
+    """Talisman is off outside production, deliberately.
+
+    The templates load Bootstrap and bootstrap-icons from a CDN and set element
+    styles inline, so a strict CSP in development produces a page that renders
+    unstyled and a console full of violations. A CSP that fires on every local page
+    load is a CSP people learn to ignore — which is how a real one stops being
+    noticed. Production is where it counts and where it is asserted.
+    """
+    assert app.config.get('TALISMAN_ENABLED') is False, (
+        'the unit suite runs outside production and must not have Talisman active'
+    )
+    assert client.get('/login').status_code == 200
+
+
+def test_only_one_process_becomes_scheduler_leader():
+    """FR-JOB-05's chaos test, as the SRS words it: "3 scheduler-capable pods".
+
+    The shipped heuristic started the scheduler in the gunicorn master, and every
+    pod has its own gunicorn master — so an N-pod deployment ran every cron job N
+    times. Duplication was mostly absorbed by idempotency built for other reasons
+    (accrual grants, outbox claims), which is exactly why it went unnoticed.
+
+    Simulated with three processes rather than one asserting `acquire()` twice: the
+    interesting failure is two pods *both* believing they are leader, which a
+    single-process test cannot produce. Each child imports the module fresh, so
+    each gets its own `INSTANCE_ID`, and all three race for one key.
+    """
+    redis_url = os.environ.get('REDIS_URL')
+    if not redis_url:
+        pytest.skip('needs REDIS_URL; leader election is Redis-backed by design')
+
+    import json as _json
+    import subprocess
+
+    # Start from "no leader". A lease left behind by an earlier run would make this
+    # assert nothing at all, and the property under test is that *given* an unheld
+    # lease exactly one of three competing processes takes it.
+    import redis as _redis_lib
+
+    r = _redis_lib.Redis.from_url(redis_url, decode_responses=True)
+    r.delete('hrms:scheduler:leader')
+
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    probe = textwrap.dedent("""
+        import json as _json, sys
+        sys.path.insert(0, %r)
+        import scheduler_leader
+        print('RESULT:' + _json.dumps({
+            'won': scheduler_leader.acquire(),
+            'id': scheduler_leader.INSTANCE_ID,
+        }))
+    """) % repo
+
+    env = dict(os.environ)
+    env['REDIS_URL'] = redis_url
+    results = []
+    procs = [
+        subprocess.Popen([sys.executable, '-c', probe], env=env, cwd=repo,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(3)
+    ]
+    for proc in procs:
+        out, _err = proc.communicate(timeout=120)
+        line = next((ln for ln in out.splitlines() if ln.startswith('RESULT:')), None)
+        assert line, f'leader probe produced no result: {out[-800:]}'
+        results.append(_json.loads(line[len('RESULT:'):]))
+
+    winners = [r for r in results if r['won']]
+    assert len(results) == 3, results
+    assert len(winners) == 1, (
+        f'exactly one process must win the lease, {len(winners)} did: {results}'
+    )
+    # And the identity is genuinely per-process, which is what makes the fencing in
+    # renew() meaningful rather than three copies of the same token.
+    assert len({r['id'] for r in results}) == 3, results
+
+    # Fencing. The winner is a *different* process with a different identity, and
+    # this process must not be able to extend its lease — if it could, the token
+    # comparison in renew() would be doing nothing and two pods could both believe
+    # they are leader.
+    import scheduler_leader
+
+    assert scheduler_leader.renew() is False, (
+        'a process that does not hold the lease extended it; fencing is broken'
+    )
+    assert scheduler_leader.acquire() is False, (
+        'the lease was already held and must not be taken twice'
+    )
+
+    # Clear the winner's lease (it is a child process that cannot release it), then
+    # the holder can renew, and after releasing cannot.
+    r.delete('hrms:scheduler:leader')
+    assert scheduler_leader.acquire() is True
+    assert scheduler_leader.renew() is True, 'the holder must be able to renew'
+    scheduler_leader.release()
+    assert scheduler_leader.renew() is False, (
+        'after releasing, renewal must fail — a stale leader resurrecting its term '
+        'is how two pods end up running every cron job'
+    )
+
+
+def test_a_broken_redis_refuses_the_scheduler_rather_than_running_it_unowned():
+    """The failure mode that would reintroduce FR-JOB-05 while looking healthy.
+
+    `should_start_scheduler` distinguishes "no Redis configured" (a supported
+    single-process deployment) from "Redis configured but unreachable". Without
+    that distinction a broken lease store falls through to the legacy heuristic and
+    every pod starts its own scheduler — the exact bug the module exists to
+    prevent, arrived at by the most innocent-looking route.
+    """
+    import scheduler_leader
+
+    original_url = os.environ.get('REDIS_URL')
+    original_redis = scheduler_leader._redis
+    try:
+        os.environ['REDIS_URL'] = 'redis://127.0.0.1:1/0'   # nothing listening
+        # `_redis()` is the seam that decides configured-vs-reachable.
+        scheduler_leader._redis = lambda: None
+        assert scheduler_leader.should_start_scheduler() is False, (
+            'an unreachable Redis must stop the scheduler, not disable the check'
+        )
+
+        # And with no Redis at all the single-process fallback still applies, so dev,
+        # CI and the compose stack are unaffected.
+        os.environ.pop('REDIS_URL', None)
+        assert scheduler_leader.should_start_scheduler() is True
+    finally:
+        scheduler_leader._redis = original_redis
+        if original_url is None:
+            os.environ.pop('REDIS_URL', None)
+        else:
+            os.environ['REDIS_URL'] = original_url
+
+
+def test_health_reports_which_instance_owns_the_scheduler():
+    """FR-JOB-05's chaos test needs to be able to *see* the election.
+
+    "Exactly once across all pods" is only checkable if a deployment can ask which
+    pod is the leader, so the health report carries it rather than leaving it in a
+    log line.
+    """
+    import scheduler_leader
+
+    resp = _fresh_client().get('/api/health')
+    body = resp.get_json()
+    assert 'scheduler_leader' in body, body
+    if os.getenv('REDIS_URL'):
+        assert body['scheduler_leader'] == scheduler_leader.holder(), body
+    else:
+        assert body['scheduler_leader'] is None, body
 
 
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
@@ -7651,23 +8035,39 @@ def test_a_real_reset_request_delivers_the_link_out_of_band(client):
     assert stored[0] == _token_digest(token)
     assert payload['reset_url'].endswith('/reset-password?token=' + token), payload['reset_url']
 
-    # And the dispatcher consumes it, so the link is actually delivered rather than
-    # sitting in the queue as the only copy of the token.
+    # And the dispatcher *attempts* it. With no SMTP transport configured the send
+    # cannot succeed, so what matters is that the event is picked up and **retried
+    # rather than marked delivered** — the bug this whole review turned up was that
+    # an unconfigured transport returned success, the queue drained cleanly, and no
+    # human ever received the link. Asserting the queue drains would be asserting
+    # the bug. See test_a_reset_whose_email_cannot_be_delivered_does_not_look_delivered
+    # for the dead-letter half, and test_an_unconfigured_email_transport_is_a_failure…
+    # for the send itself.
     conn = get_db()
     try:
         result = outbox.dispatch_once(conn)
     finally:
         conn.close()
-    assert result, result
+    assert result['dispatched'] >= 1, result
+    # Scoped deliberately: `delivered` counts *every* event handled in the pass, and
+    # the seed leaves reconciliation events (candidate.hired) whose handlers
+    # legitimately succeed without touching SMTP. Asserting the counter is zero
+    # would be asserting something about the seed, not about this flow.
     conn = get_db()
     try:
-        still_pending = conn.execute(
-            "SELECT count(*) FROM outbox_events WHERE event_type = 'password.reset' "
-            "AND status = 'pending'"
-        ).fetchone()[0]
+        statuses = conn.execute(
+            "SELECT DISTINCT status FROM outbox_events "
+            "WHERE event_type = 'password.reset'"
+        ).fetchall()
     finally:
         conn.close()
-    assert still_pending == 0, f'{still_pending} password.reset events are still queued'
+    assert ('delivered',) not in [tuple(r) for r in statuses], statuses
+    # Clean up: this test's event would otherwise sit retrying into the next test.
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM outbox_events WHERE event_type = 'password.reset'")
+    finally:
+        conn.close()
 
 
 def test_the_reset_token_is_stored_hashed_and_the_plaintext_is_refused(client):

@@ -1845,3 +1845,93 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
 - 2 new tests. Unit **258 passed / 1 skipped**, browser **22/22**, Redis **10/10**, v2.0
   gates **109/109 GET + 55/55 write**, run sequentially — the earlier parallel run is
   the documented cause of two spurious browser failures.
+
+## Go-live review: three of the five blockers closed in code
+The question "are we good to go live?" was answered with evidence rather than
+optimism, and three items turned out to be **mine to fix** rather than operator tasks.
+
+### 1. `send_email` reported success for a send that never happened
+- **`SMTP_HOST` defaults to empty and `send_email` returned `True`, logging "would
+  send".** Every delivery path goes through the outbox, so with the default
+  configuration: the event was marked delivered, `GET /api/admin/outbox` showed
+  nothing wrong, the queue drained cleanly — and **no human ever received a password
+  reset link.** The employee had already been told, correctly, that "if the account
+  exists, a reset link has been sent".
+- **This was found by auditing work done *with* the behaviour.** FR-AUTH-08 was
+  rebuilt this session so the response carries nothing, which is only an improvement
+  if the link is actually delivered — and my own test asserted "the queue drains",
+  which was the bug. Reporting success for a send that did not happen is **worse
+  than having no email feature**, because it converts a visible failure into an
+  invisible one.
+- Now a **failure**, so the event retries and dead-letters where it can be acted
+  on. The 202 stays uniform and honest: it cannot mention SMTP without becoming an
+  enumeration oracle, which is precisely why delivery was moved out of band.
+- Three tests: the transport itself, the health report, and an end-to-end proof
+  that an undeliverable reset **dead-letters rather than looking delivered**. That
+  last one advances the clock past the exponential backoff between attempts —
+  otherwise only the first attempt is ever due and the loop asserts nothing.
+
+### 2. No security headers at all — SRS §11.3, shipped as none of the five
+SRS §11.3 names Flask-Talisman, CSP (no inline scripts by default),
+`X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy` and HSTS.
+The application had **none** of them; `grep` found only `SESSION_COOKIE_SECURE`.
+- CSP is extracted into `app.SECURITY_CSP` so the test asserts the configuration the
+  app **boots with**, not a hand-copied duplicate — a duplicated policy is a test
+  that only checks itself.
+- `script-src` carries **no** `unsafe-inline`, per the SRS's parenthetical. The one
+  relaxation is `style-src`, commented and narrow rather than blanket.
+- `frame-ancestors 'none'` **and** `X-Frame-Options: DENY` are both sent, because
+  CSP is not honoured by every browser the SRS targets.
+- Disabled outside production **deliberately**: the templates load Bootstrap from a
+  CDN and set element styles inline, so a strict CSP in development renders an
+  unstyled page and fills the console with violations. A CSP that fires on every
+  local page load is a CSP people learn to ignore — which is how a real one stops
+  being noticed.
+- The test boots a **real production app in a subprocess**. Re-initialising Talisman
+  onto the suite's app registered two `after_request` handlers that interfered — HSTS
+  came back empty — and the tempting "fix" was to loosen the assertion until it
+  passed. The question is "does a production deployment send these headers", so that
+  is literally what is asked.
+
+### 3. FR-JOB-05 — the pod count no longer matters
+The heuristic was "start in the gunicorn master", which is right for one instance
+and **silently wrong for several**: every pod has its own gunicorn master, so an
+N-pod deployment ran every cron job N times.
+- **Why it went unnoticed:** duplication was mostly absorbed by idempotency built for
+  other reasons — accrual grants are idempotent per employee/type/year/month, the
+  outbox claims conditionally. "Mostly absorbed" is not "correct", and the SRS asks
+  for "exactly-once across all pods".
+- `scheduler_leader.py` is a Redis lease: `SET NX` with a TTL, renewed at a third of
+  it by a scheduler job that **shuts the scheduler down** if the lease is lost. A pod
+  that cannot prove it still owns the term must run nothing, because the jobs it was
+  running are exactly the ones the new leader would duplicate.
+- **Renewal is fenced by token** via a Lua compare-then-extend, not a GET/PUT pair:
+  between those, another pod could take the lease and this one would overwrite the
+  new leader's token, leaving two pods both believing they are leader with neither
+  able to prove otherwise.
+- **A configured-but-unreachable Redis refuses to start the scheduler.** This
+  distinction is the subtle part: `_redis()` returns `None` for both "not configured"
+  and "unreachable", so without an explicit check a broken lease store falls through
+  to the legacy heuristic and every pod starts its own scheduler — the exact bug the
+  module prevents, reached by the most innocent-looking route.
+- **The SRS chaos test, literally:** three competing OS **processes** race for the
+  lease, exactly one wins, and all three identities differ. A single-process test
+  cannot produce the interesting failure (two pods both believing they are leader).
+  The test clears any stale lease first, or it would assert nothing.
+- `holder()` is in `/api/health`, because "exactly once across all pods" is only
+  checkable if a deployment can ask which pod won.
+
+### Also found
+- **Both password-reset routes had a hardcoded `5 per minute`** that neither suite
+  lifted — the second instance of the LOGIN_RATE_LIMIT gap, found the same way.
+  Now env-overridable (the SRS's figure stays the default) and lifted in both suites.
+  It surfaced as a 429 on an unrelated assertion.
+- **`/api/health`**, because a 200 only proves the process is up. It reports
+  `degraded` — not `unhealthy` — when SMTP is unconfigured, when outbox events have
+  dead-lettered, and which instance holds the scheduler lease. Degraded rather than
+  unhealthy on purpose: a load balancer should not take an instance down over a
+  missing optional integration, and the process really is fine.
+- Matrix now **59 IMPLEMENTED / 37 PARTIAL / 7 NOT_STARTED / 1 RETIRED** (FR-JOB-05
+  moved). Unit **265 passed / 2 skipped** (the leader chaos test skips without
+  `REDIS_URL` and passes with it), browser **22/22**, Redis **10/10**, v2.0 gates
+  **111/111 GET + 55/55 write**.

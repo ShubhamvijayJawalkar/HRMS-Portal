@@ -67,6 +67,14 @@ services:
       ANONYMISATION_SALT: ${ANONYMISATION_SALT:-}
       # Encrypts authenticator secrets at rest (FR-AUTH-11); MFA returns 503 without it.
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
+      # FR-JOB-05 scheduler lease TTL. The leader renews at a third of this and shuts
+      # its scheduler down if the lease is lost, so this bounds how long a crashed
+      # leader's jobs go unowned.
+      SCHEDULER_LEASE_TTL: ${SCHEDULER_LEASE_TTL:-60}
+      # Password-reset route limits. The SRS says 5/min; overridable because a hardcoded
+      # literal is a deployment knob nobody can turn.
+      FORGOT_PASSWORD_RATE_LIMIT: ${FORGOT_PASSWORD_RATE_LIMIT:-5 per minute}
+      RESET_PASSWORD_RATE_LIMIT: ${RESET_PASSWORD_RATE_LIMIT:-5 per minute}
       PORT: 10000
     depends_on:
       migrate:

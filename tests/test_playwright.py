@@ -10,6 +10,12 @@ os.environ.setdefault(
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['FLASK_DEBUG'] = '0'
 os.environ.setdefault('LOGIN_RATE_LIMIT', '60 per minute')
+# The password-reset routes carry their own 5/min limit (the SRS's figure), and
+# neither suite lifted it. A full run makes several forgot-password calls inside a
+# minute, so it tripped and surfaced as a 429 on an unrelated assertion — the same
+# shape as the LOGIN_RATE_LIMIT gap above, found a second time.
+os.environ.setdefault('FORGOT_PASSWORD_RATE_LIMIT', '100000 per minute')
+os.environ.setdefault('RESET_PASSWORD_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
 # FR-AUTH-11: encrypts authenticator secrets at rest. Fixed non-production
