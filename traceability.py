@@ -31,12 +31,27 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-USR-01': ('M', 'R', 'IMPLEMENTED', ('/api/users',),
                   'page/per_page parsed as ints, per_page capped at 200, sort on an '
                   'allow-list; invalid input is 400, never a silent default.'),
-    'FR-USR-02': ('M', 'C', 'PARTIAL', ('/api/users',),
+    'FR-USR-02': ('M', 'C', 'PARTIAL',
+                  ('/api/users', '/api/admin/users/<emp_id>/password'),
                   'emp_id/email/role/department validated, case-insensitive email '
-                  'uniqueness, default status Active + allow_login. Missing: the '
-                  'welcome email with a 24 h single-use reset token, and balances '
-                  'seeded from the grade/location policy rather than the default '
-                  'matrix (leave_policy derives on read instead).'),
+                  'uniqueness, default status Active + allow_login. A 24 h single-use '
+                  'welcome token is issued (credentials.issued) but its only delivery '
+                  'is the outbox, so on a deployment with no SMTP the employee never '
+                  'receives it - which is why an admin-set password '
+                  '(POST /api/admin/users/<emp_id>/password) is the delivery-independent '
+                  'path for both the welcome and the forgotten-password case. It closes '
+                  'every session, clears any FR-AUTH-03 lockout (otherwise the admin '
+                  'action appears to work and the employee is still locked out for 15 '
+                  'minutes), refuses a blocked/archived/inactive target with a 409 that '
+                  'names the action which would help, and requires the current password '
+                  'when the target is the caller - otherwise a hijacked admin SESSION '
+                  'becomes permanent ownership of the account. No password or hash is '
+                  'written to audit_log, which is retained for years. Creating a user '
+                  'no longer reports email_sent: true unconditionally, which on a '
+                  'no-SMTP deployment meant an admin was told the welcome email went out '
+                  'when nothing had been sent. Missing: balances seeded from the '
+                  'grade/location policy rather than the default matrix (leave_policy '
+                  'derives on read instead).'),
     'FR-USR-03': ('M', 'R', 'IMPLEMENTED', ('/api/users/<emp_id>',),
                   'Field allow-list, true partial update, role changes audited with a '
                   'before/after diff, email re-verifies uniqueness.'),

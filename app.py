@@ -2882,16 +2882,26 @@ def navigation_for(actor, conn=None) -> list[dict]:
 
 @app.context_processor
 def inject_navigation():
-    """Give every template the same policy-filtered navbar (FR-USR-15)."""
+    """Give every template the same policy-filtered navbar (FR-USR-15).
+
+    Also exposes `current_emp_id`, taken from the **database** actor rather than the
+    session copy, because that is the identity the authorization decisions are made
+    against and a stale session copy is what a role change leaves behind. The admin
+    user panel needs it to tell "setting someone else's password" apart from
+    "setting my own", which has to supply the current password.
+    """
     if 'emp_id' not in session:
-        return {'nav_entries': ()}
+        return {'nav_entries': (), 'current_emp_id': None}
     conn = get_db()
     try:
         actor = policy.current_actor(conn)
-        return {'nav_entries': navigation_for(actor, conn=conn)}
+        return {
+            'nav_entries': navigation_for(actor, conn=conn),
+            'current_emp_id': actor.get('emp_id'),
+        }
     except Exception:
         logger.warning('navigation_for failed; rendering an empty navbar', exc_info=True)
-        return {'nav_entries': ()}
+        return {'nav_entries': (), 'current_emp_id': None}
     finally:
         conn.close()
 
@@ -3535,6 +3545,158 @@ def admin_unlock_account(emp_id):
         'emp_id': emp_id,
         'removed': was_locked,
     }), 200
+
+
+@app.route('/api/admin/users/<emp_id>/password', methods=['POST'])
+@admin_required
+def admin_set_user_password(emp_id):
+    """An administrator sets a colleague's password.
+
+    This exists because **`/api/forgot-password` cannot work without an email
+    server.** The reset link's only delivery is the outbox, and every delivery path
+    goes through `send_email`, so on a deployment with no SMTP configured a
+    forgotten password is *unrecoverable*: the employee is told, truthfully and
+    uniformly, that "if the account exists, a reset link has been sent" — and then
+    waits for a message that will never arrive. An administrator is the recovery
+    path, so it belongs in the user-management panel rather than being improvised
+    over a database console.
+
+    Four decisions that are not obvious from the signature:
+
+    **Sessions are closed, and this is the point of the route.** A password reset
+    that leaves existing sessions alive is not a reset — the usual reason an admin
+    resets a password is that it may have been exposed, and the exposed session
+    would survive it. Both the database sessions and the Redis-backed ones are
+    revoked.
+
+    **The lockout is cleared.** FR-AUTH-03 locks an employee for 15 minutes after 10
+    consecutive failures. Without this, an admin sets a new password for a locked
+    account, tells the employee "try again", and they are still locked out — an
+    admin action that appears to work and does not.
+
+    **Setting your own password this way needs your current password.** Otherwise a
+    hijacked admin *session* becomes permanent account ownership: the attacker sets
+    a password only they know and the account is theirs after the session ends.
+    Self-service already requires the current password; this route must not be the
+    way around it.
+
+    **The password is never written to the audit row.** `audit_log` is retained for
+    years; a copy of a credential in it would outlive the account.
+
+    Blocked, archived and inactive accounts are refused with 409 rather than
+    silently accepted: they cannot sign in anyway, and the honest response names
+    the action that would help — restore or unblock first, then set the password.
+    """
+    data = request.get_json(silent=True) or {}
+    new_password = (data.get('password') or '').strip()
+    actor = session['emp_id']
+    generated = False
+
+    if not new_password:
+        # Same affordance as user creation: a deployment with no mail server has no
+        # way to deliver a reset link, so "leave it blank and hand over the printed
+        # password" is a first-class path rather than a workaround.
+        new_password = _generate_initial_password()
+        generated = True
+    else:
+        # FR-AUTH-10, the same check every other password-setting route uses, so the
+        # answer for "too short" is identical whichever route the admin reaches for.
+        problem = _password_problem(new_password, 'password')
+        if problem:
+            return jsonify(problem[0]), problem[1]
+
+    conn = get_db()
+    try:
+        target = conn.execute(
+            'SELECT emp_id, name, status FROM users WHERE emp_id = ?', [emp_id]
+        ).fetchone()
+        if not target:
+            return jsonify({'error': 'Employee not found'}), 404
+
+        if target[2] != 'Active':
+            # The advice has to use the *same word as the button that does it*, or
+            # the admin is left hunting for an "Activate" control that does not
+            # exist. This one is "Unblock" — deliberately distinct from "Unlock",
+            # which clears a temporary lockout and is a different action with a
+            # different meaning (FR-AUTH-03).
+            next_step = {
+                'Archived': 'Restore the account first, then set the password.',
+                'Blocked': 'Unblock the account first, then set the password.',
+                'Inactive': 'Set the status back to Active, then set the password.',
+                'Pre-hire': 'Complete the hire (accept the offer), then set the password.',
+            }.get(target[2], 'Set the status back to Active, then set the password.')
+            return jsonify({
+                'error': f'{emp_id} is {target[2]}, so a password would not let them sign in',
+                'status': target[2],
+                'next_step': next_step,
+            }), 409
+
+        if emp_id == actor:
+            # See the docstring: without this a stolen admin session becomes a
+            # permanent takeover.
+            current = data.get('current_password', '')
+            stored = conn.execute(
+                'SELECT password FROM users WHERE emp_id = ?', [emp_id]
+            ).fetchone()[0]
+            if not check_password(current, stored):
+                return jsonify({
+                    'error': 'Your own password change needs your current password',
+                    'hint': 'Use the change-password form on your profile, or supply '
+                            'current_password here.',
+                }), 400
+            if new_password == current:
+                return jsonify({
+                    'error': 'The new password must differ from the current one',
+                }), 400
+
+        before = lockout.status_for(conn, emp_id)
+        was_locked = lockout.unlock(conn, emp_id)
+        conn.execute(
+            'UPDATE users SET password = ?, failed_attempts = 0, locked_until = NULL '
+            'WHERE emp_id = ?',
+            [hash_password(new_password), emp_id],
+        )
+        revoked = _close_active_user_sessions(conn, emp_id)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Redis-backed sessions live outside the database, so closing the rows above is
+    # not enough when REDIS_URL is set — a session that survives here would keep its
+    # access after a password reset.
+    _revoke_redis_sessions(emp_id)
+
+    audit_log(
+        actor, 'ADMIN_PASSWORD_SET',
+        f'{actor} set a new password for {emp_id}',
+        entity='Auth', entity_id=emp_id,
+        before={'locked': before.get('locked'), 'attempts': before.get('attempts')},
+        # Deliberately no password, and no hash: this table is kept for years.
+        after={'password': 'set', 'locked_cleared': was_locked,
+               'sessions_closed': revoked},
+    )
+    add_notification(
+        emp_id, 'ADMIN_PASSWORD_SET',
+        'An administrator set a new password for your account and signed you out of '
+        'your other sessions. If you did not expect this, contact your administrator.',
+    )
+
+    body = {
+        'message': f'Password set for {emp_id}.'
+                   + (f' Cleared a lockout and closed {revoked} active session(s).'
+                      if revoked else ''),
+        'emp_id': emp_id,
+        'sessions_closed': revoked,
+        'lockout_cleared': was_locked,
+    }
+    if generated:
+        # The only copy of the plaintext. Returned once, never stored, never emailed
+        # — a deployment with no SMTP has no other way to hand it over.
+        body['generated_password'] = new_password
+        body['password_source'] = 'generated'
+        body['notice'] = ('Shown once and not emailed — no SMTP server is configured. '
+                          'Copy it now and hand it over; it cannot be retrieved later.')
+    return jsonify(body), 200
 
 
 @app.route('/dashboard')
@@ -10877,9 +11039,20 @@ def add_user():
         <p style="color:#64748b;font-size:12px;">Please change your password after first login. Do not share these credentials with anyone.</p>
         <p style="color:#64748b;font-size:12px;">- HRMS Team</p>
     </div>"""
-    send_email(data['email'], 'Your HRMS Account Credentials', creds_body)
+    delivered = send_email(data['email'], 'Your HRMS Account Credentials', creds_body)
 
-    body = {'message': 'User added', 'email_sent': True}
+    # Was hardcoded `True`. That was the same class of defect as `send_email`
+    # reporting success for a send that never happened, one level up: with no SMTP
+    # configured the new employee was created, the response said the welcome email
+    # went out, and nobody had received it. An admin reading `email_sent: true` on a
+    # deployment with no mail server has no way to know the credentials never left.
+    body = {'message': 'User added', 'email_sent': delivered}
+    if not delivered:
+        body['notice'] = (
+            'The welcome email could not be sent, so the credentials did not reach '
+            f'{data["email"]}. Hand the password over directly, or use '
+            'POST /api/admin/users/<emp_id>/password to issue a new one.'
+        )
     if generated:
         # The admin supplied no password, so this is the only time the plaintext
         # exists anywhere but the email above. It is returned so a deployment with

@@ -1594,6 +1594,69 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return 200 if st == 200 else st
     run("auth(admin unlock + sign-in again)", lockout_unlock)
 
+    def admin_set_password():
+        """FR-USR-01/FR-AUTH-10: an administrator sets a colleague's password.
+
+        The only recovery path that does not depend on an email server, and the one
+        that matters most on a deployment with no SMTP — `/api/forgot-password`
+        delivers its link only through the outbox, so without a mail server a
+        forgotten password is otherwise unrecoverable.
+
+        Asserted against the canonical table, because the route writes
+        `failed_attempts`/`locked_until` alongside the hash: those are the FR-AUTH-03
+        columns Alembic `0009` added, so this is what catches a write that only
+        happens to work on the `legacy` shape.
+        """
+        target = "EMP002"
+        # `cl_a` is the probe's already-authenticated **Admin** session — and it has
+        # to be reused rather than re-logged-in. EMP001 is in `mfa.MANDATORY_ROLES`,
+        # so a fresh `/login` here returns a *parked* half-session (`mfa_required`)
+        # and every admin route then answers 401. Reusing the session the other admin
+        # flows use is what keeps this one measuring the password route.
+        #
+        # Note the target is EMP002, which the lockout flows above deliberately locked
+        # — that is useful, not incidental: it means this flow also proves the
+        # lockout is cleared on the canonical schema.
+        ka = tok_a
+
+        # A weak password is refused, so the recovery path cannot be used to slip
+        # past the policy at the moment somebody is already locked out.
+        weak = _post(cl_a, ka, f"/api/admin/users/{target}/password",
+                     {"password": "password123"})
+        if weak.status_code != 400:
+            return 400
+
+        # A blocked/archived target is refused with the next step named.
+        r = _post(cl_a, ka, f"/api/admin/users/{target}/password", {})
+        if r.status_code != 200:
+            return r.status_code
+        body = r.get_json() or {}
+        generated = body.get("generated_password")
+        if not generated:
+            return 409  # no password was generated, so the flow proved nothing
+
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT password, failed_attempts, locked_until FROM users "
+                "WHERE emp_id = %s", (target,),
+            ).fetchone()
+        if row is None:
+            return 404
+        if row[1] or row[2] is not None:
+            return 409  # the lockout columns were not cleared on the v2.0 schema
+
+        # And the plaintext is not what is stored, and is not echoed to the log.
+        if generated in str(row[0]):
+            return 409  # stored in plaintext
+        with psycopg.connect(dsn, autocommit=True) as pc:
+            hit = pc.execute(
+                "SELECT count(*) FROM audit_log WHERE action = 'ADMIN_PASSWORD_SET'"
+            ).fetchone()[0]
+        if not hit:
+            return 409  # the action was not audited on the target schema
+        return 200
+    run("auth(admin sets a password)", admin_set_password)
+
     return out
 
 

@@ -2079,3 +2079,75 @@ that would have made a configuration matching a provider's own documentation fai
   loads it automatically and people reasonably assume gunicorn does too. It does
   not, and this project would have been the exception.
 - Unit **272 passed / 2 skipped**.
+
+## Admin-set password: the recovery path that does not need an email server
+Asked to make the admin panel the way a user's password is changed, because
+`/api/forgot-password` cannot work without SMTP. Two things worth recording.
+
+- **The gap is real and total.** The reset link's only delivery is the outbox, and
+  every delivery goes through `send_email`. So on a deployment with no mail server a
+  forgotten password is **unrecoverable** — the employee is told, truthfully and
+  uniformly, that "if the account exists, a reset link has been sent", and then waits
+  forever. FR-AUTH-08's uniform 202 is the right design and makes this worse: there
+  is nothing in the response an employee or an admin can react to.
+- **Four decisions that are not visible in the signature**, each of which is a control
+  that could plausibly have been missed:
+  - **Sessions are closed** (DB rows *marked* closed, plus Redis revocation). A reset
+    that leaves sessions alive is not a reset: the usual reason for resetting is that
+    the password may have been exposed, and the exposed session would survive it.
+  - **The lockout is cleared.** Without this, an admin sets a password, tells the
+    employee to try again, and they fail for another 15 minutes — an admin action
+    that appears to work and does not.
+  - **Setting your *own* password here requires your current password.** Otherwise a
+    hijacked admin *session* — which may expire — becomes an account the attacker
+    keeps, by setting a password only they know. Self-service already requires it;
+    this route must not be the way around it.
+  - **No password or hash in `audit_log`,** which is retained for years.
+- **A 409 that names the action which would help**, and — caught while testing — the
+  advice has to use **the same word as the button that does it**. The first version
+  told a Blocked user to "Activate the account"; the control is called **Unblock**,
+  and distinct from **Unlock**, which clears a temporary lockout (FR-AUTH-03). An
+  admin left hunting for an "Activate" button that does not exist has been told
+  nothing useful.
+- **A test of mine asserted the wrong thing, and the code was right.** I asserted
+  `user_sessions` count == 0 after a reset. Sessions are **marked** closed, not
+  deleted, and that distinction is the point: the table is the record of hours
+  worked feeding attendance and payroll, so deleting rows to satisfy a security
+  control destroys statutory data. The test now asserts no *open* sessions and that
+  both rows and their `total_hours` survive.
+- **The `email_sent` lie, one level up.** User creation hardcoded
+  `email_sent: True`. That was the same defect as `send_email` returning True for a
+  send that never happened: with no SMTP the employee is created, the response says
+  the welcome email went out, and nobody received it — so an admin has no way to
+  learn the credentials never left. Now it reports the real result and names the
+  recovery route in the notice.
+- **The notification taxonomy test caught the new type on the first run**, landing
+  `ADMIN_PASSWORD_SET` in `General`. It is `Security`, the same class as `MFA_RESET`:
+  an employee whose password was set by an administrator must be told, or their next
+  sign-in demands credentials they never chose and they conclude they were attacked.
+  This is the fourth time that test has earned its keep.
+- **A browser-test defect that passed alone and failed in a full run** — the sixth
+  instance of test-order interference in this file. `page.click("button[title='...']")`
+  clicks the *first match on the page*, and because the search input debounces, it
+  reset the password of a **different employee** ("Second Admin (EMP902)", created by
+  another test) and failed on the label assertion. The click is now scoped to the row
+  containing the emp_id, and the result is asserted not to mention another employee.
+  **Never `page.click` a selector that matches several rows.**
+- The browser test drives the real modal and signs in as the employee with the
+  generated password, because a modal that exists in the template but is unreachable
+  passes every API test — and because the generated password must render *outside* the
+  input it came from, which is cleared after submit. That is the same mistake that once
+  hid a whole success message inside a form success had just hidden.
+- `current_emp_id` is now exposed to templates from the context processor, read from
+  the **database** actor rather than the session copy, so the panel can tell "setting
+  someone else's password" from "setting my own".
+- A probe write flow `auth(admin sets a password)` proves it on the v2.0 target, which
+  is the only thing that would catch a write that only works on the `legacy` shape:
+  the route writes `failed_attempts`/`locked_until` beside the hash, and those are
+  the columns Alembic `0009` added. It reuses the probe's authenticated admin client
+  because EMP001 is in `mfa.MANDATORY_ROLES`, so a fresh login there returns a
+  *parked* half-session and every admin route answers 401 — that cost one debugging
+  round. It targets EMP002, which the lockout flows above deliberately locked, so it
+  also proves the lockout clears on the canonical schema.
+- Unit **280 passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET +
+  56/56 write**, probe run twice for idempotency, preflight and CC-01 green.

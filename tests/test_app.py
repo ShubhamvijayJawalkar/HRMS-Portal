@@ -2113,6 +2113,322 @@ def test_a_hung_mail_server_cannot_stall_the_outbox_dispatcher():
     assert 'SMTP_TIMEOUT_SECONDS' in pathlib.Path(app_module.__file__).read_text()
 
 
+def test_admin_can_set_a_password_when_there_is_no_mail_server():
+    """The recovery path that does not depend on email — and why it has to exist.
+
+    `/api/forgot-password` delivers its link only through the outbox, and every
+    delivery goes through `send_email`. On a deployment with no SMTP configured a
+    forgotten password is therefore **unrecoverable**: the employee is told,
+    truthfully and uniformly, that "if the account exists, a reset link has been
+    sent" — and then waits forever for a message that cannot arrive. An
+    administrator is the only remaining route, so it lives in the user-management
+    panel rather than being improvised over a database console.
+    """
+    _cleanup_user_contract_rows('EMP970')
+    ph = hash_password('pass123')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP970', 'No Mail', 'emp970@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [ph])
+    finally:
+        conn.close()
+
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-1')
+
+    new_password = 'otter-lantern-marlin-42'
+    resp = client.post('/api/admin/users/EMP970/password',
+                       json={'password': new_password})
+    assert resp.status_code == 200, resp.get_json()
+    assert 'generated_password' not in resp.get_json(), (
+        'a supplied password must not be echoed back'
+    )
+
+    # It really is the new password, on the hash the application verifies against.
+    from security import check_password as _check
+
+    conn = get_db()
+    try:
+        stored = conn.execute(
+            "SELECT password FROM users WHERE emp_id = 'EMP970'").fetchone()[0]
+        assert _check(new_password, stored), 'the new password does not verify'
+    finally:
+        conn.close()
+    _cleanup_user_contract_rows('EMP970')
+
+
+def test_admin_set_password_closes_every_session_of_that_employee():
+    """A password reset that leaves sessions alive is not a reset.
+
+    The ordinary reason an administrator resets a password is that it may have been
+    exposed — and the exposed *session* would survive it, which is the thing being
+    responded to. Both the database sessions and the Redis-backed ones are closed.
+    """
+    _cleanup_user_contract_rows('EMP971')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP971', 'Sessions', 'emp971@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        for sid in (9001, 9002):
+            conn.execute(
+                "INSERT INTO user_sessions (emp_id, session_id, login_time, session_date) "
+                "VALUES ('EMP971', ?, ?, ?)",
+                [sid, datetime.now(), datetime.now().date()])
+        conn.commit()
+        before = conn.execute(
+            "SELECT count(*) FROM user_sessions WHERE emp_id = 'EMP971'").fetchone()[0]
+        assert before == 2, f'fixture did not create two sessions ({before})'
+    finally:
+        conn.close()
+
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-2')
+    resp = client.post('/api/admin/users/EMP971/password',
+                       json={'password': 'otter-lantern-marlin-43'})
+    assert resp.status_code == 200, resp.get_json()
+
+    conn = get_db()
+    try:
+        open_sessions, kept, hours = conn.execute(
+            "SELECT count(*) FILTER (WHERE logout_time IS NULL), count(*), "
+            "count(*) FILTER (WHERE total_hours IS NOT NULL) "
+            "FROM user_sessions WHERE emp_id = 'EMP971'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert open_sessions == 0, (
+        f'{open_sessions} session(s) survived a password reset; an exposed session '
+        f'would outlive the exposure it was meant to end'
+    )
+    # Closed, not deleted — and that distinction is the point. `user_sessions` is the
+    # record of hours worked, which feeds attendance and payroll, so removing the rows
+    # would destroy statutory data to satisfy a security control. The session is ended
+    # and its elapsed time recorded.
+    assert kept == 2, f'session rows were deleted rather than closed ({kept} left)'
+    assert hours == 2, 'elapsed hours were not recorded on the closed sessions'
+    _cleanup_user_contract_rows('EMP971')
+
+
+def test_admin_set_password_clears_a_lockout_so_the_employee_can_actually_sign_in():
+    """The trap this closes: admin sets a new password, employee is still locked.
+
+    FR-AUTH-03 locks an employee for 15 minutes after 10 consecutive failures.
+    Without clearing it, the admin sets a password, tells the employee to try again,
+    and they fail again for another quarter of an hour — an admin action that
+    appears to have worked and did not.
+    """
+    import lockout as lockout_module
+
+    _cleanup_user_contract_rows('EMP972')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department, failed_attempts, locked_until) VALUES "
+            "('EMP972', 'Locked', 'emp972@company.com', 'Employee', ?, 'Active', 1, 'IT', "
+            "?, ?)",
+            [hash_password('pass123'), lockout_module.MAX_FAILED_ATTEMPTS,
+             datetime.now() + timedelta(minutes=10)])
+        conn.commit()
+        assert lockout_module.is_locked(conn, 'EMP972') is True, 'fixture is not locked'
+    finally:
+        conn.close()
+
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-3')
+    resp = client.post('/api/admin/users/EMP972/password',
+                       json={'password': 'otter-lantern-marlin-44'})
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()['lockout_cleared'] is True, resp.get_json()
+
+    conn = get_db()
+    try:
+        assert lockout_module.is_locked(conn, 'EMP972') is False
+    finally:
+        conn.close()
+    _cleanup_user_contract_rows('EMP972')
+
+
+def test_an_admin_cannot_turn_a_stolen_session_into_permanent_ownership():
+    """Setting your *own* password this way needs your current password.
+
+    Otherwise a hijacked admin **session** — which may be revoked, or may simply
+    expire — becomes an account the attacker keeps for good, by setting a password
+    only they know. Self-service already requires the current password; this route
+    must not be the way around it, which is why the check is on the *target* rather
+    than assumed from the UI.
+    """
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-4')
+
+    # No current_password supplied: refused.
+    resp = client.post('/api/admin/users/EMP001/password',
+                       json={'password': 'otter-lantern-marlin-45'})
+    assert resp.status_code == 400, resp.get_json()
+    assert 'current password' in resp.get_json()['error'].lower(), resp.get_json()
+
+    # A wrong one is refused too.
+    resp = client.post('/api/admin/users/EMP001/password',
+                       json={'password': 'otter-lantern-marlin-45',
+                             'current_password': 'not-the-password'})
+    assert resp.status_code == 400, resp.get_json()
+
+    # And the seeded admin's password is untouched by either attempt.
+    conn = get_db()
+    try:
+        stored = conn.execute(
+            "SELECT password FROM users WHERE emp_id = 'EMP001'").fetchone()[0]
+    finally:
+        conn.close()
+    from security import check_password as _check
+
+    assert _check('pass123', stored), 'a refused self-reset still changed the password'
+
+
+def test_admin_set_password_refuses_accounts_that_could_not_sign_in_and_says_what_would_help():
+    """A 409 naming the next step, rather than a password set on a dead account.
+
+    Setting a password for a blocked or archived user changes nothing — they still
+    cannot sign in — and the admin is left believing it did. The response names the
+    action that would actually help.
+    """
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-5')
+
+    resp = client.post('/api/admin/users/EMP404/password',
+                       json={'password': 'otter-lantern-marlin-46'})
+    assert resp.status_code == 404, resp.get_json()
+
+    _cleanup_user_contract_rows('EMP973')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP973', 'Blocked', 'emp973@company.com', 'Employee', "
+            "?, 'Blocked', 0, 'MIS')", [hash_password('pass123')])
+        conn.commit()
+    finally:
+        conn.close()
+
+    resp = client.post('/api/admin/users/EMP973/password',
+                       json={'password': 'otter-lantern-marlin-46'})
+    assert resp.status_code == 409, resp.get_json()
+    body = resp.get_json()
+    assert body['status'] == 'Blocked', body
+    assert 'unblock' in body['next_step'].lower(), body
+
+    conn = get_db()
+    try:
+        stored = conn.execute(
+            "SELECT password FROM users WHERE emp_id = 'EMP973'").fetchone()[0]
+    finally:
+        conn.close()
+    from security import check_password as _check
+
+    assert _check('pass123', stored), 'a refused reset still wrote the password'
+    _cleanup_user_contract_rows('EMP973')
+
+
+def test_the_admin_password_action_never_writes_the_password_to_the_audit_log():
+    """`audit_log` is retained for years; a copy of a credential in it outlives the
+    account. The same reasoning that keeps salary amounts out of it."""
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-6')
+
+    secret = 'otter-lantern-marlin-47'
+    _cleanup_user_contract_rows('EMP974')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP974', 'Audited', 'emp974@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+    finally:
+        conn.close()
+
+    resp = client.post('/api/admin/users/EMP974/password', json={'password': secret})
+    assert resp.status_code == 200, resp.get_json()
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT details FROM audit_log WHERE action = 'ADMIN_PASSWORD_SET'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows, 'the action was not audited at all'
+    for (details,) in rows:
+        assert secret not in str(details), 'the password was written to the audit log'
+        assert 'hash' not in str(details).lower(), 'a hash was written to the audit log'
+    _cleanup_user_contract_rows('EMP974')
+
+
+def test_admin_set_password_obeys_the_same_password_policy_as_every_other_route():
+    """FR-AUTH-10. The point is that the answer is *identical* whichever route an
+    administrator reaches for — a route that skipped the policy would let a weak
+    password in through the recovery path, which is the path people use when
+    something has already gone wrong."""
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-7')
+
+    _cleanup_user_contract_rows('EMP975')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP975', 'Policy', 'emp975@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+    finally:
+        conn.close()
+
+    # Too short, and on the breach corpus. Both refused.
+    for bad in ('short1', 'password123'):
+        resp = client.post('/api/admin/users/EMP975/password', json={'password': bad})
+        assert resp.status_code == 400, (bad, resp.get_json())
+
+    # And a blank generates a compliant one rather than writing an empty password.
+    resp = client.post('/api/admin/users/EMP975/password', json={})
+    assert resp.status_code == 200, resp.get_json()
+    generated = resp.get_json().get('generated_password')
+    import passwords as passwords_module
+
+    assert generated and passwords_module.is_acceptable(generated), resp.get_json()
+    _cleanup_user_contract_rows('EMP975')
+
+
+def test_creating_a_user_no_longer_claims_an_email_was_sent_when_none_was():
+    """The same defect as `send_email` returning True for a send that never
+    happened, one level up: `email_sent` was hardcoded `True`.
+
+    With no SMTP configured the employee is created, the response says the welcome
+    email went out, and nobody received it — so an admin has no way to learn the
+    credentials never left, and the new user cannot sign in.
+    """
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 'sess-pw-8')
+
+    _cleanup_user_contract_rows('EMP976')
+    payload = {'emp_id': 'EMP976', 'name': 'No Welcome',
+               'email': 'emp976@company.com', 'role': 'Employee',
+               'department': 'MIS', 'password': 'otter-lantern-marlin-48'}
+    resp = client.post('/api/users', json=payload)
+    assert resp.status_code == 201, resp.get_json()
+    body = resp.get_json()
+    # No SMTP in the suite, so this is the branch that matters.
+    assert body['email_sent'] is False, body
+    assert 'could not be sent' in body['notice'], body
+    assert '/api/admin/users/' in body['notice'] and 'password' in body['notice'], (
+        f'the notice must point at the recovery route, since the email is the thing '
+        f'that just failed: {body["notice"]}'
+    )
+    _cleanup_user_contract_rows('EMP976')
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating

@@ -159,6 +159,11 @@ _EXACT = {
     'PAYROLL': 'Payroll',
     'PAYSLIP': 'Payroll',
     'MFA_RESET': 'Security',
+    # An employee whose password was set by an administrator has to be told, for the
+    # same reason as an MFA reset: their next sign-in would otherwise demand
+    # credentials they never chose, which reads as an attack rather than as an
+    # administrator helping them after a forgotten password.
+    'ADMIN_PASSWORD_SET': 'Security',
     'BREAK_DISPOSED': 'Attendance',
 }
 
@@ -303,6 +308,7 @@ KNOWN_TYPES = (
     'GOAL_RATED', 'REVIEW_SUBMITTED',
     'HOLIDAY_OPTIN_REQUESTED',
     'MFA_RESET',
+    'ADMIN_PASSWORD_SET',
     'ACCOUNT_LOCKED',
     'ACCOUNT_UNLOCKED',
     'BREAK_DISPOSED',

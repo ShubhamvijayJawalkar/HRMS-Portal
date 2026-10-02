@@ -744,3 +744,73 @@ def test_password_reset_page_completes_the_journey(page):
     # And the new password is the one that took.
     page.goto(BASE_URL + '/login')
     _login(page, 'EMP002', 'jade-marlin-quilt-77')
+
+
+def test_admin_sets_a_password_from_the_user_management_panel(page):
+    """The recovery path when there is no mail server.
+
+    `/api/forgot-password` can only deliver its link by email, so on a deployment
+    with no SMTP a forgotten password has no self-service route and the admin panel
+    is the only way out. That makes this a load-bearing control rather than a
+    convenience, so it is exercised through the real UI — a modal that exists in the
+    template but is never reachable would pass every API test.
+
+    Driven as a browser test for a reason a unit test cannot cover: the generated
+    password has to be shown *outside* the input it came from, because the field is
+    cleared after submit. The same mistake once hid a whole success message inside a
+    form that success had just hidden.
+    """
+    _login(page, 'EMP001', 'pass123')
+    page.wait_for_timeout(3000)
+    page.goto(BASE_URL + '/admin/users')
+    page.wait_for_selector("button[title^='Set a new password']", timeout=15000)
+
+    page.fill('#searchInput', 'EMP002')
+    # **Scope the click to the row.** The first version of this test used
+    # `page.click("button[title='...']")`, which clicks the *first match on the
+    # page* — and because the search input debounces, it reset the password of a
+    # different employee ("Second Admin (EMP902)") and then failed on the label
+    # assertion. It passed in isolation and failed in a full run, which is the
+    # signature of test-order interference rather than a product bug: EMP902 only
+    # exists because another test creates it.
+    #
+    # Two changes: wait for the row itself (the signal that the filter applied),
+    # then click within that row. Never `page.click` on a selector that matches
+    # several rows.
+    row = page.locator('tr', has=page.locator('td strong', has_text='EMP002')).first
+    row.wait_for(state='visible', timeout=15000)
+    row.locator("button[title^='Set a new password']").click()
+    # The element appearing is the signal; a fixed sleep for a modal is the
+    # sleep-vs-signal pattern this file has now had to fix five times.
+    page.locator('#passwordModal').wait_for(state='visible', timeout=15000)
+    assert 'EMP002' in page.text_content('#pwTargetLabel')
+
+    # Blank generates a compliant password, which is the whole point on a deployment
+    # with no mail server: there is no email to deliver it, so it must be shown.
+    with page.expect_response(
+        lambda r: '/api/admin/users/EMP002/password' in r.url and r.request.method == 'POST'
+    ) as resp:
+        page.click('#pwConfirm')
+    assert resp.value.ok, f'{resp.value.status}: {resp.value.text()}'
+    payload = resp.value.json()
+    generated = payload.get('generated_password')
+    assert generated, f'no password was generated or returned: {payload}'
+
+    # Rendered outside the (now cleared) input, so it survives the form reset.
+    page.locator('#pwResult').wait_for(state='visible', timeout=10000)
+    assert generated in page.text_content('#pwResult')
+    assert 'EMP902' not in page.text_content('#pwResult'), (
+        'the password was set on the wrong employee: the row-scoped click should make '
+        'that impossible'
+    )
+    assert page.input_value('#pwNew') == '', 'the field was not cleared after submit'
+
+    # The warning about signing the employee out is stated, not assumed — it is the
+    # surprising part of the action and an admin clicking the wrong button would
+    # otherwise sign a colleague out with no idea why.
+    modal_text = page.text_content('#passwordModal')
+    assert 'signs the employee out' in modal_text.lower(), modal_text[:300]
+
+    # And it really works: sign in as EMP002 with the generated password.
+    page.goto(BASE_URL + '/login')
+    _login(page, 'EMP002', generated)
