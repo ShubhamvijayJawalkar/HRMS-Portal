@@ -2271,3 +2271,62 @@ rather than leaving to be rediscovered.
   than implying a working email channel.
 - Matrix **63 IMPLEMENTED / 33 PARTIAL / 7 NOT_STARTED / 1 RETIRED**. Unit **290
   passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET + 57/57 write**.
+
+## The ToDo list is now SRS-driven, and its coverage section is generated
+Asked to update the ToDo list only. Doing that surfaced two problems with the
+document itself.
+
+- **It answered the wrong question.** The task list recorded *what we did* — history —
+  while a to-do list needs to answer *what the SRS asks for and what state is each in*.
+  Both are useful; only the second is a working list.
+- **Its numbers were stale, and nothing could catch it.** The GATES block sat at
+  `217 passed` against an actual 290, `97/97 GET` against 111/111, and Alembic head
+  `0005` against `0009`. A hand-copied number has nothing to compare itself to, which
+  is the same failure this project keeps finding in traceability rows — committed in
+  the document whose entire job is to report status.
+
+**The fix is that the section is now derived from `traceability.py`.** Its four tests
+keep the id set aligned with the SRS and the routes real, so the coverage figures and
+the working list cannot disagree with the code. Page 1 carries requirement coverage
+(104 / 63 IMPLEMENTED / 33 PARTIAL / 7 NOT_STARTED / 1 RETIRED / 61% complete) and a
+per-module table with a completion bar. The following pages are the **40 open
+requirements ordered by the SRS's own priority** — High first, because a High gap in
+Documents outranks a Low gap in Analytics regardless of alphabetical order. Each row
+shows the requirement, module, routes, and the **named gap** from the matrix rather
+than a restatement of the title.
+
+**Extracting that gap well took three attempts and each failed differently** — worth
+recording because a test caught all three:
+
+1. *Fixed number of trailing sentences*: produced credit-then-gap for FR-ATT-06, and
+   mid-sentence truncation for FR-AUD-01 ("test holds the position: it fails").
+2. *A bare `'not '` signal matched ordinary English.* FR-AUD-01's real gap was being
+   missed because "whether or **not** it returned anything" tripped it. Word-boundary
+   matching would not have helped — `not` is a standalone word there too.
+3. *One pass over strong and weak signals let a weak match beat a strong one* merely by
+   sitting later in the note. FR-AUD-01's actual gap is an unambiguous `stays PARTIAL`
+   clause, but a later sentence containing "did not exist" won the backwards walk.
+
+Now: **two passes** (strong phrases anywhere, weak only within the first 60 characters
+of a sentence), and all 40 gaps land between 31 and 199 characters with none opening
+mid-sentence.
+
+**Two more findings the tests surfaced:**
+
+- reportlab's paraparser ate `<int:aid>` as an XML tag, so routes rendered as
+  `/api/break-approvals//approve` — a route that does not exist, printed in the one
+  place whose job is to state which routes do. The escaping is extracted into
+  `_escape_routes` rather than inlined, because the first version of that test
+  re-implemented the same three `replace` calls and so was only testing itself.
+- **FR-ANL-04's gap is "the weights are literals in the handler"** — a real limitation
+  with no negation, no absence and no "only", so the extractor fell through to the
+  sentence *after* it, which reads as a consequence rather than as the gap. `literal`
+  and `hard-coded` are now strong signals.
+
+**One test assertion was wrong rather than the code:** it expected RETIRED
+requirements on the working list, but a superseded requirement (FR-ATT-10) is not open
+work, and listing it would put a finished item on a to-do list.
+
+Three new tests keep it honest: the section is generated and agrees with the matrix,
+every open requirement extracts a readable gap that names a limitation, and route
+patterns survive the markup. Unit **293 passed / 2 skipped**.

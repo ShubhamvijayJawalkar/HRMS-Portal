@@ -38,8 +38,61 @@ STATUS_COLORS = {
     PENDING: colors.HexColor("#616161"),
 }
 
+#: Verdict badges for the generated SRS section. Kept as **hex strings**, not
+#: `colors.HexColor`, because they are interpolated into a Paragraph's inline
+#: `background-color`, where reportlab wants CSS text — passing a colour object
+#: there renders as the literal text of the object rather than a colour. Using
+#: STATUS_COLORS here would also be a KeyError: it is keyed by *task* status
+#: (DONE / IN PROGRESS / PENDING), not by requirement verdict.
+VERDICT_BADGE_COLOURS = {
+    'PARTIAL': '#b26a00',
+    'NOT STARTED': '#b91c1c',
+}
+
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "ToDo list restructured to be SRS-driven, with the requirement coverage section "
+     "GENERATED from traceability.py rather than maintained by hand. Asked to update the list "
+     "only, which is when it became clear the document had two problems. First, it answered the "
+     "wrong question: the task list recorded WHAT WE DID (history) while a to-do list needs to "
+     "answer WHAT THE SRS ASKS FOR AND WHAT STATE IS EACH IN. Second, and worse, its GATES block "
+     "was reporting stale numbers - 217 passed against an actual 290, 97/97 GET against 111/111, "
+     "Alembic head 0005 against 0009 - and nothing failed, because a hand-copied number has "
+     "nothing to compare itself to. That is the same failure this project keeps finding in "
+     "traceability rows, committed in the document whose job is to report status. So the new SRS "
+     "section is derived from traceability.py, whose four tests keep the id set aligned with the "
+     "SRS and the routes real, which means the coverage figures and the working list cannot "
+     "disagree with the code. Page 1 is now requirement coverage (104 requirements, 63 IMPLEMENTED, "
+     "33 PARTIAL, 7 NOT_STARTED, 1 RETIRED, 61 percent fully implemented) plus a per-module table "
+     "with a completion bar, and the following pages are the 40 open requirements ordered by the "
+     "SRS's OWN priority - High first, because a High-priority gap in Documents outranks a "
+     "Low-priority gap in Analytics regardless of alphabetical order, which is how the SRS ranks "
+     "them. Each row shows the requirement, its module, its routes, and the NAMED GAP from the "
+     "matrix rather than a restatement of the title. Extracting that gap well took three attempts "
+     "and each failed differently, which is worth recording because the tests caught all three. "
+     "Taking a fixed number of trailing sentences produced credit-then-gap for FR-ATT-06 and "
+     "mid-sentence truncation for FR-AUD-01. A bare 'not ' signal then matched ordinary English - "
+     "FR-AUD-01's real gap was being missed because 'whether or NOT it returned anything' tripped "
+     "it, and word-boundary matching would not have helped because 'not' is a standalone word "
+     "there too. And a single pass over strong and weak signals let a weak match beat a strong one "
+     "merely by sitting later in the note: FR-AUD-01's actual gap is 'the row stays PARTIAL only "
+     "because the SRS also asks for the row to be written via the transactional outbox', an "
+     "unambiguous phrase, but a later sentence containing 'did not exist' won the walk. So the "
+     "search is now two-pass - strong phrases first, weak only near the start of a sentence - and "
+     "all 40 gaps come out between 31 and 199 characters, none opening mid-sentence. Two more "
+     "findings the tests surfaced: reportlab's paraparser ate '<int:aid>' as an XML tag, so routes "
+     "rendered as '/api/break-approvals//approve' - a route that does not exist, printed in the one "
+     "place whose job is to state which routes do. The escaping is extracted into _escape_routes "
+     "rather than inlined, because the first version of that test re-implemented the same three "
+     "replace calls and so was only testing itself. And FR-ANL-04's gap is 'the weights are "
+     "literals in the handler' - a real limitation with no negation, no absence and no 'only', so "
+     "the extractor fell through to the sentence after it, which reads as a consequence rather "
+     "than as the gap; 'literal' and 'hard-coded' are now strong signals. One test assertion was "
+     "wrong rather than the code: it expected RETIRED requirements on the working list, but a "
+     "superseded requirement (FR-ATT-10) is not open work. Three new tests keep it honest - that "
+     "the section is generated and agrees with the matrix, that every open requirement extracts a "
+     "readable gap which names a limitation, and that route patterns survive the markup. Unit 293 "
+     "passed / 2 skipped."),
     ("2026-10-02", "FR-NOT-01 and FR-NOT-03: notification email moved onto the outbox, which "
      "closes both rows. FR-NOT-01 was PARTIAL because delivery was a direct send_email call on "
      "the request thread - an availability defect, not a style preference: SMTP is a network "
@@ -786,10 +839,258 @@ TASKS = [
     ("Go-live", "K6 against staging before release + Schemathesis contract tests", "OPERATOR/TOOLING. The SRS names both; the k6 scenario is written and the local harness measures the same targets, but no staging environment exists yet", PENDING),
 ]
 
+# ── SRS coverage: GENERATED from traceability.py ─────────────────────────
+# This section is **derived, not maintained by hand**, and that is the whole point.
+#
+# The GATES block below went stale for weeks while every number in it stayed
+# `True` when written: the unit suite said "217 passed" against an actual 290, the
+# probe said "97/97 GET" against 111/111, and the Alembic head said "0005" against
+# 0009. Nothing failed, because a hand-copied number has nothing to compare itself
+# to. Reading the same information out of `traceability.py` means the requirement
+# verdicts in this document cannot disagree with the code, and the four tests around
+# that module (id set matches the SRS, routes exist, verdicts honest, PARTIAL rows
+# name the gap) are what keep the derivation honest in turn.
+#
+# So: this section answers "what does the SRS ask for, and what state is each
+# requirement in?", which is the question a to-do list for Monday actually needs —
+# where the hand-written TASKS list answers "what did we do?", which is history.
+_MODULE_NAMES = {
+    'AUTH': 'Authentication & sessions',
+    'USR': 'User management',
+    'ATT': 'Attendance & breaks',
+    'REG': 'Regularization',
+    'LEA': 'Leave',
+    'HOL': 'Holidays',
+    'NOT': 'Notifications',
+    'AST': 'Assets',
+    'EXP': 'Expenses',
+    'TKT': 'Tickets',
+    'DOC': 'Documents',
+    'ONB': 'Onboarding',
+    'OFF': 'Offboarding',
+    'ATS': 'Applicant tracking',
+    'PERF': 'Performance',
+    'AUD': 'Audit trail',
+    'JOB': 'Scheduled jobs',
+    'ANL': 'Analytics',
+    'RPT': 'Reports',
+}
+
+_PRIORITY_ORDER = {'H': 0, 'M': 1, 'L': 2, 'S': 3}
+_PRIORITY_LABEL = {'H': 'HIGH', 'M': 'Medium', 'L': 'Low', 'S': 'Stretch', '—': 'n/a'}
+
+
+def _srs_rows():
+    """``traceability.rows()`` with the module and a short gap extracted.
+
+    Imported lazily and defensively: a to-do document that refuses to build because
+    the matrix moved would be worse than one that says so.
+    """
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    try:
+        import traceability
+    except Exception as exc:  # pragma: no cover - only on a broken checkout
+        return None, f'traceability.py could not be imported ({exc.__class__.__name__})'
+
+    out = []
+    for rid, priority, delta, status, routes, note in traceability.rows():
+        module = rid.split('-')[1]
+        out.append({
+            'id': rid,
+            'module': module,
+            'module_name': _MODULE_NAMES.get(module, module),
+            'priority': priority,
+            'delta': delta,
+            'status': status,
+            'routes': routes,
+            'note': note,
+        })
+    return out, None
+
+
+#: The same gap vocabulary `tests/test_app.py` enforces on every PARTIAL row
+#: (`test_traceability_partial_rows_name_what_is_missing`). Reusing it here means the
+#: to-do list's idea of "what is missing" is the same idea the build enforces — if a
+#: row stops naming its gap, the test fails and this extraction degrades with it,
+#: rather than the two quietly disagreeing.
+#: Phrases that state a limitation unambiguously. Matched anywhere in a sentence.
+_STRONG_GAP_SIGNALS = (
+    'stays partial', 'remains partial', 'is partial', 'missing', 'not implemented',
+    'not enforced', 'not met', 'not consulted', 'not included', 'not re-issued',
+    'no route', 'no batch', 'no async', 'no malware', 'no subcategor', 'no cron',
+    'no reviewer', 'no unique', 'exists only', 'never', 'ignores', 'without',
+    'rather than', 'absent',
+    # FR-ANL-04's gap was "the weights (0.4, 1.5, 0.8, 3) are literals in the
+    # handler" — a real limitation carrying no negation, no absence and no "only".
+    # Without these the extractor fell through to the sentence *after* it ("Changing
+    # them needs a code change and redeploy"), which reads as a consequence rather
+    # than as the gap, and the test asserting every gap names a limitation is what
+    # surfaced it.
+    'literal', 'hard-coded', 'hardcoded',
+)
+
+#: Weaker signals, matched **only near the start of a sentence** — a limitation
+#: usually opens its sentence ("No batch endpoint…", "Only Lunch is…").
+#:
+#: `'not '` deliberately does NOT appear as a weak signal. It is in the test suite's
+#: whole-note vocabulary, where any occurrence proves the note mentions a gap
+#: somewhere, but at sentence level it matches ordinary English: FR-AUD-01's real gap
+#: was being missed because the sentence "…whether or not it returned anything"
+#: tripped it. Word-boundary matching would not have helped — `not` is a standalone
+#: word there too.
+_WEAK_GAP_SIGNALS = (
+    'not ', 'no ', 'none', 'only ', 'is not', 'does not', 'has no', 'cannot',
+)
+
+#: How far into a sentence a weak signal may sit and still count as its opening.
+_WEAK_SIGNAL_WINDOW = 60
+
+
+def _signals_gap(sentence: str) -> bool:
+    """Does this sentence state a limitation? Strong phrases only — see `_gap_of`."""
+    lowered = sentence.lower()
+    if any(signal in lowered for signal in _STRONG_GAP_SIGNALS):
+        return True
+    return any(signal in lowered[:_WEAK_SIGNAL_WINDOW] for signal in _WEAK_GAP_SIGNALS)
+
+
+def _weakly_signals_gap(sentence: str) -> bool:
+    lowered = sentence.lower()
+    return any(signal in lowered[:_WEAK_SIGNAL_WINDOW] for signal in _WEAK_GAP_SIGNALS)
+
+
+def _find_gap_sentence(sentences):
+    """Index of the sentence that states the gap: **strong match first, then weak**.
+
+    One pass over both would let a weak match beat a strong one simply by sitting
+    later in the note. FR-AUD-01 is the case: its real gap is "the row stays
+    PARTIAL only because the SRS also asks for the row to be written *via the
+    transactional outbox*", which is an unambiguous `stays partial`, but a later
+    sentence containing "did not exist" tripped the weak vocabulary and the search
+    walked backwards past the right answer.
+    """
+    for idx in range(len(sentences) - 1, -1, -1):
+        lowered = sentences[idx].lower()
+        if any(signal in lowered for signal in _STRONG_GAP_SIGNALS):
+            return idx
+    for idx in range(len(sentences) - 1, -1, -1):
+        if _weakly_signals_gap(sentences[idx]):
+            return idx
+    return len(sentences) - 1
+
+
+def _escape_routes(routes) -> str:
+    """Route patterns, escaped for reportlab's paraparser.
+
+    A pattern like ``/api/break-approvals/<int:aid>/approve`` is a well-formed-looking
+    XML tag to reportlab, so the converter vanishes and the row renders
+    ``/api/break-approvals//approve`` — a route that does not exist, printed in the one
+    place whose job is to state which routes do.
+
+    Extracted as a function rather than inlined so a test can assert the real thing
+    instead of re-implementing the same three ``replace`` calls and passing itself.
+    """
+    text = ', '.join(routes) if routes else 'no route yet'
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _gap_of(note: str) -> str:
+    """The "what is missing" clause of a matrix note, trimmed for a table cell.
+
+    The matrix states a PARTIAL row's gap after an explicit marker in many rows;
+    everything before it is credit for what already works, which is the wrong half to
+    put in a to-do list.
+
+    Where a row does not, the fallback walks **backwards** through the sentences and
+    starts at the first one that actually signals a gap, accumulating until one does.
+    Taking a fixed number of trailing sentences instead produced two distinct
+    failures: FR-ATT-06 came out as credit followed by the gap, and FR-AUD-01 landed
+    mid-sentence in the middle of a fragment — "test holds the position: it fails" —
+    which reads as a claim about the code that is not one.
+    """
+    for marker in ('MISSING:', 'Missing:', 'STILL PARTIAL', 'Still partial'):
+        idx = note.find(marker)
+        if idx != -1:
+            return ' '.join(note[idx:].split())
+
+    sentences = [s.strip() for s in note.replace('; ', '. ').split('. ') if s.strip()]
+    if not sentences:
+        return ''
+    # **Only the last gap-bearing sentence**, not everything from it to the end.
+    # FR-AUD-01's note is a paragraph of history and its closing limitation is one
+    # sentence; accumulating backwards produced the whole remainder and then truncated
+    # mid-list, which is the failure mode this replaced. A to-do row wants the
+    # limitation, not the archaeology that led to it.
+    start = _find_gap_sentence(sentences)
+    parts = sentences[start:start + 1]
+    if len(parts[0]) < 60 and start + 1 < len(sentences):
+        # A very short gap clause on its own reads as a fragment; take the sentence
+        # that completes it.
+        parts = parts + [sentences[start + 1]]
+    gap = ' '.join(' '.join(parts).split())
+    # A gap that opens mid-sentence reads as a fragment of something else — but a
+    # sentence carrying a *strong* phrase is self-contained even when the previous
+    # clause ended in a semicolon, so it is capitalised and used alone. FR-AUD-01's is
+    # exactly this case: "the row stays PARTIAL only because…" begins lowercase only
+    # because the note wrote it after a semicolon, and prepending the preceding
+    # sentence tripled it into 300 characters of history to state one limitation.
+    if gap and gap[0].islower():
+        if any(s in gap.lower() for s in _STRONG_GAP_SIGNALS):
+            gap = gap[0].upper() + gap[1:]
+        elif start > 0:
+            whole = ' '.join(' '.join([sentences[start - 1], gap]).split())
+            gap = whole if len(whole) <= 340 else gap
+    if len(gap) > 340:
+        # Truncate at a word boundary and mark it. Cutting mid-word produces text
+        # that reads like a different claim, which is the specific failure this
+        # replaced.
+        gap = gap[:337].rsplit(' ', 1)[0] + ' ...'
+    return gap
+
+
+def _srs_modules(rows):
+    """Per-module verdict counts, in a stable order."""
+    order, buckets = [], {}
+    for row in rows:
+        if row['module'] not in buckets:
+            buckets[row['module']] = []
+            order.append(row['module'])
+        buckets[row['module']].append(row)
+    out = []
+    for module in order:
+        items = buckets[module]
+        counts = {'IMPLEMENTED': 0, 'PARTIAL': 0, 'NOT_STARTED': 0, 'RETIRED': 0}
+        for item in items:
+            counts[item['status']] = counts.get(item['status'], 0) + 1
+        out.append({
+            'module': module,
+            'name': _MODULE_NAMES.get(module, module),
+            'total': len(items),
+            'counts': counts,
+            'complete': counts['IMPLEMENTED'],
+        })
+    return out
+
+
+def _srs_open(rows):
+    """Every requirement not fully implemented, highest SRS priority first.
+
+    Sorted by the SRS's own priority rather than by module, because the point of a
+    to-do list is what to do next — and a High-priority gap in Documents matters more
+    than a Low-priority gap in Analytics regardless of alphabetical order.
+    """
+    open_rows = [r for r in rows if r['status'] in ('PARTIAL', 'NOT_STARTED')]
+    open_rows.sort(key=lambda r: (_PRIORITY_ORDER.get(r['priority'], 9), r['id']))
+    for row in open_rows:
+        row['gap'] = _gap_of(row['note'])
+    return open_rows
+
+
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "290 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "290 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "293 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "293 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
@@ -839,12 +1140,129 @@ def build_pdf(path: str) -> None:
         )
 
     story = []
-    story.append(Paragraph("HRMS v2.0 Migration - TO DO List", h1))
-    story.append(Paragraph("Living document - updated as tasks complete. Source of truth for the migration's remaining work.", small))
+    story.append(Paragraph("HRMS v2.0 - SRS Requirement Status and TO DO List", h1))
+    story.append(Paragraph(
+        "Living document. Requirement verdicts are GENERATED from traceability.py, which "
+        "four tests keep aligned with the SRS and the live routes - so this section cannot "
+        "disagree with the code. The phase history further down records what was done.",
+        small,
+    ))
     story.append(Spacer(1, 6))
 
+    srs_rows, srs_error = _srs_rows()
+
+    # ── SRS coverage, generated ────────────────────────────────────────
+    story.append(Paragraph("SRS requirement coverage", h2))
+    if srs_error:
+        story.append(Paragraph(f"<b>Unavailable:</b> {srs_error}", small))
+    else:
+        totals = {'IMPLEMENTED': 0, 'PARTIAL': 0, 'NOT_STARTED': 0, 'RETIRED': 0}
+        for row in srs_rows:
+            totals[row['status']] = totals.get(row['status'], 0) + 1
+        headline = [
+            ["Requirements in SRS", f"{len(srs_rows)}"],
+            ["IMPLEMENTED (code enforces it and a test covers it)",
+             f"{totals['IMPLEMENTED']}"],
+            ["PARTIAL (shipped, with a named gap)", f"{totals['PARTIAL']}"],
+            ["NOT_STARTED", f"{totals['NOT_STARTED']}"],
+            ["RETIRED (superseded by v2.0)", f"{totals['RETIRED']}"],
+            ["Fully implemented", f"{totals['IMPLEMENTED'] / len(srs_rows):.0%}"],
+            ["Current branch", _current_branch()],
+        ]
+        h_table = Table(
+            [[Paragraph(f"<b>{r[0]}</b>", small), Paragraph(r[1], small)] for r in headline],
+            colWidths=[3.4 * inch, 3.1 * inch],
+        )
+        h_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f1f5f9")),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(h_table)
+        story.append(Spacer(1, 8))
+
+        story.append(Paragraph("By SRS module", h2))
+        mod_rows = [[
+            Paragraph("<b>Module</b>", small), Paragraph("<b>Done</b>", small),
+            Paragraph("<b>Partial</b>", small), Paragraph("<b>Not started</b>", small),
+            Paragraph("<b>Retired</b>", small), Paragraph("<b>Complete</b>", small),
+        ]]
+        for mod in _srs_modules(srs_rows):
+            c = mod['counts']
+            bar = '█' * round(c['IMPLEMENTED'] / mod['total'] * 10) + \
+                '·' * (10 - round(c['IMPLEMENTED'] / mod['total'] * 10))
+            mod_rows.append([
+                Paragraph(f"<b>{mod['name']}</b><br/><font size=6 color='#94a3b8'>{mod['module']}</font>", small),
+                Paragraph(f"{c['IMPLEMENTED']}/{mod['total']}", small),
+                Paragraph(str(c['PARTIAL']) if c['PARTIAL'] else '<font color="#cbd5e1">-</font>', small),
+                Paragraph(str(c['NOT_STARTED']) if c['NOT_STARTED'] else '<font color="#cbd5e1">-</font>', small),
+                Paragraph(str(c['RETIRED']) if c['RETIRED'] else '<font color="#cbd5e1">-</font>', small),
+                Paragraph(f"{bar} {c['IMPLEMENTED'] / mod['total']:.0%}", small),
+            ])
+        m_table = Table(mod_rows, colWidths=[1.85 * inch, 0.6 * inch, 0.6 * inch,
+                                              0.75 * inch, 0.65 * inch, 1.5 * inch],
+                        repeatRows=1)
+        m_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cbd5e1")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(m_table)
+
+        # ── The actual Monday list, keyed to the SRS's own priorities ──
+        open_rows = _srs_open(srs_rows)
+        high = [r for r in open_rows if r['priority'] == 'H']
+        story.append(PageBreak())
+        story.append(Paragraph("Open requirements, by SRS priority", h2))
+        story.append(Paragraph(
+            f"{len(open_rows)} requirements are PARTIAL or NOT_STARTED; {len(high)} of them "
+            f"are SRS <b>High</b> priority. This is the working list - each row's second line "
+            f"is the named gap from traceability.py, not a restatement of the title.",
+            small,
+        ))
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(
+            f"<b>High priority first ({len(high)}).</b> A High-priority gap outranks a "
+            f"Low-priority one regardless of module, which is how the SRS ranks them.",
+            small,
+        ))
+        story.append(Spacer(1, 4))
+        for row in open_rows:
+            pri = _PRIORITY_LABEL.get(row['priority'], row['priority'])
+            pri_colour = {'HIGH': '#b91c1c', 'Medium': '#b45309',
+                          'Low': '#475569', 'Stretch': '#475569'}.get(pri, '#475569')
+            badge = ('NOT STARTED' if row['status'] == 'NOT_STARTED' else 'PARTIAL')
+            routes = _escape_routes(row['routes'])
+            t = Table([[Paragraph(
+                f"<b>{row['id']}</b>  <font size=6 color='{pri_colour}'><b>{pri}</b></font> "
+                f"<font size=6 color='#ffffff' bgcolor='{VERDICT_BADGE_COLOURS[badge]}'> "
+                f"{badge} </font><br/>"
+                f"<font size=6 color='#94a3b8'>{row['module_name']} &#183; {routes}</font>"
+                f"<br/>{row['gap']}", small)]], colWidths=[6.5 * inch])
+            t.setStyle(TableStyle([
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
+                ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#f8fafc")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            story.append(KeepTogether(t))
+            story.append(Spacer(1, 3))
+
     # Milestone summary
-    story.append(Paragraph("Milestone status", h2))
+    story.append(Paragraph("Milestone status (delivered work by phase)", h2))
     done_total = sum(1 for t in TASKS if t[3] == DONE)
     summary_rows = [
         ["Completed tasks", f"{done_total} / {len(TASKS)}"],

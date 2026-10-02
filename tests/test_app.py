@@ -2921,6 +2921,112 @@ def test_a_broken_preference_lookup_sends_rather_than_dropping_silently():
             app_module._notification_email_wanted = previous_wanted
 
 
+def _todo_pdf_module():
+    """Import the ToDo PDF builder by path.
+
+    It lives in ``scripts/`` and is a build-time tool rather than part of the
+    application, so it is not on ``sys.path``. Imported lazily and by file so a test
+    failure points at the document, not at the app.
+    """
+    import importlib.util
+
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        'scripts', 'update_todo_pdf.py',
+    )
+    spec = importlib.util.spec_from_file_location('update_todo_pdf', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_todo_pdf_srs_section_is_generated_from_the_matrix():
+    """A to-do list that reports stale numbers is worse than no to-do list.
+
+    The hand-maintained GATES block in that document sat at `217 passed` against an
+    actual 290, `97/97 GET` against 111/111 and Alembic head `0005` against `0009` for
+    weeks. Nothing failed, because a hand-copied number has nothing to compare itself
+    to. The SRS section is therefore read out of `traceability.py`, so it cannot
+    disagree with the code — and this test is what makes *that* claim checkable.
+    """
+    pdf = _todo_pdf_module()
+    rows, error = pdf._srs_rows()
+    assert error is None, error
+    assert len(rows) == 104, f'expected every SRS requirement, got {len(rows)}'
+
+    import traceability
+
+    assert pdf._srs_modules(rows), 'no SRS modules were derived'
+    open_rows = pdf._srs_open(rows)
+    # Every non-IMPLEMENTED requirement appears in the working list, and no IMPLEMENTED
+    # one does — a to-do entry for finished work is how a list stops being usable.
+    # RETIRED is excluded deliberately: a superseded requirement (FR-ATT-10) is not
+    # open work, and listing it would put a finished item on the working list. The
+    # first version of this assertion compared against "not IMPLEMENTED" and so
+    # expected FR-ATT-10 to appear — the test was wrong, not the extraction.
+    from_matrix = {
+        r[0] for r in traceability.rows() if r[3] in ('PARTIAL', 'NOT_STARTED')
+    }
+    assert {r['id'] for r in open_rows} == from_matrix, (
+        f'the working list and the matrix disagree: '
+        f'{ {r["id"] for r in open_rows} ^ from_matrix }'
+    )
+    # SRS priority order: a High gap must never appear below a Low one.
+    order = [pdf._PRIORITY_ORDER.get(r['priority'], 9) for r in open_rows]
+    assert order == sorted(order), 'open requirements are not sorted by SRS priority'
+
+
+def test_every_open_requirement_extracts_a_readable_gap():
+    """The extracted gap must be a sentence, not a fragment and not the history.
+
+    This is the third rewrite of this extraction and each version failed a different
+    way: taking a fixed number of trailing sentences produced credit-then-gap for
+    FR-ATT-06 and mid-sentence truncation for FR-AUD-01; a bare `'not '` signal
+    matched ordinary English in "whether or **not** it returned anything" and so
+    missed FR-AUD-01's real gap entirely; and a single pass over strong and weak
+    signals let a weak match beat a strong one merely by sitting later in the note.
+    A to-do row whose gap reads as a fragment of something else is not a to-do row.
+    """
+    pdf = _todo_pdf_module()
+    rows, error = pdf._srs_rows()
+    assert error is None, error
+    open_rows = pdf._srs_open(rows)
+    assert open_rows, 'nothing is open, so this test proves nothing'
+
+    for row in open_rows:
+        gap = row['gap']
+        assert gap, f'{row["id"]} produced an empty gap'
+        assert not gap[0].islower(), (
+            f'{row["id"]} gap opens mid-sentence: {gap[:90]!r}'
+        )
+        assert len(gap) <= 340, f'{row["id"]} gap is {len(gap)} chars: {gap[:90]!r}'
+        assert '...' not in gap, (
+            f'{row["id"]} gap was truncated: {gap[-70:]!r}'
+        )
+        # A gap has to name a limitation, not just restate the title.
+        assert pdf._signals_gap(gap) or pdf._weakly_signals_gap(gap), (
+            f'{row["id"]} gap states no limitation: {gap[:90]!r}'
+        )
+
+
+def test_route_patterns_survive_the_pdf_markup():
+    """`<int:aid>` is a well-formed-looking XML tag to reportlab's paraparser.
+
+    Left unescaped, `/api/break-approvals/<int:aid>/approve` rendered as
+    `/api/break-approvals//approve` — a route that does not exist, printed in the one
+    place whose entire job is to state which routes do.
+    """
+    pdf = _todo_pdf_module()
+    escaped = pdf._escape_routes(('/api/break-approvals/<int:aid>/approve',))
+    assert '&lt;int:aid&gt;' in escaped, escaped
+    assert '<int:aid>' not in escaped, escaped
+    # An ampersand has to be escaped before the angle brackets, or `&lt;` is itself
+    # mangled — the ordering is the whole trick.
+    assert pdf._escape_routes(('/a?x=1&y=2',)) == '/a?x=1&amp;y=2'
+    # And the absent case reads as a statement rather than as nothing.
+    assert pdf._escape_routes(()) == 'no route yet'
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
