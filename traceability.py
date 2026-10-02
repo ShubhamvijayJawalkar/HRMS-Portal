@@ -131,13 +131,38 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-AUTH-07': ('M', 'N', 'IMPLEMENTED', ('/dashboard',),
                    'Admin vs self dashboard chosen by policy.sees_admin_surface(); '
                    'unauthenticated gets 302 for a page and 401 for JSON.'),
-    'FR-AUTH-08': ('M', 'N', 'IMPLEMENTED', ('/api/forgot-password',),
-                   'Always 202 with the same message, so the endpoint cannot be used '
-                   'to enumerate accounts.'),
-    'FR-AUTH-09': ('M', 'N', 'PARTIAL', ('/api/reset-password',),
-                   'Single-use token, invalidated after a successful reset, purged '
-                   'hourly. Missing: the token is stored unhashed, and the expiry is '
-                   '1 h where the SRS asks for 24 h.'),
+    'FR-AUTH-08': ('M', 'N', 'IMPLEMENTED', ('/api/forgot-password', '/reset-password'),
+                   'Always 202 with the SRS\'s own sentence and never a token, so the '
+                   'request has nothing to compare between a real and an unknown '
+                   'account; a test asserts all four request shapes answer '
+                   'byte-identically. Delivery moved to the outbox, which is where the '
+                   'SRS puts it ("email {host}/reset-password?token=... (queued via '
+                   'outbox)") and what makes an empty response possible. This row '
+                   'previously claimed IMPLEMENTED while the route answered 404 {"error": '
+                   '"No matching user found"} for an unknown account and 200 *carrying '
+                   'the working token* for a real one - not a weakened control but its '
+                   'inversion, since a caller could confirm any employee ID and obtain a '
+                   'credential without touching the account. /reset-password now exists '
+                   'too: the emailed URL used to 404, so the journey was reachable only '
+                   'by calling the API.'),
+    'FR-AUTH-09': ('M', 'N', 'IMPLEMENTED', ('/api/reset-password', '/reset-password'),
+                   'token_urlsafe(32), stored as a SHA-256 digest and never in the '
+                   'clear, 1 h expiry, single use via a write conditional on used = 0, '
+                   'and every other live token for the account invalidated on a '
+                   'successful reset - without that last part an attacker who requested '
+                   'their own reset while a legitimate one was live keeps a working '
+                   'credential after the legitimate user resets. Purged hourly. The '
+                   'queued link carries the token encrypted (the digest cannot be '
+                   'reversed, so the dispatcher needs a copy), which is unreadable '
+                   'without the app Fernet key, so a database read still cannot mint a '
+                   'reset. Two corrections to this row: it previously said the token was '
+                   '"stored unhashed", which was half true and arguably worse - hashing '
+                   'existed on the write path while /api/reset-password looked tokens up '
+                   'as token IN (raw, digest) to accommodate two plaintext tokens the '
+                   'boot seed wrote, so a database read still yielded working '
+                   'credentials; and it said the expiry should be 24 h, which is wrong - '
+                   'that is FR-USR-02\'s welcome-email token, a different flow, and '
+                   'FR-AUTH-09 specifies 1 h, which the code already used.'),
     'FR-AUTH-10': ('M', 'N', 'IMPLEMENTED',
                    ('/api/users', '/api/change-password', '/api/reset-password'),
                    'passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) '

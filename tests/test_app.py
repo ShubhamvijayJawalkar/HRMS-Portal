@@ -61,7 +61,9 @@ import pytest  # noqa: E402
 import lockout  # noqa: E402
 import mfa  # noqa: E402
 from app import (  # noqa: E402
+    _decrypt_lifecycle_secret,
     _next_generated_id,
+    _token_digest,
     app,
     check_password,
     gen_id,
@@ -1858,7 +1860,8 @@ def test_reset_password_enforces_the_policy_without_burning_the_token(client):
                 'INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) '
                 'VALUES (?, ?, ?, ?)',
                 [_next_generated_id(conn, 'password_reset_tokens', 'token_id'),
-                 'EMP942', token, datetime.now() + timedelta(hours=1)],
+                 'EMP942', _token_digest(token),
+                 datetime.now() + timedelta(hours=1)],
             )
         finally:
             conn.close()
@@ -6665,6 +6668,242 @@ def test_lifecycle_scheduler_job_registered():
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
     assert app_module.scheduler.get_job('import-dispatch') is not None
     assert app_module.scheduler.get_job('outbox-dispatch') is not None
+
+
+# ── FR-AUTH-08/09 password reset: enumeration and token handling ───────────
+# FR-AUTH-08 was recorded as IMPLEMENTED — "Always 202 with the same message, so
+# the endpoint cannot be used to enumerate accounts" — and the route answered
+# **404 {"error": "No matching user found"}** for an unknown account and **200 with
+# the token in the body** for a real one. That is not a weak version of the control;
+# it hands over a working credential for any employee ID whose email you can guess.
+#
+# FR-AUTH-09 was recorded as PARTIAL with "the token is stored unhashed" — which was
+# half true and arguably worse than fully true, because `/api/reset-password` looked
+# tokens up as `token IN (raw, digest)` precisely so the two plaintext tokens the
+# boot seed wrote would still work. The hashing existed on one side of the door only.
+
+
+def _reset_tokens_for(emp_id):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT token_id, token, used FROM password_reset_tokens '
+            'WHERE emp_id = ? ORDER BY token_id', [emp_id],
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def _mint_reset_token(emp_id, token=None):
+    """Store a usable reset token the way the app does: hashed."""
+    token = token or f'token-for-{emp_id}-{gen_id()}'
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', [emp_id])
+        conn.execute(
+            'INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) '
+            'VALUES (?, ?, ?, ?)',
+            [_next_generated_id(conn, 'password_reset_tokens', 'token_id'), emp_id,
+             _token_digest(token), datetime.now() + timedelta(hours=1)],
+        )
+    finally:
+        conn.close()
+    return token
+
+
+def test_forgot_password_answers_identically_whether_or_not_the_account_exists(client):
+    """FR-AUTH-08. Four requests that must be indistinguishable."""
+    conn = get_db()
+    try:
+        email = conn.execute(
+            "SELECT email FROM users WHERE emp_id = 'EMP001'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    cases = {
+        'real account': {'emp_id': 'EMP001', 'email': email},
+        'real id, wrong email': {'emp_id': 'EMP001', 'email': 'not-their-address@x.com'},
+        'unknown account': {'emp_id': 'EMP-NOBODY', 'email': email},
+        'empty body': {},
+    }
+    answers = {}
+    for label, body in cases.items():
+        resp = client.post('/api/forgot-password', json=body)
+        answers[label] = (resp.status_code, json.dumps(resp.get_json(), sort_keys=True))
+        assert resp.status_code == 202, f'{label} answered {resp.status_code}'
+
+    assert len(set(answers.values())) == 1, (
+        f'forgot-password is enumerable: {answers}'
+    )
+    # The body is the SRS's own sentence, and it carries no token.
+    only = list(set(answers.values()))[0]
+    assert only[1] == json.dumps(
+        {'message': 'If the account exists, a reset link has been sent.'}, sort_keys=True,
+    ), only[1]
+    assert 'token' not in only[1], 'the response still carries a reset token'
+
+
+def test_a_real_reset_request_delivers_the_link_out_of_band(client):
+    """The token must reach the user by the queue, not by the response.
+
+    The SRS puts it "queued via outbox". That is not decoration: the token was in the
+    HTTP response precisely because nothing else carried it, and moving delivery is
+    what makes an answer with nothing in it possible.
+    """
+    import outbox
+
+    conn = get_db()
+    try:
+        email = conn.execute("SELECT email FROM users WHERE emp_id = 'EMP002'").fetchone()[0]
+    finally:
+        conn.close()
+
+    resp = client.post('/api/forgot-password', json={'emp_id': 'EMP002', 'email': email})
+    assert resp.status_code == 202
+
+    conn = get_db()
+    try:
+        event = conn.execute(
+            "SELECT payload FROM outbox_events WHERE event_type = 'password.reset' "
+            'ORDER BY event_id DESC'
+        ).fetchone()
+        stored = conn.execute(
+            'SELECT token FROM password_reset_tokens WHERE emp_id = ? '
+            'ORDER BY token_id DESC', ['EMP002'],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert event, 'no password.reset event was queued'
+    payload = event[0] if isinstance(event[0], dict) else json.loads(event[0])
+    assert payload['emp_id'] == 'EMP002'
+    # The queued token is encrypted, and it is the same token whose digest was
+    # stored — so the dispatcher can mail a link the reset endpoint will accept.
+    assert 'reset_token_encrypted' in payload
+    token = _decrypt_lifecycle_secret(payload['reset_token_encrypted'])
+    assert stored[0] == _token_digest(token)
+    assert payload['reset_url'].endswith('/reset-password?token=' + token), payload['reset_url']
+
+    # And the dispatcher consumes it, so the link is actually delivered rather than
+    # sitting in the queue as the only copy of the token.
+    conn = get_db()
+    try:
+        result = outbox.dispatch_once(conn)
+    finally:
+        conn.close()
+    assert result, result
+    conn = get_db()
+    try:
+        still_pending = conn.execute(
+            "SELECT count(*) FROM outbox_events WHERE event_type = 'password.reset' "
+            "AND status = 'pending'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert still_pending == 0, f'{still_pending} password.reset events are still queued'
+
+
+def test_the_reset_token_is_stored_hashed_and_the_plaintext_is_refused(client):
+    """FR-AUTH-09's "hashed at rest", now total.
+
+    The lookup used to be `token IN (raw, digest)` so the two plaintext tokens the
+    boot seed wrote would keep working — which meant a database read still yielded
+    two usable credentials, and the seed wrote them in the clear on every fresh
+    database.
+    """
+    rows = _reset_tokens_for('EMP002')
+    assert rows, 'the boot seed writes no sample reset tokens'
+    for _token_id, stored, _used in rows:
+        assert stored != 'reset-token-001', 'a seeded token is stored in the clear'
+        assert stored == _token_digest('reset-token-001') \
+            or stored == _token_digest('reset-token-002') \
+            or len(stored) == 64, stored
+        assert 'reset-token' not in stored, stored
+
+
+def test_a_used_token_and_a_sibling_token_are_both_refused_after_a_reset(client):
+    """Single use, and the SRS's "ALL other reset tokens for this user invalidated".
+
+    Without the second half, an attacker who requested their own reset while a
+    legitimate one was still live keeps a working credential after the legitimate
+    user resets theirs.
+    """
+    _cleanup_user_contract_rows('EMP960')
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department) VALUES ('EMP960', 'Reset Subject', "
+            "'emp960@company.com', 'Employee', ?, 'Active', 1, 'IT')",
+            [hash_password('old-password-here')],
+        )
+    finally:
+        conn.close()
+    try:
+        first = _mint_reset_token('EMP960')
+        # A second live token for the same account, as an attacker would hold.
+        second = f'second-token-{gen_id()}'
+        conn = get_db()
+        try:
+            conn.execute(
+                'INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) '
+                'VALUES (?, ?, ?, ?)',
+                [_next_generated_id(conn, 'password_reset_tokens', 'token_id'), 'EMP960',
+                 _token_digest(second), datetime.now() + timedelta(hours=1)],
+            )
+        finally:
+            conn.close()
+
+        ok = client.post('/api/reset-password', json={
+            'token': first, 'new_password': 'jade-marlin-quilt-77',
+        })
+        assert ok.status_code == 200, ok.get_json()
+
+        # The token just used is spent.
+        replay = client.post('/api/reset-password', json={
+            'token': first, 'new_password': 'another-good-password',
+        })
+        assert replay.status_code == 400, replay.get_json()
+        # And so is the sibling, which is the part that was missing.
+        sibling = client.post('/api/reset-password', json={
+            'token': second, 'new_password': 'another-good-password',
+        })
+        assert sibling.status_code == 400, sibling.get_json()
+
+        # Neither token still works, and the new password is the one that took.
+        with _fresh_client() as fresh:
+            assert fresh.post('/login', json={
+                'emp_id': 'EMP960', 'password': 'jade-marlin-quilt-77',
+            }).status_code == 200
+            assert fresh.post('/login', json={
+                'emp_id': 'EMP960', 'password': 'another-good-password',
+            }).status_code == 401
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP960'])
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP960')
+
+
+def test_the_reset_link_page_exists_and_never_carries_a_token(client):
+    """The SRS's flow emails `{host}/reset-password?token=...`, and that URL was a
+    404 — the whole journey was reachable only by calling the API and reading the
+    response."""
+    page = client.get('/reset-password?token=abc123')
+    assert page.status_code == 200, page.status_code
+    body = page.get_data(as_text=True)
+    assert 'resetForm' in body
+    # The token is read from the query string by script and posted from there; it is
+    # never interpolated into the HTML, so it cannot end up in a cached page or an
+    # error report that includes the body.
+    assert 'abc123' not in body, 'the token was rendered into the page'
+
+    # Without a token the page says so instead of rendering a form that cannot work.
+    bare = client.get('/reset-password')
+    assert bare.status_code == 200
+    assert 'noToken' in bare.get_data(as_text=True)
 
 
 # ── FR-AUTH-03 lockout + FR-AUTH-02 uniform refusals ───────────────────────

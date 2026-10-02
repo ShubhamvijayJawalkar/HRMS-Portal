@@ -486,6 +486,20 @@ def _fix_seed_shift_dates(conn, now):
     conn.commit()
 
 
+def _token_digest(token):
+    """The value stored in ``password_reset_tokens.token`` (FR-AUTH-09).
+
+    SHA-256, not a slow password hash, because this is not a password: it is a
+    256-bit random value that must be looked up by equality on every reset attempt,
+    and Argon2id cannot be indexed. The stored column therefore holds this digest
+    and never the token.
+
+    Defined *above* ``init_db`` because the boot seed needs it, and ``init_db``
+    runs at import — as a function below this one it would not exist yet.
+    """
+    return hashlib.sha256(str(token).encode()).hexdigest()
+
+
 def init_db():
     conn = get_db()
 
@@ -1589,13 +1603,20 @@ def init_db():
         )
 
     if conn.execute("SELECT COUNT(*) FROM password_reset_tokens").fetchone()[0] < 2:
+        # Digests, not the tokens themselves (FR-AUTH-09). These used to be written
+        # in the clear, which is why `/api/reset-password` had to look tokens up as
+        # `token IN (raw, digest)` — that accommodation is what kept the hashing half
+        # done, and two seeded working credentials in the sample database is exactly
+        # the property "hashed at rest" exists to remove. The plaintext tokens
+        # `reset-token-001` / `reset-token-002` still verify, because only their
+        # digest is stored.
         conn.execute(
             "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at, used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 9, 'EMP002', 'reset-token-001', now + timedelta(hours=2), 0, now]
+            [base_id + 9, 'EMP002', _token_digest('reset-token-001'), now + timedelta(hours=2), 0, now]
         )
         conn.execute(
             "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at, used, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [base_id + 10, 'EMP002', 'reset-token-002', now + timedelta(hours=4), 0, now]
+            [base_id + 10, 'EMP002', _token_digest('reset-token-002'), now + timedelta(hours=4), 0, now]
         )
 
     if conn.execute("SELECT COUNT(*) FROM employee_documents").fetchone()[0] < 2:
@@ -3514,50 +3535,117 @@ def change_password():
     return jsonify({'message': 'Password changed successfully'}), 200
 
 
+#: The single body every ``forgot-password`` request gets, whatever it matched.
+#: The SRS's own wording, and identical for a real account, a wrong email, a
+#: malformed id and a request with no body at all — FR-AUTH-08's whole control is
+#: that there is nothing here to compare.
+FORGOT_PASSWORD_RESPONSE = {
+    'message': 'If the account exists, a reset link has been sent.',
+}
+
+#: FR-AUTH-09. One hour, per the SRS (the 24 h token in the SRS belongs to
+#: FR-USR-02's welcome email, a different flow with a different table row).
+RESET_TOKEN_TTL = timedelta(hours=1)
+
+
+def reset_link_for(token: str) -> str:
+    """The absolute URL the emailed link points at.
+
+    Built at **enqueue** time, in the request that asked for the reset, and carried
+    in the outbox payload. The obvious alternative — building it in the dispatcher —
+    has no request context to work from, so `_external=True` would either raise or
+    silently produce a relative link that is useless in an email. Building it once,
+    from the user's own request, also means the link cannot drift from the route
+    that serves it.
+    """
+    return url_for('reset_password_page', token=token, _external=True)
+
+
+@app.route('/reset-password')
+def reset_password_page():
+    """The page the emailed reset link points at.
+
+    It did not exist. `/api/forgot-password` minted a token and returned it, so
+    nothing ever needed a page — which meant the URL in the SRS's own flow
+    ("email {host}/reset-password?token=...") was a 404, and the entire
+    forgot-password journey was reachable only by calling the API and reading the
+    response. Now that the token goes out of band, the link has to land somewhere,
+    and the token stays in the URL fragment/query of a page that never sends it
+    anywhere.
+    """
+    return render_template('reset_password.html')
+
+
 @app.route('/api/forgot-password', methods=['POST'])
 @limiter.limit("5 per minute")
 def forgot_password():
-    """Request password reset (generates token)
-    ---
-    post:
-      tags: [Auth]
-      parameters:
-        - in: body
-          name: body
-          schema:
-            type: object
-            properties:
-              emp_id: {type: string}
-              email: {type: string}
-      responses:
-        200:
-          description: Token generated (shown in dev)
+    """Request a password reset (FR-AUTH-08).
+
+    **Always 202, always this body, and never the token.** This used to answer 404
+    ``{"error": "No matching user found"}`` for an unknown account and 200 *carrying
+    the token* for a real one — which is not a weakened version of the control, it
+    is the whole enumeration oracle in one endpoint: a caller could confirm any
+    employee ID and, if the email matched, obtain a working credential without ever
+    touching the account. The traceability matrix recorded the requirement as
+    IMPLEMENTED.
+
+    Delivery moved to the outbox, which is where the SRS puts it ("email
+    {host}/reset-password?token=... (queued via outbox)"). That is not decoration:
+    the token was in the response precisely because nothing else carried it.
     """
     data = request.get_json(silent=True) or {}
     emp_id = data.get('emp_id', '').strip().upper()
     email = data.get('email', '')
 
+    # (body, status) — Flask reads a two-tuple as (body, status), so the order is
+    # not cosmetic. Getting it backwards returns a bare 202 with an integer where
+    # the body should be.
+    accepted = (jsonify(dict(FORGOT_PASSWORD_RESPONSE)), 202)
+    if not emp_id or not email:
+        return accepted
+
     conn = get_db()
-    row = conn.execute(
-        "SELECT email FROM users WHERE emp_id = ? AND email = ?",
-        [emp_id, email]
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT emp_id, name FROM users WHERE emp_id = ? AND email = ?",
+            [emp_id, email]
+        ).fetchone()
+    finally:
         conn.close()
-        return jsonify({'error': 'No matching user found'}), 404
+    if not row:
+        return accepted
 
     token = secrets.token_urlsafe(32)
-    conn.execute(
-        "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) VALUES (?, ?, ?, ?)",
-        [_next_generated_id(conn, 'password_reset_tokens', 'token_id'), emp_id, _token_digest(token), datetime.now() + timedelta(hours=1)]
-    )
-    conn.close()
-
-    logger.info("Password reset token for %s: %s", emp_id, token)
-    return jsonify({
-        'message': 'If the account exists, a reset link has been generated.',
-        'token': token,
-    }), 200
+    # The token row and its delivery event commit together (CC-09). A token with no
+    # queued email is a token nobody can use, and a queued email for a token that
+    # was rolled back is a link that fails on arrival; either way the user is stuck
+    # with no explanation, so they are one atomic unit.
+    with outbox.transaction() as tconn:
+        tconn.execute(
+            "INSERT INTO password_reset_tokens (token_id, emp_id, token, expires_at) "
+            "VALUES (?, ?, ?, ?)",
+            [_next_generated_id(tconn, 'password_reset_tokens', 'token_id'), row[0],
+             _token_digest(token), datetime.now() + RESET_TOKEN_TTL],
+        )
+        outbox.enqueue(
+            tconn, 'password.reset', aggregate='users', aggregate_id=row[0],
+            payload={
+                'emp_id': row[0],
+                # Encrypted, not plaintext: `password_reset_tokens` holds a SHA-256
+                # digest, so this encrypted copy is the only way the dispatcher can
+                # mail a link the reset endpoint can verify. Without the app's
+                # Fernet key the queue is unreadable, so a database read still
+                # cannot mint a reset — see outbox._handle_password_reset.
+                'reset_token_encrypted': _encrypt_lifecycle_secret(token),
+                # Built here, where there is a request context; the dispatcher has
+                # none and would have to guess the host.
+                'reset_url': reset_link_for(token),
+                'expires_in_minutes': int(RESET_TOKEN_TTL.total_seconds() // 60),
+            },
+        )
+    audit_log(row[0], 'PASSWORD_RESET_REQUESTED',
+              'Password reset requested', entity='users', entity_id=row[0])
+    return accepted
 
 
 @app.route('/api/reset-password', methods=['POST'])
@@ -3591,18 +3679,43 @@ def reset_password():
         return jsonify(problem[0]), problem[1]
 
     conn = get_db()
-    row = conn.execute(
-        "SELECT token_id, emp_id FROM password_reset_tokens "
-        "WHERE token IN (?, ?) AND used = 0 AND expires_at > ?",
-        [token, _token_digest(token), datetime.now()]
-    ).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'error': 'Invalid or expired token'}), 400
+    try:
+        # Digests only. The lookup used to be `token IN (?, ?)` with the raw token
+        # *and* its digest, because the boot seed wrote two plaintext tokens — so
+        # the hashing was half-done and a database read still yielded two working
+        # credentials. The seed now writes digests (see `init_db`), and accepting
+        # the plaintext spelling would put that hole straight back.
+        row = conn.execute(
+            "SELECT token_id, emp_id FROM password_reset_tokens "
+            "WHERE token = ? AND used = 0 AND expires_at > ?",
+            [_token_digest(token), datetime.now()]
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Invalid or expired token'}), 400
 
-    conn.execute("UPDATE password_reset_tokens SET used = 1 WHERE token_id = ?", [row[0]])
-    conn.execute("UPDATE users SET password = ? WHERE emp_id = ?", [hash_password(new_pwd), row[1]])
-    conn.close()
+        # Conditional on `used = 0`, so two concurrent replays of the same token
+        # give one winner and one 400. An unconditional write let both succeed, which
+        # is the opposite of "single use" for the only race that matters.
+        consumed = conn.execute(
+            "UPDATE password_reset_tokens SET used = 1 "
+            "WHERE token_id = ? AND used = 0", [row[0]]
+        )
+        if not getattr(consumed, 'rowcount', 1):
+            return jsonify({'error': 'Invalid or expired token'}), 400
+
+        # The SRS: "ALL other reset tokens for this user invalidated". Without
+        # this, an attacker who requested their own reset while a legitimate one was
+        # still live keeps a working credential after the legitimate user resets.
+        conn.execute(
+            "UPDATE password_reset_tokens SET used = 1 "
+            "WHERE emp_id = ? AND token_id <> ? AND used = 0",
+            [row[1], row[0]],
+        )
+        conn.execute(
+            "UPDATE users SET password = ? WHERE emp_id = ?", [hash_password(new_pwd), row[1]]
+        )
+    finally:
+        conn.close()
     audit_log(row[1], 'PASSWORD_RESET', 'Password reset via token', entity='users', entity_id=row[1])
     return jsonify({'message': 'Password reset successfully'}), 200
 
@@ -5225,10 +5338,6 @@ def _workflow_for_token(conn, token):
     if not row:
         raise LifecycleError(404, 'Onboarding workflow not found')
     return row
-
-
-def _token_digest(token):
-    return hashlib.sha256(str(token).encode()).hexdigest()
 
 
 def _lifecycle_fernet():

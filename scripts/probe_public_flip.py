@@ -31,6 +31,7 @@ Exit: 0 = every measured route served, 1 = boot or login failure,
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import traceback
@@ -1148,24 +1149,69 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     # ── password-reset journey (public POSTs, no session required) ─────────
     def forgot_password():
+        """FR-AUTH-08: the response must disclose nothing, so the token is read
+        from the outbox payload instead — which is exactly where the SRS puts it
+        ("email {host}/reset-password?token=... (queued via outbox)")."""
         with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
             row = pc.execute("SELECT email FROM users WHERE emp_id = 'EMP002'").fetchone()
         if not row:
             return 409
         r = _post(cl, tok, "/api/forgot-password",
                   {"emp_id": "EMP002", "email": row[0]})
-        if r.status_code == 200 and r.is_json:
-            state["reset_token"] = (r.get_json() or {}).get("token")
-        return r.status_code
-    run("auth(forgot-password)", forgot_password)
+        # 202 always, and never the token. Anything else means the endpoint is
+        # still enumerating accounts — or handing out a credential — so the probe
+        # fails rather than adapting.
+        if r.status_code != 202:
+            return r.status_code
+        body = r.get_json() or {}
+        if "token" in body:
+            return 409  # the response still carries a working reset credential
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            ev = pc.execute(
+                "SELECT payload FROM outbox_events WHERE event_type = 'password.reset' "
+                "AND aggregate_id = 'EMP002' ORDER BY event_id DESC"
+            ).fetchone()
+        if not ev:
+            return 409  # nothing queued, so the link can never be delivered
+        payload = ev[0] if isinstance(ev[0], dict) else json.loads(ev[0])
+        if "reset_url" not in payload or "reset_token_encrypted" not in payload:
+            return 409
+        state["reset_url"] = payload["reset_url"]
+        state["reset_token"] = payload["reset_token_encrypted"]
+        return 200
+    run("auth(forgot-password 202 + queued link)", forgot_password)
+
+    def reset_page_served():
+        """The SRS emails `{host}/reset-password?token=...`; that URL used to be a
+        404, which is why nothing needed it while the token came back in the
+        response."""
+        r = cl.get("/reset-password")
+        return 200 if r.status_code == 200 and b"resetForm" in r.data else 404
+    run("auth(reset page exists)", reset_page_served)
 
     def reset_password_flow():
-        t = state.get("reset_token")
-        if not t:
+        # The queued payload carries the token *encrypted* (FR-AUTH-09 stores only a
+        # SHA-256 digest), so the probe has to unwrap it the way the dispatcher does
+        # before it can present it.
+        from app import _decrypt_lifecycle_secret
+        encrypted = state.get("reset_token")
+        if not encrypted:
             return 409
-        return _post(cl, tok, "/api/reset-password",
-                     {"token": t, "new_password": PROBE_PASSWORD}).status_code
-    run("auth(reset-password)", reset_password_flow)
+        token = _decrypt_lifecycle_secret(encrypted)
+        r = _post(cl, tok, "/api/reset-password",
+                  {"token": token, "new_password": PROBE_PASSWORD})
+        if r.status_code != 200:
+            return r.status_code
+        # The plaintext token must not be sitting in the table.
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
+            stored = pc.execute(
+                "SELECT token FROM password_reset_tokens WHERE emp_id = 'EMP002' "
+                "ORDER BY token_id DESC"
+            ).fetchone()
+        if not stored or stored[0] == token:
+            return 409  # stored in the clear
+        return 200
+    run("auth(reset-password, digest at rest)", reset_password_flow)
 
     # ── help-desk journey: employee creates + comments, admin resolves ─────
     def ticket_create():

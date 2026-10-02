@@ -237,12 +237,60 @@ def _handle_candidate_hired(conn, row) -> bool:
         return False
 
 
+def _handle_password_reset(conn, row) -> bool:
+    """Email the password-reset link (FR-AUTH-08/09).
+
+    The reason this handler exists is that ``POST /api/forgot-password`` must not
+    return the token. That endpoint used to answer 404 "No matching user found" for
+    an unknown account and 200 *with the token* for a real one — the single most
+    direct enumeration oracle in the application, and recorded in the traceability
+    matrix as IMPLEMENTED. Moving delivery into the outbox is what makes the honest
+    response possible: the SRS puts the link "queued via outbox", and once it is
+    queued the request has nothing left to disclose.
+
+    The link itself was built at enqueue time (``reset_url``, in the request
+    context) because the dispatcher has no host to build one from. The token
+    travels **encrypted** in the payload (``reset_token_encrypted``), matching
+    ``credentials.issued`` above, and that matters: the token is hashed in
+    ``password_reset_tokens``, so without the encrypted copy there would be no way to
+    mail a link the reset endpoint can verify. A database read still cannot mint a
+    reset — the digest column cannot be reversed, and the payload cannot be read
+    without the app's Fernet key.
+    """
+    from app import send_email  # lazy
+    payload = _payload(row) or {}
+    emp_id = payload.get('emp_id')
+    reset_url = payload.get('reset_url')
+    if not emp_id or not reset_url:
+        return False
+    try:
+        user = conn.execute(
+            "SELECT email, name FROM users WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        if not user or not user[0]:
+            return False
+        minutes = int(payload.get('expires_in_minutes') or 60)
+        return bool(send_email(
+            user[0],
+            'Reset your HRMS password',
+            f"Hi {user[1]},<br><br>Use this link to choose a new HRMS password: "
+            f"<a href='{reset_url}'>{reset_url}</a><br><br>"
+            f"It is valid for {minutes} minutes and can be used once. "
+            "If you did not request this, you can ignore this message — nothing "
+            "changes until the link is used.",
+        ))
+    except Exception as exc:
+        logger.warning('outbox password.reset handler failed: %s', exc)
+        return False
+
+
 HANDLERS = {
     'payroll.finalized': _handle_payroll_finalized,
     'offer.created': _handle_offer_created,
     'offer.accepted': _handle_offer_accepted,
     'candidate.hired': _handle_candidate_hired,
     'credentials.issued': _handle_credentials_issued,
+    'password.reset': _handle_password_reset,
 }
 
 

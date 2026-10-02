@@ -1542,3 +1542,82 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   (**58 IMPLEMENTED / 37 PARTIAL / 8 NOT_STARTED / 1 RETIRED**); the generator's prose
   was rewritten again, since it had started saying "one account-level defence is still
   absent" about a requirement that is now present.
+
+## FR-AUTH-08/09 password reset: the enumeration oracle, and a wrong matrix row
+- **FR-AUTH-08 was recorded IMPLEMENTED and was the worst control failure in the
+  app.** `/api/forgot-password` answered **404 `{"error": "No matching user
+  found"}`** for an unknown account and **200 with the working token in the body**
+  for a real one. The matrix said "Always 202 with the same message, so the
+  endpoint cannot be used to enumerate accounts". That is not a weakened version of
+  the control — it is the control inverted: a caller could confirm any employee ID
+  and, if the email matched, obtain a credential **without ever touching the
+  account**. Four request shapes (real account, real ID with wrong email, unknown
+  account, empty body) now answer a byte-identical 202 with the SRS's own sentence
+  and no token.
+- **The reason the token was in the response was that nothing else carried it.**
+  Delivery moved to the outbox, which is where the SRS puts it (`email
+  {host}/reset-password?token=... (queued via outbox)`), and the token row plus its
+  delivery event commit together (CC-09) — a token with no queued email cannot be
+  used, and a queued email for a rolled-back token is a link that fails on arrival.
+- **FR-AUTH-09's row was wrong twice, and the first correction is the interesting
+  one.** It said "the token is stored unhashed". Half true, and arguably worse than
+  fully true: hashing existed on the write path while `/api/reset-password` looked
+  tokens up as **`token IN (raw, digest)`** — specifically so the two **plaintext**
+  tokens the boot seed wrote would keep working. So a database read still yielded
+  two usable credentials, on every fresh database. The seed writes digests now and
+  the lookup is digest-only.
+- **The second correction: the row claimed the expiry "should be 24 h". It should
+  not.** That 24 h token is **FR-USR-02**'s welcome email at user creation — a
+  different flow, a different issuance path (`credentials.issued`), and a different
+  requirement. FR-AUTH-09 specifies **1 h**, which the code already used. Reading the
+  SRS rather than the matrix is what caught it.
+- **"ALL other reset tokens for this user invalidated" was missing**, and it is the
+  half that mattered. Only the token used was marked; an attacker who requested
+  their own reset while a legitimate one was live kept a working credential *after*
+  the legitimate user reset theirs. The single-use write is also now conditional on
+  `used = 0`, so two concurrent replays give one winner and one 400 — an
+  unconditional write let both succeed, which is the opposite of "single use" for
+  the only race that matters.
+- **A recorded trade-off, not hidden:** `password_reset_tokens` holds a SHA-256
+  digest, so the dispatcher needs a reversible copy to mail a link that the reset
+  endpoint will accept. The queued token is therefore **encrypted** in the outbox
+  payload, matching `credentials.issued`. A database read still cannot mint a reset:
+  the digest cannot be reversed, and the payload needs the app's Fernet key.
+- **The emailed URL did not exist.** The SRS's own flow points at
+  `/reset-password?token=...` and that was a **404** — the journey was reachable only
+  by calling the API and reading the token out of the response. `templates/
+  reset_password.html` and the route now exist; the token is read by script from the
+  query string and is never interpolated into the HTML, so it cannot end up in a
+  cached page or an error report containing the body.
+- **A UI bug only a browser test could find.** The success message was inside the
+  form, and on success the form is hidden because there is nothing left to submit —
+  so the confirmation was hidden along with it. The success state and the form are
+  mutually exclusive by construction, which is exactly why they cannot be the same
+  element; the message moved outside and the test asserts it renders.
+- **A Flask 2-tuple trap, in a new disguise.** `accepted = (202, jsonify(...))`
+  returned a bare 202 with an `int` where the body should be: Flask reads a
+  two-tuple as `(body, status)`, so the order is not cosmetic. This is the same
+  mistake as `jsonify(body, status)` from the FR-TKT-03 slice, reached from the
+  opposite direction — and it is why the "never write `jsonify(body, status)`" note
+  is a *direction* problem, not a call-shape one.
+- 5 new unit tests and 1 browser test that walks the whole journey: request a reset,
+  take the token from the queue the way the dispatcher does, complete it in the
+  browser, then prove the spent link is rejected **on the page** and the new
+  password is the one that took. The probe's `auth(forgot-password)` flow now
+  asserts a 202 with no token and reads the link from `outbox_events`, plus a flow
+  asserting the reset page serves. Matrix is now **59 IMPLEMENTED / 36 PARTIAL /
+  8 NOT_STARTED / 1 RETIRED**.
+- **What this says about the rest of the matrix.** FR-AUTH-02 and FR-AUTH-08 were
+  both recorded `IMPLEMENTED` and both were not — and neither was found by reading
+  the code for its own requirement; both were found by reading a handler for a
+  *neighbouring* one. The generator's closing section now says so explicitly: the
+  rows worth auditing next are the ones asserting something is finished.
+- **A note on the dev environment**, since it will bite again: the compose stack
+  creates the `postgres` role only if it is creating the volume. Against an existing
+  volume the role is whatever was there (`hrms`), so the suites' documented default
+  URL `postgresql+psycopg://postgres:postgres@localhost:55432/hrms` needs
+  `CREATE ROLE postgres LOGIN SUPERUSER PASSWORD 'postgres'` once. A stale `public`
+  schema is the other trap — the PG-gated tests assert against the v2.0 target, so
+  `alembic upgrade head` has to have run; CI does it first for exactly this reason,
+  and a local failure in `test_a_boolean_column_name_does_not_rewrite_another_tables_
+  column` is that, not a regression.

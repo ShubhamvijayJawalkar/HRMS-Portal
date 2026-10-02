@@ -21,6 +21,7 @@ import db_backend
 
 db_backend.reset_schema()
 
+import json  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
@@ -632,3 +633,93 @@ def test_ats_offer_and_preboarding_browser_flow(page):
     page.goto(BASE_URL + '/admin/candidates')
     page.wait_for_selector('select option[value="Hired"]', state='attached', timeout=10000)
     assert page.locator('option[value="Hired"]').first.is_disabled()
+
+
+def test_password_reset_page_completes_the_journey(page):
+    """FR-AUTH-08/09: the link in the email lands on a page that works.
+
+    The token used to come back in the `forgot-password` *response*, which is why
+    nothing needed a page and the SRS's own URL — `/reset-password?token=...` — was
+    a 404. Now the token is only in the outbox payload, so this walks the real
+    path: request a reset, take the token from the queue the way the dispatcher
+    does, and complete the reset in a browser.
+    """
+    from app import _decrypt_lifecycle_secret, _token_digest, get_db
+
+    conn = get_db()
+    try:
+        email = conn.execute("SELECT email FROM users WHERE emp_id = 'EMP002'").fetchone()[0]
+        conn.execute('DELETE FROM password_reset_tokens WHERE emp_id = ?', ['EMP002'])
+    finally:
+        conn.close()
+
+    page.goto(BASE_URL + '/login')
+    asked = page.evaluate(
+        "([emp, mail]) => fetch('/api/forgot-password', {method: 'POST',"
+        " headers: {'Content-Type': 'application/json'},"
+        " body: JSON.stringify({emp_id: emp, email: mail})})"
+        ".then(r => r.json().then(b => ({status: r.status, body: b})))",
+        ['EMP002', email],
+    )
+    assert asked['status'] == 202, asked
+    # FR-AUTH-08: nothing in the response identifies the account or the token.
+    assert 'token' not in asked['body'], asked['body']
+
+    conn = get_db()
+    try:
+        stored = conn.execute(
+            "SELECT token FROM password_reset_tokens WHERE emp_id = 'EMP002' "
+            'ORDER BY token_id DESC'
+        ).fetchone()
+        event = conn.execute(
+            "SELECT payload FROM outbox_events WHERE event_type = 'password.reset' "
+            "AND aggregate_id = 'EMP002' ORDER BY event_id DESC"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert stored and event, (stored, event)
+    payload = event[0] if isinstance(event[0], dict) else json.loads(event[0])
+    token = _decrypt_lifecycle_secret(payload['reset_token_encrypted'])
+    # FR-AUTH-09: hashed at rest. The plaintext is nowhere in the table.
+    assert stored[0] == _token_digest(token) and stored[0] != token
+
+    # The page the SRS emails actually serves, and the token is read by script
+    # rather than interpolated into the HTML.
+    page.goto(f'{BASE_URL}/reset-password?token={token}')
+    assert page.is_visible('#resetForm'), 'the reset form did not render'
+    assert token not in page.content(), 'the token was rendered into the page'
+
+    # Mismatched confirmation is caught client-side, so no request is burned.
+    page.fill('#newPassword', 'jade-marlin-quilt-77')
+    page.fill('#confirmPassword', 'something-else-entirely')
+    page.click('#resetBtn')
+    page.wait_for_timeout(500)
+    assert 'do not match' in page.text_content('#errorMsg')
+
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/reset-password') and r.request.method == 'POST'
+    ) as resp:
+        page.fill('#confirmPassword', 'jade-marlin-quilt-77')
+        page.click('#resetBtn')
+    assert resp.value.status == 200, resp.value.status
+    page.wait_for_timeout(500)
+    assert page.is_visible('#successMsg'), 'the confirmation did not render'
+
+    # Single use: the same link is now dead, on the page rather than in the API.
+    page.goto(f'{BASE_URL}/reset-password?token={token}')
+    page.fill('#newPassword', 'another-complying-password')
+    page.fill('#confirmPassword', 'another-complying-password')
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/reset-password') and r.request.method == 'POST'
+    ) as replay:
+        page.click('#resetBtn')
+    assert replay.value.status == 400, replay.value.status
+    page.wait_for_timeout(500)
+    # The server's own wording is shown rather than the page's fallback: "that link
+    # is no longer valid" from the client and "invalid or expired token" from the
+    # server mean the same thing, and the server knows which it was.
+    assert 'Invalid or expired token' in page.text_content('#errorMsg')
+
+    # And the new password is the one that took.
+    page.goto(BASE_URL + '/login')
+    _login(page, 'EMP002', 'jade-marlin-quilt-77')

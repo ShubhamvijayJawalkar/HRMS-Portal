@@ -1,6 +1,6 @@
 # SRS v2.0 requirement traceability
 
-_Generated 2026-10-01 by `scripts/generate_traceability.py` from `traceability.py`.
+_Generated 2026-10-02 by `scripts/generate_traceability.py` from `traceability.py`.
 **Do not hand-edit this file** — edit the data and re-run the script._
 
 Every FR-* requirement in `HRMS_SRS_v2.0.pdf` is listed with the routes that
@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 58 | 56% |
-| `PARTIAL` | 37 | 36% |
+| `IMPLEMENTED` | 59 | 57% |
+| `PARTIAL` | 36 | 35% |
 | `NOT_STARTED` | 8 | 8% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (58)
+### IMPLEMENTED (59)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -54,7 +54,8 @@ rather than quietly invalidating this document.
 | `FR-AUTH-05` | M | R | `/logout` | Logout closes the active user_sessions row with total_hours = logout - login and audits the action. |
 | `FR-AUTH-06` | M | R | `/` | Redirects by session state. |
 | `FR-AUTH-07` | M | N | `/dashboard` | Admin vs self dashboard chosen by policy.sees_admin_surface(); unauthenticated gets 302 for a page and 401 for JSON. |
-| `FR-AUTH-08` | M | N | `/api/forgot-password` | Always 202 with the same message, so the endpoint cannot be used to enumerate accounts. |
+| `FR-AUTH-08` | M | N | `/api/forgot-password`<br>`/reset-password` | Always 202 with the SRS's own sentence and never a token, so the request has nothing to compare between a real and an unknown account; a test asserts all four request shapes answer byte-identically. Delivery moved to the outbox, which is where the SRS puts it ("email {host}/reset-password?token=... (queued via outbox)") and what makes an empty response possible. This row previously claimed IMPLEMENTED while the route answered 404 {"error": "No matching user found"} for an unknown account and 200 *carrying the working token* for a real one - not a weakened control but its inversion, since a caller could confirm any employee ID and obtain a credential without touching the account. /reset-password now exists too: the emailed URL used to 404, so the journey was reachable only by calling the API. |
+| `FR-AUTH-09` | M | N | `/api/reset-password`<br>`/reset-password` | token_urlsafe(32), stored as a SHA-256 digest and never in the clear, 1 h expiry, single use via a write conditional on used = 0, and every other live token for the account invalidated on a successful reset - without that last part an attacker who requested their own reset while a legitimate one was live keeps a working credential after the legitimate user resets. Purged hourly. The queued link carries the token encrypted (the digest cannot be reversed, so the dispatcher needs a copy), which is unreadable without the app Fernet key, so a database read still cannot mint a reset. Two corrections to this row: it previously said the token was "stored unhashed", which was half true and arguably worse - hashing existed on the write path while /api/reset-password looked tokens up as token IN (raw, digest) to accommodate two plaintext tokens the boot seed wrote, so a database read still yielded working credentials; and it said the expiry should be 24 h, which is wrong - that is FR-USR-02's welcome-email token, a different flow, and FR-AUTH-09 specifies 1 h, which the code already used. |
 | `FR-AUTH-10` | M | N | `/api/users`<br>`/api/change-password`<br>`/api/reset-password` | passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) and a breach-corpus check, enforced at every point a password is set. The corpus is a bundled offline list, extended optionally by the HIBP k-anonymity range API; leet variants and known-password-plus-suffix are caught too. Deliberately no complexity rules and no expiry, per NIST SP 800-63B, and a test parses the module to keep them out. The old shared default of 'pass123' is gone: a user created without a password gets a generated compliant one, returned once. The rejection message is generic, so it is not an oracle for confirming a guess. |
 | `FR-AUTH-11` | M | N | `/api/mfa/enrol`<br>`/api/mfa/confirm`<br>`/api/mfa/challenge`<br>`/api/mfa/status`<br>`/api/mfa/qr`<br>`/api/mfa/disable`<br>`/api/admin/users/<emp_id>/mfa/reset` | mfa.py: TOTP (RFC 6238) for Admin/Super Admin/HR/Finance and self-service opt-in for everyone else. Two-phase enrolment — the row is written with enabled=0 and only a valid code promotes it, so a stolen password cannot enrol an attacker's own authenticator against the account. The password step parks the identity in session["mfa_pending"] and deliberately does NOT set session["emp_id"], so a half-authenticated session is refused by every existing gate by construction rather than by each route remembering to check. Five wrong codes abandon the parked login (429); one step of clock drift is tolerated; the pending state expires after ten minutes. Secrets are Fernet-encrypted under a dedicated MFA_ENCRYPTION_KEY and the feature refuses with 503 rather than storing them in the clear — key separation from SECRET_KEY, mirroring ANONYMISATION_SALT. Recovery is an audited admin reset only, which is the weaker of the two answers the SRS allows: there are no recovery codes, so the mitigation is that the reset answers identically whether or not the target was enrolled (so it cannot be used to find out who is protected) and writes a before/after audit row. A mandatory role cannot disable its own factor. |
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | Double-submit on every mutating /api request; a fetch wrapper attaches the header and native forms carry the hidden field. Asserted end to end with server-side sessions too. |
@@ -93,7 +94,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (37)
+### PARTIAL (36)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -108,7 +109,6 @@ rather than quietly invalidating this document.
 | `FR-ATT-15` | M | C | `/api/dashboard-stats` | The five keys are stable. They are recomputed per request, with no Redis 15 s cache and no worker refresh, so the cost grows with the employee count. |
 | `FR-AUTH-01` | M | C | `/login` | Employee code is trimmed and matched case-insensitively, with a rate limit (LOGIN_RATE_LIMIT, default 20/min). The limit is per remote address rather than per account *and* per IP. |
 | `FR-AUTH-04` | M | C | `/logout` | Server-side Redis sessions (opaque cookie, 8 h TTL), HttpOnly, SameSite=Lax, Secure in production; logout deletes the server copy. There is no 24 h *absolute* timeout distinct from the 8 h idle one. |
-| `FR-AUTH-09` | M | N | `/api/reset-password` | Single-use token, invalidated after a successful reset, purged hourly. Missing: the token is stored unhashed, and the expiry is 1 h where the SRS asks for 24 h. |
 | `FR-AUTH-13` | H | N | `/api/credentials` | Restricted by the permission policy and no longer returns passwords or hashes. Missing the 5-minute re-authentication and the audit row for a credential read. |
 | `FR-AUTH-14` | H | N | — | An hourly job purges expired reset and idempotency tokens. It does not auto-close breaks Active for more than 12 hours, so a forgotten break-end leaves a row Active indefinitely. |
 | `FR-DOC-02` | H | C | `/api/upload` | Multipart upload, a size cap and an extension allow-list. The MIME type is taken from the filename extension rather than sniffed from the content, and there is no malware scan. A renamed .exe passes. |
@@ -160,10 +160,12 @@ Eight `NOT_STARTED` rows remain, and they cluster in four places.
 
 **No account-level authentication defence is missing any more.** Phase 3a did
 the session, hashing, CSRF and rate-limit work; FR-AUTH-10 added the password
-policy; FR-AUTH-11 added TOTP; and FR-AUTH-03 added the lockout. What is left
-is a `PARTIAL` row: **FR-AUTH-01**'s login rate limit is keyed on remote address
-rather than on the account *and* the IP, which is the right order of magnitude but
-not the right key.
+policy; FR-AUTH-11 added TOTP; FR-AUTH-03 added the lockout; and FR-AUTH-08/09
+were corrected, which turned out to matter more than either of their numbers —
+the reset endpoint was answering 404 for an unknown account and 200 *with a
+working token* for a real one. What is left is a `PARTIAL` row:
+**FR-AUTH-01**'s login rate limit is keyed on remote address rather than on the
+account *and* the IP, which is the right order of magnitude but not the right key.
 
 **Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
 table and its no-overlap exclusion constraint in the canonical schema and no
@@ -193,8 +195,6 @@ are literals in the handler).
 The `PARTIAL` rows are worth reading before any deployment decision, because
 several are security properties rather than features:
 
-* **FR-AUTH-09** — the reset token is stored unhashed, and expires in 1 h where
-  the SRS asks for 24 h.
 * **FR-AUTH-13** — `/api/credentials` has no 5-minute re-authentication, and a
   credential read is not audited.
 * **FR-DOC-02** — uploads are validated by magic number for the claimed
@@ -207,23 +207,27 @@ several are security properties rather than features:
 
 Roughly in order of (risk x effort):
 
-1. **FR-AUTH-09 hashed reset token** — store the SHA-256 of the token instead of
-   the token. One line in the write and one in the read; as it stands, a database
-   read is a usable credential. It is now the only remaining account-level
-   weakness that is a code change rather than a decision.
-2. **FR-AUTH-01 per-account rate limiting** — the limit is keyed on remote
+1. **FR-AUTH-01 per-account rate limiting** — the limit is keyed on remote
    address, so it is bypassed by distributing attempts across sources. Keying a
-   second limit on the employee ID (inside the lockout, which already exists)
-   closes the spray the IP limit was never going to stop.
-3. **FR-LEA-09 one day-counting function** — three implementations currently
+   second limit on the employee ID closes the spray the IP limit was never going
+   to stop, and the lockout already has the per-account state to hang it on.
+2. **FR-LEA-09 one day-counting function** — three implementations currently
    disagree about how many days a leave spans, and the payroll figure is the one
    that costs an employee money.
-4. **FR-LEA-08a approval delegation** — the schema is already there and correct;
+3. **FR-LEA-08a approval delegation** — the schema is already there and correct;
    this is a route and an audit action.
-5. **FR-AUTH-13 re-authentication for credential reads** — a five-minute
+4. **FR-AUTH-13 re-authentication for credential reads** — a five-minute
    freshness check plus the audit row.
-6. **FR-USR-07 / FR-LEA-07 batch and manual-grant routes** — both are thin
+5. **FR-USR-07 / FR-LEA-07 batch and manual-grant routes** — both are thin
    wrappers over rules that already exist elsewhere.
+
+The reason that list is short is not that there is little left to do. It is that
+the remaining rows are **absent endpoints and deployment concerns**, whereas the
+gaps above were **controls that looked present**. Two of them were recorded as
+`IMPLEMENTED` in this matrix and were not: FR-AUTH-02 answered two 401 messages
+and two 403s, and FR-AUTH-08 handed out a working reset token for any employee ID
+whose email you could guess. The rows worth auditing next are the ones asserting
+that something is finished.
 
 The `PARTIAL` rows that need a decision rather than code are worth more than
 several of these: `FR-NOT-03`'s `email` preference is stored and reported but
