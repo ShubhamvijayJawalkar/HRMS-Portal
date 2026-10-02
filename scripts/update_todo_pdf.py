@@ -40,6 +40,48 @@ STATUS_COLORS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "FR-NOT-01 and FR-NOT-03: notification email moved onto the outbox, which "
+     "closes both rows. FR-NOT-01 was PARTIAL because delivery was a direct send_email call on "
+     "the request thread - an availability defect, not a style preference: SMTP is a network "
+     "call to a third party and the old code had no timeout at all, so a slow provider held a "
+     "web worker for as long as it chose. One of the three call sites was the LOGIN path, so a "
+     "hanging provider would hold the worker meant to be refusing the attempt. All three "
+     "call sites - the lockout notice, the admin compose endpoint, and the welcome mail on "
+     "user creation - now enqueue a notification.email event. FR-NOT-03 was PARTIAL because the "
+     "per-category email column was stored and reported and read by NOTHING: a switch with no "
+     "circuit behind it. The handler is now the consumer, and it consults the preference before "
+     "sending. A muted category is retired as DELIVERED rather than failed, and the reason is "
+     "worth stating: returning False would retry, and if the employee re-enabled the switch "
+     "during the backoff the mail would then go out, which is the opposite of what they asked "
+     "for, and it would burn five attempts and dead-letter a notification nobody was ever meant "
+     "to receive. The preference is read at DISPATCH time rather than enqueue time, so turning a "
+     "category off after an event was queued does not mail it; the converse is accepted and "
+     "stated, since such an event was legitimately queued. Two deliberate exceptions, both "
+     "documented at the call site rather than buried here. A broken preference lookup SENDS "
+     "anyway and logs, because failing closed would silently drop a possible account-security "
+     "notice and an unwanted email is recoverable while a silently dropped security notice is "
+     "not. And the admin compose endpoint forces the send, because suppressing an explicit "
+     "instruction would leave the admin believing mail went out; it is also a data-exfiltration "
+     "route by construction, so it stays audited on both paths. The lockout notice forces too, "
+     "because the SRS pairs the lock with a notification precisely so the login response cannot "
+     "become a status oracle - a notification the employee could have muted is not the control "
+     "the requirement describes. Two of my own response fields had to change and the reasoning "
+     "is recorded rather than the assertion loosened. The admin compose endpoint now answers "
+     "202 with an event id instead of 200 and a delivered claim it can no longer make - a 200 "
+     "saying 'Email sent' from a route that did not send anything is the same defect as "
+     "send_email returning True for a send that never happened. And user creation reports "
+     "email_queued and no longer carries email_sent at all: the value was hardcoded True, and "
+     "reporting False would be no better now, because the route does not know either. What it "
+     "can honestly say is that the credentials were not delivered by this request, and it names "
+     "the recovery route so an admin on a no-mail deployment is not left waiting. The "
+     "request-thread property is asserted structurally, by an AST sweep that fails if any "
+     "send_email( call site reappears in app.py, because a behavioural test would only catch "
+     "the regression when a provider happened to be slow. A test helper also had to be built "
+     "properly: the stand-in outbox row is six columns in the real order, because _payload "
+     "reads row[4] and an IndexError inside a handler is swallowed by dispatch_once's own "
+     "except - which would have made the test pass for the wrong reason. Matrix 63 IMPLEMENTED "
+     "/ 33 PARTIAL / 7 NOT_STARTED / 1 RETIRED. Unit 290 passed / 2 skipped, browser 23/23, "
+     "v2.0 gates 111/111 GET + 57/57 write."),
     ("2026-10-02", "FR-AUTH-14 / FR-JOB-02: breaks left Active are now auto-closed. The SRS "
      "names both duties in one sentence at HIGH priority - 'a scheduled job purges expired reset "
      "tokens hourly AND auto-closes breaks Active for more than 12 hours' - and only the first "
@@ -746,8 +788,8 @@ TASKS = [
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "285 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "285 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "290 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "290 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

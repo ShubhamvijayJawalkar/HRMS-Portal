@@ -429,10 +429,25 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'differently, which is the inconsistency the requirement exists to remove.'),
 
     # ── FR-NOT: notifications ───────────────────────────────────────────
-    'FR-NOT-01': ('M', 'C', 'PARTIAL', ('/api/notifications',),
-                  'Last-50 list with an unread count. Delivery is a direct SMTP call on '
-                  'the request thread rather than an outbox enqueue, so a slow provider '
-                  'can block the request that triggered it.'),
+    'FR-NOT-01': ('M', 'C', 'IMPLEMENTED', ('/api/notifications',
+                                               '/api/send-notification-email'),
+                  'Last-50 list with an unread count, and delivery through the '
+                  'transactional outbox rather than a direct SMTP call on the request '
+                  'thread. That was an availability defect, not a style preference: '
+                  'SMTP is a network call to a third party and the old code had no '
+                  'timeout at all, so a slow provider held a web worker for as long as '
+                  'it chose - and one of the three call sites was the LOGIN path, so a '
+                  'hanging provider would hold the worker meant to be refusing the '
+                  'attempt. All three call sites (lockout notice, admin compose, '
+                  'welcome mail on user creation) now enqueue a notification.email '
+                  'event. The admin compose endpoint answers 202 with an event id '
+                  'rather than 200 and a delivered claim it can no longer make, and its '
+                  'audit row records queued plus the event id instead of a delivery that '
+                  'did not happen. User creation reports email_queued and no longer '
+                  'carries email_sent at all: the value was hardcoded True, and '
+                  'reporting False would be no better now because the route does not '
+                  'know either - what it says is that the credentials were not '
+                  'delivered by this request, and names the recovery route.'),
     'FR-NOT-02': ('M', 'R', 'IMPLEMENTED', ('/api/notifications/read',),
                   'Sets is_read and keeps the row, so a read notification does not vanish.'),
     'FR-NOT-03': ('S', 'R', 'PARTIAL',
@@ -453,14 +468,26 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'ratings, reviews and holiday opt-ins and forcing them into General '
                   'would be worse than naming them; `Tickets-SLA` is kept even though '
                   'FR-TKT-01 has no producer yet, and the API reports has_producer per '
-                  'category rather than presenting a dead switch. MISSING: the `email` '
-                  'channel has no automatic delivery path - POST /api/send-notification-'
-                  'email is a manual admin endpoint that picks its own recipient, and the '
-                  'per-category `email` flag is stored and reported but nothing routes on it '
-                  '- so the column is stored and reported but nothing consumes it, which the PUT '
-                  'response states explicitly.'),
-
-    # ── FR-AST / FR-ATS: assets and recruitment ─────────────────────────
+                  'category rather than presenting a dead switch. The `email` channel now '
+                  'HAS a consumer: the outbox notification.email handler reads '
+                  'notifications.wants_email before sending, and a muted category is '
+                  'retired as DELIVERED rather than failed - returning False would retry, '
+                  'and if the employee re-enabled the switch mid-backoff the mail would '
+                  'then go, which is the opposite of what they asked for, and it would burn '
+                  'five attempts and dead-letter a notification nobody was meant to '
+                  'receive. The preference is read at DISPATCH time rather than enqueue '
+                  'time, so turning a category off after an event was queued does not '
+                  'mail it; the converse is accepted and stated, since such an event was '
+                  'legitimately queued. Two deliberate exceptions, both documented at the '
+                  'call site: a broken preference lookup sends anyway and logs, because '
+                  'failing closed would silently drop a possible account-security notice '
+                  'and an unwanted email is recoverable; and the admin compose endpoint '
+                  'forces the send, because suppressing an explicit instruction would '
+                  'leave the admin believing mail went out. The lockout notice also forces, '
+                  'because the SRS pairs the lock with a notification precisely so the '
+                  'login response cannot become a status oracle. STILL PARTIAL: no SMTP '
+                  'provider is configured yet, so on the current deployment nothing is '
+                  'actually delivered.'),
     'FR-AST-01': ('M', 'R', 'IMPLEMENTED', ('/api/assets', '/api/my-assets', '/api/assets/<int:aid>/return'),
                   'Issue/return with return_date set on return, own-assets view, and '
                   'outstanding counts feeding the offboarding clearance gate.'),

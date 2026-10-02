@@ -1251,7 +1251,16 @@ def test_document_and_dependent_creation_is_audited(client):
     sent = client.post('/api/send-notification-email', json={
         'to': 'someone@example.com', 'subject': 'Payroll', 'body': 'figures',
     })
-    assert sent.status_code == 200, sent.get_json()
+    # **202, not 200** (FR-NOT-01). The route used to call SMTP inline and answer
+    # "Email sent". It now queues an outbox event and does not know whether anything
+    # was delivered — so a 200 claiming success would be the same defect as
+    # `send_email` returning True for a send that never happened. 202 says exactly
+    # what happened, and the event id correlates against GET /api/admin/outbox.
+    assert sent.status_code == 202, sent.get_json()
+    assert sent.get_json()['event_id'], (
+        'no event id returned, so the queue entry could not be correlated with the '
+        'outbox monitor'
+    )
     conn = get_db()
     try:
         row = conn.execute(
@@ -1261,7 +1270,14 @@ def test_document_and_dependent_creation_is_audited(client):
     finally:
         conn.close()
     assert row is not None, 'an admin sent company email with no audit row'
-    assert json.loads(row[0])['to'] == 'someone@example.com', row
+    recorded = json.loads(row[0])
+    assert recorded['to'] == 'someone@example.com', row
+    # `delivered` is deliberately gone: the route no longer delivers anything, and
+    # recording a delivery it did not perform would be the lie this slice removes.
+    assert 'delivered' not in recorded, (
+        f'the audit row still claims a delivery: {recorded}'
+    )
+    assert recorded['queued'] is True, recorded
 
     # Marking your own notifications read stays deliberately unaudited.
     assert 'mark_notifications_read' in KNOWN_UNAUDITED_MUTATIONS, (
@@ -2420,9 +2436,15 @@ def test_creating_a_user_no_longer_claims_an_email_was_sent_when_none_was():
     resp = client.post('/api/users', json=payload)
     assert resp.status_code == 201, resp.get_json()
     body = resp.get_json()
-    # No SMTP in the suite, so this is the branch that matters.
-    assert body['email_sent'] is False, body
-    assert 'could not be sent' in body['notice'], body
+    # The welcome mail is *queued*, not sent, so the response must not claim anything
+    # about delivery. `email_sent` used to be hardcoded True here — the same defect as
+    # `send_email` returning True for a send that never happened, one level up — and
+    # `email_sent: false` would be no better now, because the route still does not
+    # know: it queues a message.
+    assert body['email_queued'] is True, body
+    assert 'email_sent' not in body, (
+        f'the response still claims to know whether mail was sent: {body}'
+    )
     assert '/api/admin/users/' in body['notice'] and 'password' in body['notice'], (
         f'the notice must point at the recovery route, since the email is the thing '
         f'that just failed: {body["notice"]}'
@@ -2685,6 +2707,218 @@ def _next_test_break_id():
         return int(row[0])
     finally:
         conn.close()
+
+
+def _event_row(payload_json: str):
+    """A stand-in ``outbox_events`` row in the column order the handlers index.
+
+    ``_due_rows`` selects six columns and ``_payload`` reads ``row[4]``, so a
+    two-tuple is an IndexError rather than a meaningful failure — and an IndexError
+    inside a handler is swallowed by ``dispatch_once``'s own ``except``, which would
+    have made this test pass for the wrong reason.
+    """
+    return (1, 'notification.email', 'notification', 'EMP970', payload_json, 0)
+
+
+def _notification_email_wanted(*args, **kwargs):  # pragma: no cover - replaced per test
+    raise AssertionError('install a stub for _notification_email_wanted')
+
+
+def test_an_email_is_never_sent_on_the_request_thread():
+    """FR-NOT-01: an SMTP call on the request thread is an availability defect.
+
+    Three call sites did this — the lockout notice, the admin compose endpoint and
+    the welcome mail on user creation. SMTP is a network call to a third party and the
+    old code had no timeout at all, so a slow or hanging provider held a web worker
+    for as long as it liked. The fix is not a shorter timeout: it is that the request
+    thread should not be doing the sending at all.
+
+    Asserted structurally — every `send_email(` call site in `app.py` must be the
+    function's own definition. A regression that reintroduces a direct call is the
+    defect, and a behavioural test would only catch it when a provider was slow.
+    """
+    import ast
+    import pathlib as _pathlib
+
+    import app as app_module
+
+    tree = ast.parse(_pathlib.Path(app_module.__file__).read_text())
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == 'send_email':
+            # The only permitted call site is inside `send_email` itself (its own
+            # recursion is impossible, so this is the guard against a new caller).
+            offenders.append(node.lineno)
+    assert not offenders, (
+        f'send_email is called directly on the request thread at app.py lines '
+        f'{offenders}; enqueue a notification.email event instead so delivery happens '
+        f'on the outbox dispatcher'
+    )
+
+    # And the event type exists and is handled.
+    import outbox as outbox_module
+
+    assert 'notification.email' in outbox_module.HANDLERS, sorted(outbox_module.HANDLERS)
+
+
+def test_the_email_preference_column_is_actually_read_before_sending():
+    """FR-NOT-03: the `email` column had no consumer for its entire life.
+
+    Stored, reported by the API, and read by nothing — a switch with no circuit
+    behind it, which is why the requirement was PARTIAL. This asserts the outbox
+    handler consults it, and that muting a category suppresses the mail.
+    """
+    import notifications as notifications_module
+
+    # `effective_for` takes (category, in_app, email) tuples — the shape the row
+    # columns arrive in. Passing dicts here silently applied nothing and the
+    # assertion below would have failed for a reason that had nothing to do with the
+    # behaviour under test.
+    effective = notifications_module.effective_for([
+        ('Leaves', 1, 0),
+        ('Tickets', 1, 1),
+    ])
+    assert notifications_module.wants_email(effective, 'Leaves') is False
+    assert notifications_module.wants_email(effective, 'Tickets') is True
+    # Default true: no stored row means on, which is the SRS's wording.
+    assert notifications_module.wants_email(effective, 'Payroll') is True
+    # And the catch-all is always on, so a renamed category cannot silently mute mail.
+    assert notifications_module.wants_email(effective, notifications_module.FALLBACK) is True
+
+
+def test_a_muted_category_is_suppressed_as_delivered_not_as_a_failure():
+    """Suppression is the outcome we wanted, so it must retire the event.
+
+    Returning False would make the dispatcher retry, and a later dispatch would read
+    the preference again — but if the employee turned the switch back on in between,
+    the mail would then be sent, which is the opposite of what they asked for. And it
+    would burn five attempts and dead-letter a notification nobody was ever meant to
+    receive.
+    """
+    import outbox as outbox_module
+
+    delivered = []
+    refused = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            return [('emp970@company.com', 'Quiet')]
+
+    import app as app_module
+
+    previous_send = app_module.send_email
+    previous_wanted = getattr(app_module, '_notification_email_wanted', None)
+    try:
+        app_module.send_email = lambda *a, **k: delivered.append(a) or True
+        app_module._notification_email_wanted = lambda *a, **k: False
+        # A row shaped like a real outbox row; only the event_type and payload matter.
+        ok = outbox_module.HANDLERS['notification.email'](
+            Conn(), _event_row('{"emp_id": "EMP970", "to": "x@y.z", '
+                               '"subject": "s", "body": "b", "category": "Leaves"}'),
+        )
+        assert ok is True, 'a suppressed notification must count as handled'
+        assert not delivered, 'mail was sent for a category the employee muted'
+        assert not refused
+    finally:
+        app_module.send_email = previous_send
+        if previous_wanted is None:
+            try:
+                del app_module._notification_email_wanted
+            except AttributeError:
+                pass
+        else:
+            app_module._notification_email_wanted = previous_wanted
+
+
+def test_an_admin_composed_email_ignores_the_preference_but_is_still_audited():
+    """`force` exists for exactly one case: an explicit instruction to send mail.
+
+    `POST /api/send-notification-email` is an admin composing a message to a chosen
+    recipient. Suppressing it because the recipient muted a category would be a
+    silent no-op on an explicit request — the admin would see "queued" and no mail
+    would ever go. It stays audited either way: an endpoint that mails any address
+    with any body is a data-exfiltration route by construction.
+    """
+    import outbox as outbox_module
+
+    sent = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            return [('ops@company.com', 'Ops')]
+
+    import app as app_module
+
+    previous_send = app_module.send_email
+    previous_wanted = getattr(app_module, '_notification_email_wanted', None)
+    try:
+        app_module.send_email = lambda *a, **k: sent.append(a) or True
+
+        def refuse(*a, **k):
+            raise AssertionError('force=True must not consult the preference at all')
+
+        app_module._notification_email_wanted = refuse
+        ok = outbox_module.HANDLERS['notification.email'](
+            Conn(), _event_row('{"emp_id": "EMP970", "to": "ops@company.com", '
+                               '"subject": "Outage", "body": "down", '
+                               '"category": "Leaves", "force": true}'),
+        )
+        assert ok is True
+        assert sent, 'a forced admin email was suppressed by a notification preference'
+    finally:
+        app_module.send_email = previous_send
+        if previous_wanted is None:
+            try:
+                del app_module._notification_email_wanted
+            except AttributeError:
+                pass
+        else:
+            app_module._notification_email_wanted = previous_wanted
+
+
+def test_a_broken_preference_lookup_sends_rather_than_dropping_silently():
+    """The honest choice between two bad options, stated rather than defaulted.
+
+    Failing closed would drop a legitimate notification — possibly an account-security
+    notice — because a lookup broke. Failing open would send something the employee
+    asked not to receive. An unwanted email is recoverable; a silently dropped
+    security notice is not, so the send proceeds and the failure is logged.
+    """
+    import outbox as outbox_module
+
+    sent = []
+
+    class Conn:
+        def execute(self, sql, params=None):
+            return [('emp970@company.com', 'Quiet')]
+
+    import app as app_module
+
+    previous_send = app_module.send_email
+    previous_wanted = getattr(app_module, '_notification_email_wanted', None)
+    try:
+        app_module.send_email = lambda *a, **k: sent.append(a) or True
+
+        def explode(*a, **k):
+            raise RuntimeError('preferences table unavailable')
+
+        app_module._notification_email_wanted = explode
+        ok = outbox_module.HANDLERS['notification.email'](
+            Conn(), _event_row('{"emp_id": "EMP970", "to": "x@y.z", '
+                               '"subject": "s", "body": "b", "category": "Security"}'),
+        )
+        assert ok is True
+        assert sent, 'a broken preference lookup silently swallowed a security notice'
+    finally:
+        app_module.send_email = previous_send
+        if previous_wanted is None:
+            try:
+                del app_module._notification_email_wanted
+            except AttributeError:
+                pass
+        else:
+            app_module._notification_email_wanted = previous_wanted
 
 
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with

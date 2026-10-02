@@ -2989,9 +2989,16 @@ def _count_failed_login(conn, emp_id, name, email):
         'change your password.',
     )
     if email:
+        # **Queued, not sent** (FR-NOT-01). This is the sign-in path, so an SMTP call
+        # here is the worst possible place for one: a slow provider would hold the
+        # worker that is meant to be refusing the attempt, and the old code had no
+        # timeout. `force=True` because this is an account-security notice — the SRS
+        # pairs the lock with a notification precisely so the login response cannot
+        # become a status oracle, and a notification an employee could have muted is
+        # not the control the requirement describes.
         try:
-            send_email(
-                email,
+            enqueue_notification_email(
+                conn, emp_id, email,
                 'Your HRMS account has been temporarily locked',
                 f'<p>Hello {name or emp_id},</p>'
                 f'<p>There were {attempts} consecutive failed sign-in attempts '
@@ -3002,9 +3009,11 @@ def _count_failed_login(conn, emp_id, name, email):
                 'protection against a password-guessing attack.</p>'
                 '<p>The lock expires on its own. If you do not recognise these '
                 'attempts, contact your administrator and change your password.</p>',
+                category=notifications.category_for('ACCOUNT_LOCKED'),
+                force=True,
             )
         except Exception:  # a failed notification must not fail the sign-in path
-            logger.exception('Could not send the account-lockout email to %s', emp_id)
+            logger.exception('Could not queue the account-lockout email to %s', emp_id)
 
 
 # The SRS's shift-start burst target is 1,000 logins inside a five-minute window,
@@ -8952,6 +8961,52 @@ SMTP_USE_SSL = None if _SSL_FLAG is None else _SSL_FLAG.strip().lower() in ('1',
 SMTP_TIMEOUT_SECONDS = float(os.getenv('SMTP_TIMEOUT_SECONDS', '15'))
 
 
+def _notification_email_wanted(conn, emp_id, category):
+    """Does ``emp_id`` want email in ``category``? — FR-NOT-03's missing consumer.
+
+    ``notification_preferences.email`` had no reader for its entire life: stored,
+    reported by ``GET/PUT /api/notification-preferences``, and consulted by nothing.
+    The outbox's ``notification.email`` handler is the consumer, and this is the one
+    place the row is read, so the in-app and email channels cannot drift apart.
+
+    Read at **dispatch** time, not enqueue time, on purpose: an employee who mutes a
+    category after an event was queued should not receive that mail. The converse is
+    accepted — an event queued while the category was on still sends if the switch is
+    flipped before the dispatcher reaches it, because it was legitimately queued.
+    """
+    import notifications  # lazy: the module imports nothing from here at load time
+
+    rows = conn.execute(
+        "SELECT category, in_app, email FROM notification_preferences WHERE emp_id = ?",
+        [emp_id],
+    ).fetchall()
+    effective = notifications.effective_for([
+        {'category': r[0], 'in_app': r[1], 'email': r[2]} for r in rows
+    ])
+    return notifications.wants_email(effective, category or notifications.FALLBACK)
+
+
+def enqueue_notification_email(conn, emp_id, to, subject, body, category=None,
+                               force=False):
+    """Queue an email for the dispatcher (FR-NOT-01). Never sends inline.
+
+    Every route that used to call ``send_email`` on the request thread goes through
+    here. SMTP is a third-party network call: doing it inline meant a slow provider
+    held a web worker, which is an availability defect rather than a style preference.
+    Returns the ``event_id`` so a caller can audit against it.
+    """
+    import outbox  # lazy: outbox imports from this module
+
+    return outbox.enqueue(
+        conn, 'notification.email',
+        aggregate='notification', aggregate_id=emp_id,
+        payload={
+            'emp_id': emp_id, 'to': to, 'subject': subject, 'body': body,
+            'category': category, 'force': bool(force),
+        },
+    )
+
+
 def email_configured() -> bool:
     """Is there a real transport behind `send_email`?
 
@@ -9092,7 +9147,23 @@ def send_notification_email():
     body = data.get('body', '')
     if not to:
         return jsonify({'error': 'recipient required'}), 400
-    ok = send_email(to, subject, body)
+    # Queued rather than sent inline (FR-NOT-01): SMTP is a third-party network call
+    # and this route is admin-triggered, so a slow provider would hold a worker for as
+    # long as it chose. `force=True` — this is an explicit instruction to send mail to
+    # a chosen recipient, so a notification preference belonging to that recipient must
+    # not silently turn it into a no-op the admin believes succeeded.
+    conn = get_db()
+    try:
+        event_id = enqueue_notification_email(
+            conn, session['emp_id'], to, subject, body, force=True,
+        )
+        conn.commit()
+        queued = True
+    except Exception:
+        logger.exception('Could not queue an admin notification email')
+        event_id, queued = None, False
+    finally:
+        conn.close()
     # Audited before the return, and on both paths. An admin endpoint that sends mail
     # to **any address with any body** is a data-exfiltration route by construction —
     # the single most important thing to be able to answer afterwards is "who sent
@@ -9100,13 +9171,23 @@ def send_notification_email():
     # that matter.
     audit_log(
         session['emp_id'], 'NOTIFICATION_EMAIL_SENT',
-        f'Admin sent {subject!r} to {to} (delivered={ok})',
+        f'Admin queued {subject!r} for {to} (event={event_id})',
         entity='notifications',
-        after={'to': to, 'subject': subject, 'delivered': bool(ok)},
+        # `delivered` is gone on purpose: this route no longer knows whether anything
+        # was sent, and reporting a delivery it did not perform would be the same
+        # defect as `send_email` returning True for a send that never happened. The
+        # event id is what an operator correlates against /api/admin/outbox.
+        after={'to': to, 'subject': subject, 'queued': queued, 'event_id': event_id},
     )
-    if ok:
-        return jsonify({'message': 'Email sent'}), 200
-    return jsonify({'warning': 'Email sending failed (SMTP may not be configured)'}), 200
+    if queued:
+        return jsonify({
+            'message': 'Email queued for delivery',
+            'event_id': event_id,
+            'note': 'Delivery happens on the outbox dispatcher, not in this request. '
+                    'Watch GET /api/admin/outbox; a provider failure retries and then '
+                    'dead-letters rather than being lost.',
+        }), 202
+    return jsonify({'error': 'Could not queue the email'}), 500
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -11053,19 +11134,42 @@ def add_user():
         <p style="color:#64748b;font-size:12px;">Please change your password after first login. Do not share these credentials with anyone.</p>
         <p style="color:#64748b;font-size:12px;">- HRMS Team</p>
     </div>"""
-    delivered = send_email(data['email'], 'Your HRMS Account Credentials', creds_body)
+    try:
+        event_id = enqueue_notification_email(
+            conn, data['emp_id'], data['email'],
+            'Your HRMS Account Credentials', creds_body,
+            category=notifications.category_for('CREDENTIALS_ISSUED'),
+            force=True,
+        )
+        queued = True
+    except Exception:
+        # A user must not fail to be created because a mail queue row could not be
+        # written. Logged loudly and reported in the response below, so the admin
+        # knows the credentials did not reach the employee.
+        logger.exception('Could not queue the welcome email for %s', data['emp_id'])
+        event_id, queued = None, False
 
-    # Was hardcoded `True`. That was the same class of defect as `send_email`
-    # reporting success for a send that never happened, one level up: with no SMTP
-    # configured the new employee was created, the response said the welcome email
-    # went out, and nobody had received it. An admin reading `email_sent: true` on a
-    # deployment with no mail server has no way to know the credentials never left.
-    body = {'message': 'User added', 'email_sent': delivered}
-    if not delivered:
+    # **`email_sent` is gone, and its removal is the point.** It was hardcoded `True`
+    # — the same defect as `send_email` returning True for a send that never happened,
+    # one level up: with no SMTP configured the employee is created, the response says
+    # the welcome email went out, and nobody received it. Reporting `email_sent:
+    # false` would not be an improvement either, because this route still does not
+    # know: it now *queues* a message. What it can honestly report is that the
+    # credentials were not delivered by this request, and where the recovery route is.
+    body = {'message': 'User added', 'email_queued': bool(queued),
+            'email_event_id': event_id}
+    if not queued:
         body['notice'] = (
-            'The welcome email could not be sent, so the credentials did not reach '
+            'The welcome email could not be queued, so the credentials did not reach '
             f'{data["email"]}. Hand the password over directly, or use '
             'POST /api/admin/users/<emp_id>/password to issue a new one.'
+        )
+    else:
+        body['notice'] = (
+            'The credentials email is queued for delivery, not sent by this request. '
+            'Hand the password over directly as well: a deployment with no mail server '
+            'will queue the message and dead-letter it, and POST '
+            '/api/admin/users/<emp_id>/password issues a new one on demand.'
         )
     if generated:
         # The admin supplied no password, so this is the only time the plaintext

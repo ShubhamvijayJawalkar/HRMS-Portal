@@ -304,6 +304,30 @@ def wants_in_app(effective: dict, category: str) -> bool:
     return bool(effective[category].get('in_app', True))
 
 
+def wants_email(effective: dict, category: str) -> bool:
+    """Should an **email** in this category be delivered?
+
+    FR-NOT-03's `email` column had no consumer for its entire life: it was stored,
+    reported by the API, and nothing ever read it — a switch with no circuit behind
+    it, which is why the requirement stayed PARTIAL. The outbox's
+    `notification.email` handler is the consumer, and this is the rule it reads.
+
+    The semantics deliberately mirror :func:`wants_in_app` rather than inventing
+    separate ones, because the SRS states both channels as "default true" and an
+    employee who muted `Leaves` in-app did not ask to keep receiving them by email.
+
+    The catch-all is always on: a category with no stored row is on, and the failure
+    mode to avoid is silently dropping a message because of a renamed or unknown
+    category. Historical rows carry the old derivations (`Leave`, `Break`), so this
+    is reachable rather than theoretical.
+    """
+    if category == FALLBACK:
+        return True
+    if category not in effective:
+        return True
+    return bool(effective[category].get('email', True))
+
+
 # Every notification type the app raises **today**, read off the actual call sites
 # in `app.py` and `outbox.py`. A test greps those two files and asserts this list
 # covers every type found and that none of them lands in FALLBACK — the defect this

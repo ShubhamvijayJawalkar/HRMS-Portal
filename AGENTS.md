@@ -2214,3 +2214,60 @@ requirement counted twice**.
 - Matrix **62 IMPLEMENTED / 34 PARTIAL / 7 NOT_STARTED / 1 RETIRED**. Unit **285
   passed / 2 skipped**, v2.0 gates **111/111 GET + 57/57 write**, probe run twice for
   idempotency, preflight and CC-01 green.
+
+## FR-NOT-01 / FR-NOT-03: notification email moved onto the outbox
+Two PARTIAL rows closed by one handler, and the reason they meet here is worth stating
+rather than leaving to be rediscovered.
+
+- **FR-NOT-01 was an availability defect, not a style preference.** Delivery was a
+  direct `send_email` on the request thread. SMTP is a network call to a third party
+  and the old code had **no timeout at all**, so a slow provider held a web worker for
+  as long as it chose — and one of the three call sites was the **login path**, so a
+  hanging provider would hold the worker that is meant to be refusing the attempt.
+  Three call sites: the lockout notice, the admin compose endpoint, and the welcome
+  mail on user creation. All three now enqueue a `notification.email` event.
+- **FR-NOT-03's `email` column was a switch with no circuit behind it.** Stored,
+  reported by `GET/PUT /api/notification-preferences`, read by nothing. The outbox
+  handler is now the consumer and consults it before sending.
+- **A muted category is retired as DELIVERED, not as failed.** Returning `False` would
+  make the dispatcher retry, and if the employee re-enabled the switch during the
+  backoff the mail would then go out — the opposite of what they asked for. It would
+  also burn five attempts and dead-letter a notification nobody was ever meant to
+  receive.
+- **The preference is read at dispatch, not at enqueue.** Turning a category off after
+  an event was queued should not mail it. The converse is accepted and stated: an
+  event queued while the category was on still sends if the switch flips before the
+  dispatcher reaches it, because it was legitimately queued.
+- **A broken preference lookup sends anyway, and logs.** Failing closed would silently
+  drop a possible **account-security** notice; failing open sends something unwanted.
+  An unwanted email is recoverable, a silently dropped security notice is not.
+- **Two `force` exceptions, documented at the call site.** The admin compose endpoint
+  forces, because suppressing an explicit instruction would leave the admin believing
+  mail went out — and it is a data-exfiltration route by construction, so it stays
+  audited on both paths. The lockout notice forces, because the SRS pairs the lock with
+  a notification *precisely so the login response cannot become a status oracle*, and a
+  notification the employee could have muted is not the control the requirement
+  describes.
+- **Two response fields of my own had to change, and the reasoning is recorded rather
+  than the assertion loosened.** The admin compose endpoint answers **202 with an
+  event id**, not 200 and a delivered claim it can no longer make — a 200 saying "Email
+  sent" from a route that sent nothing is the same defect as `send_email` returning
+  True. And user creation reports `email_queued` and **drops `email_sent` entirely**:
+  the value was hardcoded `True`, and reporting `False` would be no better now because
+  the route does not know either. What it can honestly say is that the credentials were
+  not delivered by this request — plus the recovery route.
+- **The request-thread property is asserted structurally**, by an AST sweep that fails
+  if any `send_email(` call site reappears in `app.py`. A behavioural test would only
+  catch the regression when a provider happened to be slow, which is to say never in CI.
+- **A test helper had to be right in a way that mattered.** The stand-in outbox row is
+  six columns in the real order, because `_payload` reads `row[4]` — and an
+  `IndexError` inside a handler is swallowed by `dispatch_once`'s own `except`, which
+  would have made the test **pass for the wrong reason**.
+- **A test of mine passed dicts where `effective_for` takes `(category, in_app, email)`
+  tuples**, so the row was silently ignored and the assertion failed for a reason that
+  had nothing to do with the behaviour under test.
+- FR-NOT-03 stays **PARTIAL**, honestly: there is still no SMTP provider configured, so
+  on the current deployment nothing is actually delivered. The matrix says that rather
+  than implying a working email channel.
+- Matrix **63 IMPLEMENTED / 33 PARTIAL / 7 NOT_STARTED / 1 RETIRED**. Unit **290
+  passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET + 57/57 write**.

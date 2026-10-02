@@ -284,6 +284,78 @@ def _handle_password_reset(conn, row) -> bool:
         return False
 
 
+def _handle_notification_email(conn, row) -> bool:
+    """Deliver a queued notification email — FR-NOT-01 and FR-NOT-03.
+
+    Two PARTIAL rows meet here, and it is worth being explicit about why one handler
+    closes both:
+
+    * **FR-NOT-01** was PARTIAL because delivery was a direct ``send_email`` on the
+      request thread. That is an availability defect, not a style preference: SMTP is
+      a network call to a third party, and the old code had no timeout at all, so a
+      slow or hanging provider held a worker for as long as it liked. Three call sites
+      did this — the lockout notice, the admin "send an email" endpoint, and the
+      welcome mail on user creation.
+    * **FR-NOT-03** was PARTIAL because the per-category ``email`` preference was
+      stored and reported but **nothing consumed it**: the column was a switch with no
+      circuit behind it. This handler is the consumer, and it reads the preference
+      before sending.
+
+    The preference is read **here**, at delivery time, rather than at enqueue time. A
+    queued event must not carry a decision made when it was written: an employee who
+    mutes a category after the event was queued should not receive that mail, and
+    reading at dispatch makes that automatic. The flip side is recorded honestly —
+    an event queued while the category was enabled still sends if the preference is
+    turned off before dispatch, because it was legitimately queued.
+
+    ``force`` exists for the one case where the message is not a notification: the
+    admin compose endpoint, which is an explicit instruction to send mail and must not
+    be silently suppressed by a preference. It is audited separately either way.
+    """
+    from app import send_email  # lazy
+    payload = _payload(row) or {}
+    to = payload.get('to')
+    subject = payload.get('subject')
+    body = payload.get('body')
+    if not to or subject is None:
+        logger.warning('outbox notification.email: incomplete payload')
+        return False
+
+    if not payload.get('force'):
+        emp_id = payload.get('emp_id')
+        if emp_id:
+            try:
+                from app import _notification_email_wanted  # lazy
+
+                if not _notification_email_wanted(conn, emp_id, payload.get('category')):
+                    # Suppressed by preference. **Handled, not failed** — returning
+                    # True retires the event as delivered, because "we decided not to
+                    # send" is the outcome we wanted. Retrying would mail it anyway on
+                    # a later dispatch, which would be the opposite of the preference.
+                    logger.info(
+                        'outbox notification.email: suppressed by preference for %s (%s)',
+                        emp_id, payload.get('category'),
+                    )
+                    return True
+            except Exception as exc:
+                # Failing *closed* here would drop a legitimate notification because a
+                # preference lookup broke. Failing open would send something the
+                # employee asked not to receive. The honest choice is to let the send
+                # proceed and make the failure visible in the log, because an unwanted
+                # email is recoverable and a silently dropped account-security notice
+                # is not.
+                logger.warning(
+                    'outbox notification.email: preference lookup failed, sending anyway '
+                    '(%s)', exc,
+                )
+
+    try:
+        return bool(send_email(to, subject, body or ''))
+    except Exception as exc:
+        logger.warning('outbox notification.email failed: %s', exc)
+        return False
+
+
 HANDLERS = {
     'payroll.finalized': _handle_payroll_finalized,
     'offer.created': _handle_offer_created,
@@ -291,6 +363,7 @@ HANDLERS = {
     'candidate.hired': _handle_candidate_hired,
     'credentials.issued': _handle_credentials_issued,
     'password.reset': _handle_password_reset,
+    'notification.email': _handle_notification_email,
 }
 
 
