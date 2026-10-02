@@ -248,7 +248,11 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'insert is two statements, and only v2.0 carries the index.'),
     'FR-ATT-03': ('M', 'R', 'IMPLEMENTED', ('/api/end-break/<int:break_id>',),
                   'Ownership checked against the session employee, duration computed '
-                  'from the timestamps, action audited.'),
+                  'from the timestamps, action audited. The audit half was missing while '
+                  'this row claimed it: a break is the origin of an attendance record that '
+                  'feeds the payroll LOP calculation, so closing one wrote no record of '
+                  'who closed it or when. It does now, with before/after. start_break '
+                  'audits too, including the auto-end of a previous break.'),
     'FR-ATT-04': ('M', 'R', 'IMPLEMENTED', ('/api/user-breaks',),
                   'Own breaks only, UNIONed with any Active break from another date '
                   'so a forgotten break-end is still visible.'),
@@ -257,9 +261,19 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'partial unique index that would enforce it under concurrency exists '
                   'only in the v2.0 schema.'),
     'FR-ATT-06': ('H', 'C', 'PARTIAL', ('/api/break-approvals/<int:aid>/approve', '/api/break-approvals/<int:aid>/reject'),
-                  'Manager/HR/Admin may approve, the update is conditional, the action '
-                  'is audited and the employee is notified. Delegated approvers '
-                  '(FR-LEA-08a) are not consulted, because delegation is unimplemented.'),
+                  'Manager/HR/Admin may approve, the update is conditional (CC-04), the '
+                  'action is audited and the employee is notified. Every one of those four '
+                  'clauses was false while this row asserted them. The gate was '
+                  '@admin_required, so a Team Leader could not approve their own report - '
+                  'the third instance of that bug here after FR-EXP-03 and FR-PERF-01 - '
+                  'and the requirement was unreachable for the role the SRS names. The '
+                  'approve write was unconditional, so two approvers both won. Nothing was '
+                  'audited, and the employee was never notified. reject additionally '
+                  'answered 200 {"message": "Break rejected"} whether or not it rejected '
+                  'anything, the same always-200 lie the regularization routes had. All '
+                  'fixed, reusing the reporting_line_required gate from FR-PERF-01. '
+                  'Delegated approvers (FR-LEA-08a) are still not consulted, which is why '
+                  'this stays PARTIAL.'),
     'FR-ATT-07': ('L', 'R', 'PARTIAL', ('/api/break-types', '/api/user-breaks',),
                   'Minutes used and the approval flag are exposed. The per-type summary '
                   'is assembled by the client from two calls rather than served as one '
@@ -282,8 +296,15 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'Redis 15 s cache and no worker refresh, so the cost grows with the '
                   'employee count.'),
     'FR-ATT-16': ('H', 'R', 'IMPLEMENTED', ('/api/admin/breaks', '/api/admin/dispose-break/<int:break_id>'),
-                  'One console call for active/disposed/summary; dispose ends any '
-                  'Active break with an audited reason.'),
+                  'One console call for active/disposed/summary; dispose ends any Active '
+                  'break with an audited reason. Neither half existed: the route neither '
+                  'audited nor accepted a reason, so the row claimed an audited reason for '
+                  'a handler that had neither. The reason is not cosmetic - this ends '
+                  "another employee's break, shortening their recorded attendance and so "
+                  'their pay, and "no reason given" is indistinguishable from a mistake '
+                  'once the row is written. A reason is now required rather than '
+                  'defaulted, recorded in the audit row, returned to the caller, and sent '
+                  'to the employee as a notification.'),
     'FR-ATT-17': ('M', 'C', 'IMPLEMENTED', (),
                   'shift_assignments, effective-dated; get_shift/set_shift resolve the '
                   'model per backend+schema and init_db no longer re-adds the removed '

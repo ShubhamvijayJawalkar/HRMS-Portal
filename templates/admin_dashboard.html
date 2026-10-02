@@ -182,8 +182,29 @@ async function refreshData() {
     setTimeout(refreshData, 5000);
 }
 async function disposeBreak(id) {
-    if (!confirm('End this break?')) return;
-    await fetch('/api/admin/dispose-break/' + id, { method: 'POST' });
+    // FR-ATT-16: a reason is required, and it is asked for with a prompt rather
+    // than defaulted. This ends *another employee's* break, which shortens their
+    // recorded attendance and so their pay — "no reason given" would make that
+    // indistinguishable from a mistake once the row is written.
+    const reason = window.prompt(
+        'Reason for ending this break?\n\nThis is recorded in the audit log and shown '
+        + 'to the employee, so make it something they can read.'
+    );
+    if (reason === null) return;                       // cancelled
+    if (!reason.trim()) {
+        alert('A reason is required to end another employee\'s break.');
+        return;
+    }
+    const r = await fetch('/api/admin/dispose-break/' + id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: reason.trim() }),
+    });
+    if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        alert(d.error || 'Could not end the break.');
+        return;
+    }
     refreshData();
 }
 </script>

@@ -28,23 +28,28 @@ that the control is meaningless. The taxonomy is therefore fixed *here* and the
 derivation is the only place a notification type is turned into a category.
 
 **A recorded deviation.** The SRS names six categories and the app emits events
-outside them, so the set is the six plus three documented extras:
+outside them, so the set is the six plus four documented extras:
 
 * ``Performance`` — goal ratings and submitted reviews (FR-PERF). Nothing in the
   SRS covers them, but forcing a goal rating into ``General`` would lump it with
   genuinely uncategorisable events.
 * ``Holiday`` — optional-holiday opt-in decisions (FR-HOL-03).
 * ``Security`` — account-credential events: an administrator resetting an
-  employee's second factor (FR-AUTH-11). It is a real extra rather than a fourth
-  routing of MFA to ``General`` because the notification is *functionally
-  required*, not decorative: an employee whose MFA has been reset must be told,
-  or their next sign-in silently demands an enrolment they cannot explain. Being
-  able to see "just the credential events" on its own switch is the useful
-  property; the audit trail, not the notification, is what guarantees the event
-  is recorded.
+  employee's second factor (FR-AUTH-11), and the lockout notifications from
+  FR-AUTH-03. It is a real extra rather than a fourth routing of those to
+  ``General`` because the notification is *functionally required*, not decorative:
+  an employee whose MFA has been reset must be told, or their next sign-in
+  silently demands an enrolment they cannot explain, and an employee locked out by
+  someone else's failed attempts needs to know that is why. Being able to see
+  "just the credential events" on its own switch is the useful property; the
+  audit trail, not the notification, is what guarantees the event is recorded.
+* ``Attendance`` — break start/end and the Lunch approval queue's decisions
+  (FR-ATT). The SRS taxonomy has no attendance category, and a break decision is
+  not "General" in any useful sense: "show me only the things about my breaks" is
+  a real question an employee asks, and it is unanswerable inside the catch-all.
 
 Forcing those into one of the six would be worse than naming them, and the extra
-three are reported alongside the six everywhere the taxonomy is exposed, so the
+four are reported alongside the six everywhere the taxonomy is exposed, so the
 deviation is visible rather than buried.
 
 **``Tickets-SLA`` is kept even though nothing produces it yet.** FR-TKT-01
@@ -65,7 +70,7 @@ from __future__ import annotations
 
 # The SRS's six, in its order, then the two documented extras.
 SRS_CATEGORIES = ('Onboarding', 'Leaves', 'Expenses', 'Tickets', 'Payroll', 'Tickets-SLA')
-EXTRA_CATEGORIES = ('Performance', 'Holiday', 'Security')
+EXTRA_CATEGORIES = ('Performance', 'Holiday', 'Security', 'Attendance')
 CATEGORIES = SRS_CATEGORIES + EXTRA_CATEGORIES
 
 # The catch-all for an event with no better home. It is deliberately *not*
@@ -79,7 +84,7 @@ CHANNELS = ('in_app', 'email')
 # The canonical table in the v1.0 order, the SRS order, then the extras. Ordered
 # so the preference payload is stable for a UI and for a test.
 _PREFERRED_ORDER = ('Leaves', 'Expenses', 'Tickets', 'Tickets-SLA', 'Payroll',
-                    'Onboarding', 'Performance', 'Holiday', 'Security')
+                    'Onboarding', 'Performance', 'Holiday', 'Security', 'Attendance')
 
 # Explicit type -> category mapping, longest-prefix-wins. Written out rather than
 # inferred from substrings because substring inference is what produced 'Leave'
@@ -111,6 +116,12 @@ _PREFIX_RULES = (
     # has to be *told to them*, or the next sign-in demands an enrolment they
     # cannot explain and they conclude they have been hacked.
     ('MFA', 'Security'),
+    # Attendance (FR-ATT): break start/end and the approval queue's decisions. The SRS
+    # taxonomy has no attendance category, and a break decision is not "General" in
+    # any useful sense - "show me only the things about my breaks" is a real question
+    # an employee asks, and it would be unanswerable inside the catch-all. Same
+    # reasoning as Performance and Holiday: name the group rather than lose it.
+    ('BREAK', 'Attendance'),
     # Same reasoning for FR-AUTH-03: being locked out by failed sign-ins is a
     # security event about the *account*, not a business one, and the recipient
     # needs to know whether it was them or someone else guessing at their
@@ -148,6 +159,7 @@ _EXACT = {
     'PAYROLL': 'Payroll',
     'PAYSLIP': 'Payroll',
     'MFA_RESET': 'Security',
+    'BREAK_DISPOSED': 'Attendance',
 }
 
 
@@ -293,6 +305,7 @@ KNOWN_TYPES = (
     'MFA_RESET',
     'ACCOUNT_LOCKED',
     'ACCOUNT_UNLOCKED',
+    'BREAK_DISPOSED',
     # outbox.py
     'PAYROLL', 'ONBOARDING',
 )

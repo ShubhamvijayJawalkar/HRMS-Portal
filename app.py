@@ -9478,10 +9478,22 @@ def start_break():
     utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
     shift_date = _get_shift_date_for_dt(emp_id, now, conn)
     conn.execute(
-        "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) VALUES (?, ?, ?, ?, ?, 'Active')",
-        [break_id, emp_id, break_type, utc_now, shift_date]
+        "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) "
+        "VALUES (?, ?, ?, ?, ?, 'Active')",
+        [break_id, emp_id, break_type, utc_now, shift_date],
     )
     conn.close()
+    # A break start is the origin of an attendance record that feeds payroll, and the
+    # auto-end above silently closes a previous one, so both halves are recorded.
+    audit_log(
+        emp_id, 'BREAK_START',
+        f'Started {break_type} break {break_id}' + (
+            f' (auto-ended previous break {active[0]})' if active else ''
+        ),
+        entity='breaks', entity_id=break_id,
+        before={'auto_ended_break_id': active[0]} if active else None,
+        after={'break_type': break_type, 'status': 'Active', 'break_date': str(shift_date)},
+    )
     return jsonify({'message': 'Break started', 'break_id': break_id, 'break_type': break_type}), 201
 
 
@@ -9500,10 +9512,21 @@ def end_break(break_id):
     end_time = datetime.now(timezone.utc).replace(tzinfo=None)
     duration = int((end_time - info[0]).total_seconds() / 60)
     conn.execute(
-        "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
+        "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' "
+        "WHERE break_id = ?",
         [end_time, duration, break_id]
     )
     conn.close()
+    # FR-ATT-03 says "audited", and the matrix claimed it. It did not: a break is an
+    # attendance record that feeds the payroll LOP calculation, so closing one is
+    # exactly the kind of write that has to leave a trace of who closed it and when.
+    audit_log(
+        emp_id, 'BREAK_END',
+        f'Ended {info[1]} break {break_id} after {duration} minutes',
+        entity='breaks', entity_id=break_id,
+        before={'status': 'Active', 'start_time': info[0].isoformat()},
+        after={'status': 'Completed', 'duration_minutes': duration},
+    )
     return jsonify({'message': 'Break ended', 'duration_minutes': duration}), 200
 
 
@@ -9572,35 +9595,78 @@ def break_approvals_api():
     return jsonify({'message': 'Lunch break approval requested', 'approval_id': aid}), 201
 
 
-@app.route('/api/break-approvals/<int:aid>/approve', methods=['POST'])
-@admin_required
-def approve_break(aid):
+def _review_break_approval(aid, decision):
+    """Approve or reject a Lunch break request (FR-ATT-06).
+
+    The SRS is specific — "allowed if actor is the employee's **manager**
+    (including an active delegate, FR-LEA-08a) or has role HR/Admin; conditional
+    update (CC-04); **audited**; notifies employee" — and this was the third
+    instance of the gate bug this codebase has now fixed twice before, in
+    FR-EXP-03 (`Approved -> Paid` was unreachable for Finance) and FR-PERF-01 (goal
+    rating was unreachable for the reporting manager). `@admin_required` meant a
+    Team Leader who actually manages people could not approve their own report's
+    break, so the requirement was unreachable for the role it names while the
+    matrix recorded it as implemented.
+
+    The other three clauses were missing too, and the matrix claimed all of them:
+    the write was **unconditional** (so two approvers both won), nothing was
+    audited, and the employee was never notified. Delegated approvers are still not
+    consulted, because FR-LEA-08a is unimplemented — that half stays PARTIAL and the
+    row says so.
+    """
     conn = get_db()
-    row = conn.execute(
-        "SELECT emp_id, break_type, break_date FROM break_approvals WHERE approval_id = ? AND status = 'Pending'",
-        [aid]
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT emp_id, break_type, break_date, status FROM break_approvals "
+            "WHERE approval_id = ?", [aid],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Approval request not found'}), 404
+        if row[3] != 'Pending':
+            # The same always-200 lie the regularization routes had: a request that
+            # did not exist, or one already decided, used to answer 200 with a
+            # success message. A caller could not tell a real decision from a no-op.
+            return jsonify({
+                'error': f'Request is already {row[3].lower()}',
+                'status': row[3],
+            }), 409
+        # Conditional on `status = 'Pending'` (CC-04). Two approvers racing now give
+        # one winner and one 409 instead of two successes.
+        claimed = conn.execute(
+            "UPDATE break_approvals SET status = ?, approved_by = ? "
+            "WHERE approval_id = ? AND status = 'Pending'",
+            [decision, session['emp_id'], aid],
+        )
+        if not getattr(claimed, 'rowcount', 1):
+            return jsonify({'error': 'Request was reviewed by someone else'}), 409
+    finally:
         conn.close()
-        return jsonify({'error': 'Approval request not found or already processed'}), 404
-    conn.execute(
-        "UPDATE break_approvals SET status = 'Approved', approved_by = ? WHERE approval_id = ?",
-        [session['emp_id'], aid]
+    audit_log(
+        session['emp_id'], f'BREAK_APPROVAL_{decision.upper()}',
+        f'{decision} {row[1]} break request {aid} for {row[0]} ({row[2]})',
+        entity='break_approvals', entity_id=aid,
+        before={'status': 'Pending'}, after={'status': decision},
     )
-    conn.close()
-    return jsonify({'message': 'Break approved'}), 200
+    # The SRS asks for it and it is the point of the queue: an employee who has been
+    # sitting on a Lunch request needs to be told the outcome without polling.
+    add_notification(
+        row[0], f'BREAK_APPROVAL_{decision.upper()}',
+        f'Your {row[1]} break request for {row[2]} was {decision.lower()} by '
+        f'{session["emp_id"]}.',
+    )
+    return jsonify({'message': f'Break {decision.lower()}', 'status': decision}), 200
+
+
+@app.route('/api/break-approvals/<int:aid>/approve', methods=['POST'])
+@reporting_line_required
+def approve_break(aid):
+    return _review_break_approval(aid, 'Approved')
 
 
 @app.route('/api/break-approvals/<int:aid>/reject', methods=['POST'])
-@admin_required
+@reporting_line_required
 def reject_break(aid):
-    conn = get_db()
-    conn.execute(
-        "UPDATE break_approvals SET status = 'Rejected', approved_by = ? WHERE approval_id = ? AND status = 'Pending'",
-        [session['emp_id'], aid]
-    )
-    conn.close()
-    return jsonify({'message': 'Break rejected'}), 200
+    return _review_break_approval(aid, 'Rejected')
 
 
 @app.route('/api/break-types')
@@ -9980,22 +10046,62 @@ def admin_breaks():
 @app.route('/api/admin/dispose-break/<int:break_id>', methods=['POST'])
 @admin_required
 def admin_dispose_break(break_id):
+    """FR-ATT-16: "admin dispose ends any Active break with an **audited reason**".
+
+    The reason was the missing half and it is not cosmetic. This is an administrator
+    ending *someone else's* break, which shortens that employee's recorded attendance
+    and therefore their pay; "an admin ended my break for no stated reason" is
+    indistinguishable from a data-entry mistake once the row is written. A reason is
+    now required, recorded in the audit row and returned to the caller.
+
+    Nothing was audited here at all before, which is why the matrix could claim an
+    audited reason for a route that had neither.
+    """
+    reason = str((request.get_json(silent=True) or {}).get('reason', '')).strip()
+    if not reason:
+        # Refused rather than defaulted. A blank reason is not a reason, and
+        # "reason required" is more useful to the admin than a silent 200 that
+        # discards their justification.
+        return jsonify({
+            'error': 'A reason is required to dispose of another employee\'s break',
+            'policy': 'FR-ATT-16',
+        }), 400
     conn = get_db()
-    info = conn.execute(
-        "SELECT start_time FROM breaks WHERE break_id = ? AND status = 'Active'",
-        [break_id]
-    ).fetchone()
-    if not info:
+    try:
+        info = conn.execute(
+            "SELECT start_time, emp_id, break_type FROM breaks "
+            "WHERE break_id = ? AND status = 'Active'",
+            [break_id],
+        ).fetchone()
+        if not info:
+            return jsonify({'error': 'Break not found or already ended'}), 404
+        end_time = datetime.now(timezone.utc).replace(tzinfo=None)
+        duration = int((end_time - info[0]).total_seconds() / 60)
+        conn.execute(
+            "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' "
+            "WHERE break_id = ?",
+            [end_time, duration, break_id],
+        )
+    finally:
         conn.close()
-        return jsonify({'error': 'Break not found or already ended'}), 404
-    end_time = datetime.now(timezone.utc).replace(tzinfo=None)
-    duration = int((end_time - info[0]).total_seconds() / 60)
-    conn.execute(
-        "UPDATE breaks SET end_time = ?, duration_minutes = ?, status = 'Completed' WHERE break_id = ?",
-        [end_time, duration, break_id]
+    audit_log(
+        session['emp_id'], 'BREAK_DISPOSE',
+        f'Admin disposed {info[2]} break {break_id} for {info[1]} after {duration} '
+        f'minutes: {reason}',
+        entity='breaks', entity_id=break_id,
+        before={'status': 'Active', 'owner_emp_id': info[1]},
+        after={'status': 'Completed', 'duration_minutes': duration, 'reason': reason},
     )
-    conn.close()
-    return jsonify({'message': 'Break ended by admin', 'duration_minutes': duration}), 200
+    # The employee is the one whose attendance changed, so they hear it from the app
+    # and not only from a payroll query they did not know to run.
+    add_notification(
+        info[1], 'BREAK_DISPOSED',
+        f'An administrator ended your {info[2]} break after {duration} minutes. '
+        f'Reason given: {reason}',
+    )
+    return jsonify({
+        'message': 'Break ended by admin', 'duration_minutes': duration, 'reason': reason,
+    }), 200
 
 
 @app.route('/api/admin/outbox', methods=['GET'])

@@ -393,11 +393,17 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
     assert page.locator("button[title='Anonymise (irreversible, two-person)']").count() == 0
 
     page.click("button[title='Archive']")
-    page.wait_for_timeout(2500)
-    page.fill('#searchInput', 'EMP903')
-    page.wait_for_timeout(1500)
-    page.click("button[title='Anonymise (irreversible, two-person)']")
-    page.wait_for_timeout(2000)
+    # The Anonymise button only exists for an archived employee, so its *appearance*
+    # is the signal that the archive landed and the list re-rendered — which is what
+    # a fixed sleep was guessing at, and it failed intermittently with "modal did not
+    # open" because the click landed while the list was still reloading.
+    #
+    # (Probing for the Restore button instead looks more direct and does not work:
+    # it is rendered as a labelled button with no `title` attribute.)
+    anon_btn = page.locator("button[title='Anonymise (irreversible, two-person)']")
+    anon_btn.wait_for(state='visible', timeout=15000)
+    anon_btn.click()
+    page.locator('#anonModal').wait_for(state='visible', timeout=15000)
     assert page.is_visible('#anonModal'), 'anonymisation modal did not open'
     plan = page.text_content('#anonPlan')
     assert 'Erasing' in plan and 'Keeping' in plan and 'audit rows to scrub' in plan, plan
@@ -489,13 +495,16 @@ def test_end_break_self_heal(page):
 
 def test_break_daily_limit_enforced(page):
     _login(page, 'EMP002', 'pass123')
-    page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/dashboard')
-    page.wait_for_timeout(2000)
     page.click('#breaktab')
-    page.wait_for_timeout(2000)
+    # Wait for the break-type buttons rather than sleeping after the tab click. A
+    # fixed wait here is an upper bound on the tab render; the button appearing is
+    # the signal. This test failed intermittently at exactly the next line —
+    # `.endBreakBtn` never appeared because the click landed on a page that had
+    # not finished switching tabs. Third occurrence of the sleep-vs-signal mistake
+    # in this file.
     first_btn = page.locator('.break-type-btn').first
-    assert first_btn.is_visible()
+    first_btn.wait_for(state='visible', timeout=15000)
     first_btn.click()
     active = page.locator('#activeBreakInfo')
     end_btn = active.locator('.endBreakBtn')

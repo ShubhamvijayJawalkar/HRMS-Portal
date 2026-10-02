@@ -1692,3 +1692,71 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   1 RETIRED** — *down* one, which is the correct direction for an audit.
 - **What is left, and it is the obvious next slice:** auditing the 20 remaining
   mutating handlers, and routing the audit row through the outbox as the SRS asks.
+
+## FR-ATT-03/06/16 the break lifecycle: four false notes and the gate bug, a third time
+- **The audit pass was right to prioritise reading claimed-`IMPLEMENTED` rows.**
+  Group 1 of the handler audit found **four requirements whose notes asserted
+  behaviour the handlers did not have**, in six handlers.
+- **FR-ATT-06's gate was the third instance of the same bug, after FR-EXP-03 and
+  FR-PERF-01.** The SRS says break approval is allowed if the actor is "the
+  employee's **manager** (including an active delegate, FR-LEA-08a) or has role
+  HR/Admin". The route was `@admin_required`, so **a Team Leader could not approve
+  their own report's break** — the requirement was unreachable for the role it
+  names, exactly as `Approved -> Paid` was for Finance and goal rating was for a
+  reporting manager. All three were recorded as implemented while the decorator made
+  them impossible. Fixed by reusing `reporting_line_required` from the FR-PERF-01
+  work rather than writing a fourth gate.
+- **The same row claimed a conditional write that was unconditional.** `approve`
+  filtered on `status = 'Pending'` in the SELECT but the UPDATE was `WHERE
+  approval_id = ?`, so two approvers racing both won. Now conditional (CC-04), so
+  one wins and one gets a 409.
+- **`reject_break` had the always-200 lie again** — the defect I had just fixed in
+  regularization, still present in a sibling route. It answered
+  `{"message": "Break rejected"}` and a 200 whether or not it rejected anything. Now
+  404 for unknown, 409 naming the state found. **Two routes in two unrelated slices
+  had the same bug, which is the argument for sweeping siblings rather than fixing
+  one route at a time.**
+- **Neither approval route audited or notified**, while the row claimed both. The
+  SRS asks for "audited; notifies employee" — an employee sitting on a Lunch request
+  has to be told the outcome. Both now happen.
+- **FR-ATT-16 claimed "an audited reason" for a route that had neither an audit row
+  nor a reason parameter.** The reason is not cosmetic: disposing ends *another*
+  employee's break, which shortens their recorded attendance and therefore their pay,
+  and "no reason given" is then indistinguishable from a data-entry mistake. A reason
+  is now **required rather than defaulted**, lands in the audit row, is returned to
+  the caller, and is sent to the employee as a notification.
+- **FR-ATT-03 claimed "action audited" and `end_break` audited nothing.** `start_break`
+  did not either, despite silently auto-ending a previous break. A break is the origin
+  of a payroll LOP calculation, so both ends of it are now on the record.
+- **A deliberate earlier decision had to be reversed, and it is worth naming.**
+  `notifications.py` previously mapped **no** rule for `BREAK_*` events, on the
+  reasoning that a rule mapping to `FALLBACK` "is a no-op that reads like data" — and
+  that held *only because nothing emitted one*. FR-ATT-16's notification now does, and
+  the emitted-types test forced the decision exactly as its author predicted. So break
+  events are named **`Attendance`**, a fourth documented extra. **This is not a free
+  win:** naming the category makes break events *preferenceable*, so an employee can
+  now mute them, where the catch-all delivered them unconditionally. The module's own
+  principle settles it — "forcing those into one of the six would be worse than naming
+  them". `PUNCH` is still emitted by nothing and still falls to the catch-all, and the
+  existing test that asserted the old behaviour was rewritten **with the reasoning
+  rather than quietly flipped**.
+- **The ratchet caught my own work immediately**, which is the point of building it:
+  five handler names went stale the moment they started auditing, and the test failed
+  until `KNOWN_UNAUDITED_MUTATIONS` was corrected. 20 → 15.
+- 4 new tests. Unit **253 passed / 1 skipped**, browser **22/22**, Redis store
+  **10/10**, and the v2.0 gates green at **109/109 GET + 55/55 write**. The ratchet now
+  holds 15 handlers (20 → 15), and `templates/admin_dashboard.html` prompts for the
+  dispose reason instead of posting an empty body.
+- **Two browser failures during this slice were intermittent, and the honest way to
+  treat that is to harden the tests rather than to shrug.** One run failed
+  `test_break_daily_limit_enforced` and `test_admin_anonymises_an_archived_user`; the
+  run before (with the changes stashed) and the run after both passed 22/22. So the
+  cause was not the break changes — it was the **sleep-vs-signal** anti-pattern that has
+  already bitten this file twice, and both failures were an element that had not appeared
+  yet. `test_break_daily_limit_enforced` slept after clicking the break tab before
+  looking for the type buttons; the anonymise test slept after clicking Archive and then
+  clicked Anonymise while the list might still be reloading. Both now wait for the element
+  they actually need. **A third attempt to probe for the Restore button did not work** —
+  it is rendered as a labelled button with no `title` attribute, so the selector never
+  matched; the Anonymise button's appearance is the right signal, because it only exists
+  for an archived employee.

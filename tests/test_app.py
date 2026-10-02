@@ -924,6 +924,220 @@ def test_import_job_can_be_run_on_demand(client):
 
 # ── FR-USR two-person anonymisation ────────────────────────────────────────
 
+def _break_approval(aid):
+    conn = get_db()
+    try:
+        return conn.execute(
+            'SELECT emp_id, break_type, break_date, status FROM break_approvals '
+            'WHERE approval_id = ?', [aid],
+        ).fetchone()
+    finally:
+        conn.close()
+
+
+def _queue_lunch_approval(emp_id):
+    """A Pending Lunch request for `emp_id`, with that employee reporting to EMP001."""
+    conn = get_db()
+    try:
+        aid = _next_generated_id(conn, 'break_approvals', 'approval_id')
+        conn.execute(
+            'INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, '
+            "status, reason) VALUES (?, ?, 'Lunch', '2026-03-04', 'Pending', 'audit test')",
+            [aid, emp_id],
+        )
+    finally:
+        conn.close()
+    return aid
+
+
+def test_a_teams_manager_can_approve_a_break_and_the_decision_is_recorded(client):
+    """FR-ATT-06's gate, its conditional write, its audit and its notification.
+
+    `@admin_required` made this requirement unreachable for the role it names — the
+    third instance of that bug here, after FR-EXP-03 and FR-PERF-01 — and the matrix
+    recorded it as implemented. The write was also unconditional, so two approvers
+    both won; nothing was audited; and the employee was never told.
+    """
+    _cleanup_user_contract_rows('EMP962', 'EMP963')
+    conn = get_db()
+    try:
+        # EMP962 is a Team Leader who manages EMP963. The gate is deliberately
+        # coarse — it admits anyone who manages at least one employee — so a Team
+        # Leader with no reports has nothing to approve and is correctly refused.
+        # The real case is a leader approving their *own* report's request, which
+        # `@admin_required` could not do at all.
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department, manager_emp_id) VALUES ('EMP962', 'Team Lead', "
+            "'emp962@company.com', 'Team Leader', ?, 'Active', 1, 'IT', 'EMP001')",
+            [hash_password('correct-horse-battery')],
+        )
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department, manager_emp_id) VALUES ('EMP963', 'Report', "
+            "'emp963@company.com', 'Employee', ?, 'Active', 1, 'IT', 'EMP962')",
+            [hash_password('correct-horse-battery')],
+        )
+    finally:
+        conn.close()
+    try:
+        aid = _queue_lunch_approval('EMP963')
+        # The Team Leader is not an Admin, and the approval they make is their own
+        # report's. This is the case the old gate refused.
+        _login_as(client, 'EMP962', 'Team Leader', 99151)
+        resp = client.post(f'/api/break-approvals/{aid}/approve')
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()['status'] == 'Approved'
+        assert _break_approval(aid)[3] == 'Approved'
+
+        conn = get_db()
+        try:
+            audits = [r[0] for r in conn.execute(
+                'SELECT action FROM audit_log WHERE entity_id = ? ORDER BY log_id',
+                [str(aid)],
+            ).fetchall()]
+            notes = conn.execute(
+                'SELECT type FROM notifications WHERE emp_id = ? ORDER BY notification_id',
+                ['EMP963'],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert 'BREAK_APPROVAL_APPROVED' in audits, audits
+        # The SRS asks for the notification and it is the point of the queue.
+        assert any('BREAK_APPROVAL' in str(n[0]) for n in notes), notes
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM break_approvals WHERE approval_id = ?', [aid])
+            conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP963'")
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP962', 'EMP963')
+
+
+def test_reviewing_a_break_twice_is_a_conflict_not_a_second_success(client):
+    """The always-200 lie again: `reject` answered `{"message": "Break rejected"}` and
+    a 200 whether or not it rejected anything."""
+    _set_admin_session(client, 99152)
+    aid = _queue_lunch_approval('EMP002')
+    try:
+        first = client.post(f'/api/break-approvals/{aid}/approve')
+        assert first.status_code == 200, first.get_json()
+        second = client.post(f'/api/break-approvals/{aid}/approve')
+        assert second.status_code == 409, second.get_json()
+        assert second.get_json()['status'] == 'Approved'
+        # The opposite decision on a decided request is refused too, and the record
+        # still says what actually happened.
+        wrong = client.post(f'/api/break-approvals/{aid}/reject')
+        assert wrong.status_code == 409, wrong.get_json()
+        assert _break_approval(aid)[3] == 'Approved'
+        assert client.post('/api/break-approvals/99999999/approve').status_code == 404
+        assert client.post('/api/break-approvals/99999999/reject').status_code == 404
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM break_approvals WHERE approval_id = ?', [aid])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?',
+                         [str(aid)])
+        finally:
+            conn.close()
+
+
+def test_admin_break_dispose_requires_and_records_a_reason(client):
+    """FR-ATT-16: "ends any Active break with an **audited reason**".
+
+    It had neither. Disposing shortens another employee's recorded attendance and so
+    their pay, so a blank reason is refused rather than defaulted — and the reason
+    travels into the audit row and the employee's notification.
+    """
+    _set_admin_session(client, 99153)
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM breaks WHERE break_id = ?', [991530])
+        conn.execute("UPDATE breaks SET status = 'Completed' WHERE emp_id = 'EMP002'")
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, "
+            "status) VALUES (991530, 'EMP002', 'Lunch', ?, '2026-03-04', 'Active')",
+            [datetime.now() - timedelta(minutes=42)],
+        )
+    finally:
+        conn.close()
+    try:
+        # No reason at all, and a blank one, are both refused.
+        bare = client.post('/api/admin/dispose-break/991530')
+        assert bare.status_code == 400, bare.get_json()
+        assert bare.get_json()['policy'] == 'FR-ATT-16'
+        blank = client.post(
+            '/api/admin/dispose-break/991530', json={'reason': '   '})
+        assert blank.status_code == 400, blank.get_json()
+        conn = get_db()
+        try:
+            assert conn.execute(
+                'SELECT status FROM breaks WHERE break_id = ?', [991530]
+            ).fetchone()[0] == 'Active', 'a refused dispose still ended the break'
+        finally:
+            conn.close()
+
+        ok = client.post(
+            '/api/admin/dispose-break/991530', json={'reason': 'Left the floor'})
+        assert ok.status_code == 200, ok.get_json()
+        assert ok.get_json()['reason'] == 'Left the floor'
+        assert ok.get_json()['duration_minutes'] >= 41
+
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT "after" FROM audit_log WHERE action = ? '
+                'ORDER BY log_id DESC LIMIT 1', ['BREAK_DISPOSE'],
+            ).fetchone()
+            note = conn.execute(
+                'SELECT message FROM notifications WHERE emp_id = ? '
+                'ORDER BY notification_id DESC LIMIT 1', ['EMP002'],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None, 'an administrator ended a break with no audit row'
+        assert json.loads(row[0])['reason'] == 'Left the floor', row
+        assert note and 'Left the floor' in note[0], note
+
+        # And a break that is already ended cannot be disposed of again.
+        assert client.post(
+            '/api/admin/dispose-break/991530', json={'reason': 'again'}
+        ).status_code == 404
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM breaks WHERE break_id = ?', [991530])
+            conn.execute("DELETE FROM audit_log WHERE action = 'BREAK_DISPOSE'")
+            conn.execute("DELETE FROM notifications WHERE type = 'BREAK_DISPOSED'")
+        finally:
+            conn.close()
+
+
+def test_break_start_and_end_are_audited(client):
+    """FR-ATT-03 says "audited" and the matrix repeated it; neither end nor start
+    wrote a row, and a break is the origin of a payroll LOP calculation."""
+    with _fresh_client() as actor:
+        actor.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+        started = actor.post('/api/start-break', json={'break_type': 'Tea'})
+        assert started.status_code == 201, started.get_json()
+        bid = started.get_json()['break_id']
+        try:
+            ended = actor.post(f'/api/end-break/{bid}')
+            assert ended.status_code == 200, ended.get_json()
+        finally:
+            conn = get_db()
+            try:
+                actions = [r[0] for r in conn.execute(
+                    'SELECT action FROM audit_log WHERE entity_id = ? ORDER BY log_id',
+                    [str(bid)],
+                ).fetchall()]
+            finally:
+                conn.close()
+        assert 'BREAK_START' in actions, actions
+        assert 'BREAK_END' in actions, actions
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
@@ -939,9 +1153,8 @@ KNOWN_UNAUDITED_MUTATIONS = {
     'dependents_api', 'documents_api', 'add_holiday', 'mark_notifications_read',
     'regularization_api', 'cancel_import_job', 'run_import_job', 'assets_api',
     'return_asset', 'revoke_offboarding_workflow_access', 'salary_api',
-    'payroll_runs_api', 'send_notification_email', 'start_break', 'end_break',
-    'break_approvals_api', 'approve_break', 'reject_break',
-    'admin_dispose_break', 'admin_outbox_dispatch',
+    'payroll_runs_api', 'send_notification_email',
+    'break_approvals_api', 'admin_outbox_dispatch',
 }
 
 
@@ -3640,12 +3853,29 @@ def test_the_srs_categories_are_the_taxonomy_and_the_leave_name_is_exact(client)
     # category of their own. The earlier substring derivation mapped them to
     # `'Leave'`, which is not a category at all — a name no preference can be
     # stored against, so the notification was unmuteable by construction while
-    # looking like it belonged somewhere real. They now fall to the catch-all, and
-    # there is deliberately no rule for them (see the comment in `_PREFIX_RULES`):
-    # a rule mapping to FALLBACK is a no-op that reads like data.
-    for attendance_event in ('BREAK_APPROVED', 'BREAK_REJECTED', 'PUNCH'):
-        assert notifications.category_for(attendance_event) == notifications.FALLBACK, (
-            attendance_event)
+    # looking like it belonged somewhere real.
+    #
+    # They used to fall to the catch-all with deliberately *no* rule, because
+    # nothing emitted them and a rule mapping to FALLBACK "is a no-op that reads
+    # like data". That reasoning no longer holds: FR-ATT-16's admin dispose
+    # notifies the employee whose attendance an administrator just changed, and
+    # the emitted-types test forces a decision the moment any BREAK_* type is
+    # actually sent. So the category is now named — `Attendance`, a fourth
+    # documented extra alongside Performance, Holiday and Security.
+    #
+    # **This reverses a deliberate earlier decision**, and the trade-off is real
+    # rather than a free win: naming it makes break events *preferenceable*, so an
+    # employee can now mute them, where the catch-all delivered them
+    # unconditionally. The module's own stated principle settles it — "forcing
+    # those into one of the six would be worse than naming them" — and being able
+    # to answer "show me only the things about my breaks" is worth more than an
+    # unmuteable event. `PUNCH` is still emitted by nothing and still derives to
+    # the catch-all.
+    assert notifications.category_for('BREAK_APPROVED') == 'Attendance'
+    assert notifications.category_for('BREAK_REJECTED') == 'Attendance'
+    assert notifications.category_for('BREAK_DISPOSED') == 'Attendance'
+    # Still no rule for punch corrections, which nothing emits.
+    assert notifications.category_for('PUNCH') == notifications.FALLBACK
     # And nothing anywhere derives a category outside the taxonomy.
     for category in ('Leave', 'Break', 'Offer'):
         assert category not in notifications.CATEGORIES, category
