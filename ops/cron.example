@@ -1,0 +1,18 @@
+# HRMS scheduled operations (SRS §10).
+#
+# Install with:  crontab ops/cron.example
+#
+# Both jobs log to ops/ so a silent failure is visible: a backup that has not run
+# for a week looks exactly like a backup that ran for a week and nobody looked.
+
+# Daily full backup + 30-day retention (SRS: "daily full backup, 30-day retention").
+# Hour 03:17 rather than 03:00 — the scheduler's own jobs cluster on the hour, and a
+# full dump competing with attendance finalisation for the same connection is how a
+# 02:05 job ends up slow enough to matter.
+17 3 * * * cd /srv/hrms && DATABASE_URL="$DATABASE_URL" ./ops/backup.sh >> ops/backup.log 2>&1
+
+# Quarterly restore drill (SRS: "quarterly restore drill").
+# Restores the newest dump into a scratch database and runs the application's own
+# gates against it. Exit non-zero is the whole point: an unrestored backup is a
+# belief, not a control, and this is the only step that turns it into evidence.
+12 4 1 1,4,7,10 * cd /srv/hrms && DATABASE_URL="$DATABASE_URL" ./ops/restore-drill.sh >> ops/drill.log 2>&1

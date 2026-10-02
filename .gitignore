@@ -17,6 +17,10 @@ __pycache__/
 
 # Generated / Build
 uploads/*
+# Database dumps (scripts/backup.py). Never commit these: a dump is a full copy of
+# every employee's record, which is exactly the data the retention and encryption
+# requirements exist to protect.
+backups/
 *.pptx
 generate_ppt.py
 ppt_screenshots/

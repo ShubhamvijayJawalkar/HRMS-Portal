@@ -1935,3 +1935,43 @@ N-pod deployment ran every cron job N times.
   moved). Unit **265 passed / 2 skipped** (the leader chaos test skips without
   `REDIS_URL` and passes with it), browser **22/22**, Redis **10/10**, v2.0 gates
   **111/111 GET + 55/55 write**.
+
+## FR-JOB-05 go-live item 4: backup + a restore drill that can actually fail
+The SRS §10 asks for "automated daily full backup + WAL archiving, 30-day
+retention, quarterly restore drill". None of it existed.
+
+- **`scripts/backup.py`** — `backup` (custom-format dump + 30-day prune), `list`,
+  `restore`, and **`verify`**, which is the one that matters.
+- **The drill restores into a scratch database and then runs the application's own
+  gates against it** — `check_cc_rules.py` and `cutover_preflight.py` — because
+  restoring is the easy half. A backup that restores into a database the app would
+  refuse to run is not a backup.
+- **A row-count check, because every gate passes on an empty database.** That is the
+  specific way this class of check lies: a schema-valid, row-less restore reports a
+  clean drill. `users=0` is a failure, and so is a dump with no `users` table at
+  all — which is what caught the case where the backup was of the wrong database.
+- **Both directions were run.** A real backup verified green (exit 0), and a
+  deliberately empty dump verified **red** (exit 1) with a diagnosis rather than a
+  crash. A drill that cannot fail is not a drill.
+- **WAL archiving is deliberately *not* implemented, and says so.** PITR needs a WAL
+  destination and a retention policy belonging to whoever owns the storage; a script
+  that pretended to do it would be worse than one that declines. It is recorded as an
+  operator decision rather than silently skipped.
+- **The container fallback is real, not a comment.** This project's database is a
+  container, so `pg_dump`/`psql`/`pg_restore` are run through `docker exec` when they
+  are not on the host PATH, the dump is **streamed** rather than named (a host path
+  is not visible inside the container), and the DSN's endpoint is rewritten to the
+  container's internal port while the credentials are preserved. Three separate
+  connection bugs came out of writing this, and the last one is instructive:
+  rebuilding `netloc` from the host alone **threw the credentials away**, which
+  surfaced as `role "root" does not exist` — a failure that looks like a database
+  problem and is not one.
+- **Two DSNs, deliberately.** `psql` inside the container needs the internal
+  endpoint; the Python gates run on the host and need the published port. Handing one
+  to the other produces a connection error that reads like a broken backup.
+- **Cron at `03:17`, not `03:00`** — the scheduler's own jobs cluster on the hour, and
+  a full dump competing with attendance finalisation for the same connection is how a
+  02:05 job gets slow enough to matter. The drill runs quarterly and **exits non-zero**
+  so a run nobody is watching still leaves a record of having failed.
+- `backups/` is now gitignored: a dump is a full copy of every employee's record,
+  which is exactly what the retention and encryption requirements exist to protect.
