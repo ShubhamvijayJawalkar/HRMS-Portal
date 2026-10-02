@@ -68,9 +68,12 @@ def _login(page, emp_id='EMP001', password='pass123'):
     page.fill('#password', password)
     page.click('button[type="submit"]')
 
+    # 15s, not 5s: the panel appears only after POST /login and the MFA enrol round
+    # trip. A tight window here turns a loaded machine into a false "no MFA" and then
+    # a timeout waiting for a dashboard that was never going to arrive.
     panel = page.locator('#mfaStep')
     try:
-        panel.wait_for(state='visible', timeout=5000)
+        panel.wait_for(state='visible', timeout=15000)
     except PlaywrightTimeout:
         page.wait_for_url(BASE_URL + '/dashboard')
         return
@@ -185,7 +188,10 @@ def test_admin_edits_user_permissions(page):
     page.fill('#searchInput', 'EMP002')
     page.wait_for_timeout(1500)
     page.click("button[title='Permissions']")
-    page.wait_for_timeout(1500)
+    # Wait for the grid rather than sleeping. The modal fetches defaults and renders
+    # 27 boxes asynchronously, and the third fixed sleep in this test was the one
+    # that failed. The box appearing is the signal.
+    page.locator('#perm-tickets').wait_for(state='visible', timeout=15000)
     assert page.is_visible('#perm-tickets'), 'permission grid did not render'
     # The Employee role default for tickets is allowed; deny it as an override.
     assert page.is_checked('#perm-tickets')

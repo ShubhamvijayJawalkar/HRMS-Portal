@@ -1760,3 +1760,51 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   it is rendered as a labelled button with no `title` attribute, so the selector never
   matched; the Anonymise button's appearance is the right signal, because it only exists
   for an archived employee.
+
+## FR-DOC-01 / FR-USR-11 / FR-HOL-01 Group 2: two bare `VALUES`, and three exemption calls
+- **Two more bare `INSERT INTO <table> VALUES (...)`, in the same latent shape as the
+  two this codebase has already been bitten by.** `documents_api` and `dependents_api`
+  both wrote them. **Neither is a live failure** — both tables have the same column
+  count and order on `legacy` and on v2.0 `public` today — and that is exactly why it
+  was worth fixing: the bug is invisible until someone adds a column, which is what
+  happened with `POST /api/goals` (ten placeholders, nine columns, 500 on every
+  backend) and `add_holiday` (five placeholders, v2.0's six, every value mis-targeted).
+  **Both times the boot seed kept working, because the seed names its columns** — and
+  both of these had a seed insert two functions above writing the column list out.
+- **The guard is a test, not the fix.** `test_create_writes_name_their_columns…` parses
+  `db/postgres_schema.sql` for each table's declared columns and asserts the route's
+  column list still matches. Adding a column to the canonical schema without updating
+  the route now fails here instead of at the public flip.
+- **Three of the "should this audit?" calls did not go the way I predicted**, which is
+  why I flagged them as judgement rather than defects. Of the three candidates:
+  - `mark_notifications_read` — **deliberately exempt**. A read receipt on the
+    caller's own notifications, audited, is a row per click for the life of the table.
+    Noise that makes the real entries harder to find is the opposite of what an audit
+    trail is for. The exemption is recorded in the ratchet list with its reason, not
+    left as a silent omission.
+  - `admin_outbox_dispatch` — **not exempt.** A dispatch *sends email to employees*,
+    and "who forced the queue out, when, and what did it deliver" is what an
+    operator pressing it at the wrong moment needs answered.
+  - `send_notification_email` — **not exempt, and audited on both paths.** An admin
+    route that mails any address with any body is a data-exfiltration route by
+    construction; recording only the successes would hide the attempts that matter.
+- **`add_holiday` audited nothing while its *edit* already did** — so a holiday could
+  be added to the company calendar with no record, then edited with one. Both `notes`
+  that were merely *silent* about auditing (FR-DOC-01, FR-USR-11, FR-HOL-01) now say
+  what is recorded, which is the difference between "not claimed" and "claimed
+  falsely".
+- Ratchet **15 → 10 handlers** (14 gaps + 1 documented exemption).
+- **A browser run failed 2 tests and the cause was mine**: I ran the probe and the
+  Redis suite *concurrently* with the browser suite, all three against the same
+  PostgreSQL instance, and two timing-sensitive tests failed. Re-run alone: **22/22**.
+  Two real weaknesses surfaced while investigating, both fixed — `_login`'s MFA panel
+  window was 5 s, which on a loaded machine reads as "no MFA" and then times out
+  waiting for a dashboard that will never arrive (now 15 s), and
+  `test_admin_edits_user_permissions` used three fixed sleeps before asserting the
+  permission grid had rendered. **Fourth and fifth instances of sleep-vs-signal in
+  this file.** Lesson worth keeping: do not run the suites in parallel against one
+  database, and when a browser test fails twice for different reasons, suspect the
+  environment before the code.
+- 3 new tests, one of which reads the canonical schema. Unit **256 passed / 1
+  skipped**, browser **22/22**, Redis **10/10**, v2.0 gates **109/109 GET + 55/55
+  write**.

@@ -3757,9 +3757,23 @@ def dependents_api():
         return jsonify({'error': 'name and relationship required'}), 400
     conn = get_db()
     did = _next_generated_id(conn, 'dependents', 'dependent_id')
-    conn.execute("INSERT INTO dependents VALUES (?, ?, ?, ?, ?)",
-                 [did, emp_id, data['name'], data['relationship'], parse_date(data.get('date_of_birth'))])
+    conn.execute(
+        # Explicit columns for the same reason as `documents_api` above.
+        'INSERT INTO dependents (dependent_id, emp_id, name, relationship, '
+        'date_of_birth) VALUES (?, ?, ?, ?, ?)',
+        [did, emp_id, data['name'], data['relationship'],
+         parse_date(data.get('date_of_birth'))],
+    )
     conn.close()
+    # `dependents` is PII by `policy.PII_FIELDS` — a third party with no statutory
+    # retention of their own — so recording one is the other half of the pair the
+    # delete route now records.
+    audit_log(
+        emp_id, 'DEPENDENT_CREATE',
+        f'Added dependent {data["name"]} ({data["relationship"]})',
+        entity='dependents', entity_id=did,
+        after={'name': data['name'], 'relationship': data['relationship']},
+    )
     return jsonify({'message': 'Dependent added', 'id': did}), 201
 
 
@@ -3810,9 +3824,26 @@ def documents_api():
         return jsonify({'error': 'doc_type required'}), 400
     conn = get_db()
     did = _next_generated_id(conn, 'employee_documents', 'doc_id')
-    conn.execute("INSERT INTO employee_documents VALUES (?, ?, ?, ?, ?)",
-                 [did, emp_id, data['doc_type'], data.get('file_name', ''), datetime.now()])
+    conn.execute(
+        # An explicit column list, not a bare `VALUES`. Both schemas have five
+        # columns in this order *today*, so this is not a live failure — it is the
+        # latent version of the defect that made `POST /api/goals` return 500 on
+        # every backend and `add_holiday` mis-target every value against v2.0's
+        # sixth column. The seed two functions below already writes the column list
+        # out, which is exactly why the seed kept working when the create path would
+        # not have.
+        'INSERT INTO employee_documents (doc_id, emp_id, doc_type, file_name, '
+        'uploaded_at) VALUES (?, ?, ?, ?, ?)',
+        [did, emp_id, data['doc_type'], data.get('file_name', ''), datetime.now()],
+    )
     conn.close()
+    audit_log(
+        emp_id, 'DOCUMENT_RECORD',
+        f'Recorded {data["doc_type"]} document'
+        + (f' ({data["file_name"]})' if data.get('file_name') else ''),
+        entity='employee_documents', entity_id=did,
+        after={'doc_type': data['doc_type'], 'file_name': data.get('file_name') or None},
+    )
     return jsonify({'message': 'Document recorded', 'id': did}), 201
 
 
@@ -3969,6 +4000,14 @@ def add_holiday():
                 return jsonify({'error': 'A holiday with this name and date already '
                                          'exists for that location'}), 409
             raise
+        audit_log(
+            session['emp_id'], 'HOLIDAY_CREATE',
+            f'Added {htype} holiday {name} on {when.isoformat()}'
+            + (f' for {location}' if location else ' (org-wide)'),
+            entity='holidays', entity_id=hid,
+            after={'name': name, 'date': when.isoformat(), 'type': htype,
+                   'location': location or None},
+        )
         return jsonify({'message': 'Holiday added', 'id': hid, **_holiday_json(
             (hid, name, when, htype, location))}), 201
     finally:
@@ -4584,6 +4623,13 @@ def get_notifications():
 @app.route('/api/notifications/read', methods=['POST'])
 @login_required
 def mark_notifications_read():
+    # Deliberately unaudited, and one of only two exemptions on the FR-AUD-01
+    # known-gap list. It is a read receipt on the caller's **own** notifications: a
+    # self-service action with no forensic value, and auditing it would write a row
+    # per click for as long as the table exists. The SRS's "every mutating action"
+    # is not a reason to log a user clearing their own badge — a row here would be
+    # noise that makes the real entries harder to find, which is the opposite of what
+    # an audit trail is for.
     conn = get_db()
     conn.execute("UPDATE notifications SET is_read = 1 WHERE emp_id = ?", [session['emp_id']])
     conn.close()
@@ -8516,6 +8562,17 @@ def send_notification_email():
     if not to:
         return jsonify({'error': 'recipient required'}), 400
     ok = send_email(to, subject, body)
+    # Audited before the return, and on both paths. An admin endpoint that sends mail
+    # to **any address with any body** is a data-exfiltration route by construction —
+    # the single most important thing to be able to answer afterwards is "who sent
+    # what, to whom". Recording only the success path would hide exactly the attempts
+    # that matter.
+    audit_log(
+        session['emp_id'], 'NOTIFICATION_EMAIL_SENT',
+        f'Admin sent {subject!r} to {to} (delivered={ok})',
+        entity='notifications',
+        after={'to': to, 'subject': subject, 'delivered': bool(ok)},
+    )
     if ok:
         return jsonify({'message': 'Email sent'}), 200
     return jsonify({'warning': 'Email sending failed (SMTP may not be configured)'}), 200
@@ -10129,12 +10186,24 @@ def admin_outbox_list():
 @app.route('/api/admin/outbox/dispatch', methods=['POST'])
 @admin_required
 def admin_outbox_dispatch():
-    """Manually trigger one outbox dispatch pass (CC-09)."""
+    """Manually trigger one outbox dispatch pass (CC-09).
+
+    Audited even though it is an operational action rather than a business write,
+    because a dispatch **sends email to employees**. "Who forced the queue out, when,
+    and what did it deliver" is exactly what an audit trail is for — an operator
+    triggering it at the wrong moment is a real incident, and the events it consumed
+    are the evidence.
+    """
     try:
         result = outbox.run_dispatch()
     except Exception as e:
         logger.warning('outbox dispatch failed: %s', e)
         return jsonify({'error': 'Outbox dispatch failed'}), 500
+    audit_log(
+        session['emp_id'], 'OUTBOX_DISPATCH',
+        f'Manual outbox dispatch: {result}',
+        entity='outbox_events', after=result if isinstance(result, dict) else None,
+    )
     return jsonify(result), 200
 
 

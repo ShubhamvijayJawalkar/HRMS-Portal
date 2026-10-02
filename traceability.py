@@ -77,7 +77,11 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'path the SRS names, and errors are capped at 20 rather than 50.'),
     'FR-USR-11': ('M', 'C', 'IMPLEMENTED', ('/api/dependents', '/api/dependents/<int:did>'),
                   'emp_id always from the session, never the payload; delete is '
-                  'scoped by emp_id as well.'),
+                  'scoped by emp_id as well. Create and delete are both audited, '
+                  'because policy.PII_FIELDS classifies dependents as PII - a third '
+                  'party with no statutory retention of their own - and a silent erase '
+                  'of one was the gap the audit pass found. The create also used a '
+                  'bare INSERT INTO dependents VALUES (...), now a named column list.'),
     'FR-USR-12': ('L', 'C', 'PARTIAL', ('/api/upload',),
                   'Employee uploads go through the same route as admin uploads, so '
                   'one validation pipeline exists, and it does sniff the content. It '
@@ -529,7 +533,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
 
     # ── FR-DOC: documents ───────────────────────────────────────────────
     'FR-DOC-01': ('M', 'R', 'IMPLEMENTED', ('/api/documents',),
-                  'Scoped to the owner unless HR/Admin.'),
+                  'Scoped to the owner unless HR/Admin. The record and the delete are '
+                  'both audited. The create also used a bare INSERT INTO '
+                  'employee_documents VALUES (...) - not a live failure, since both '
+                  'schemas have five columns in that order today, but the same latent '
+                  'shape that made POST /api/goals return 500 on every backend and '
+                  'mis-targeted add_holiday against v2.0 sixth column. It names its '
+                  'columns now, and a test reads the canonical schema and fails if the '
+                  'route list and the schema stop agreeing.'),
     'FR-DOC-02': ('H', 'C', 'PARTIAL', ('/api/upload',),
                   'Multipart upload, a size cap and an extension allow-list. The MIME '
                   'type is taken from the filename extension rather than sniffed from '
@@ -547,7 +558,9 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'location column is now writable, reported, and filtered on: a location '
                   'filter includes org-wide holidays rather than hiding them, and the '
                   'applied filters are echoed so a client can tell an empty result from an '
-                  'over-narrow one.'),
+                  'over-narrow one. Creation is audited, which is worth stating because '
+                  'the *edit* already was: a holiday could be added to the company '
+                  'calendar with no record of it, then edited with one.'),
     'FR-HOL-02': ('H', 'C', 'IMPLEMENTED',
                   ('/api/holidays', '/api/holidays/<int:hid>',
                    '/api/holidays/copy-year', '/api/holidays/export',

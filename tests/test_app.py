@@ -1138,6 +1138,155 @@ def test_break_start_and_end_are_audited(client):
         assert 'BREAK_END' in actions, actions
 
 
+def test_create_writes_name_their_columns_so_the_v2_target_cannot_mis_target_them():
+    """Both inserts were bare `INSERT INTO <table> VALUES (...)`.
+
+    Not a live failure — both tables have the same column count and order on the
+    compatibility schema and on v2.0 `public` *today* — which is exactly what makes
+    it worth fixing rather than documenting. This codebase has been bitten by this
+    shape twice: `POST /api/goals` used ten placeholders against a nine-column table
+    and returned 500 on every backend, and `add_holiday` used five against v2.0's
+    six and mis-targeted every value. Both times the **boot seed worked** because the
+    seed names its columns, which is precisely why the bug survived.
+
+    The test is the guard rather than the fix: it reads the canonical schema and
+    asserts the route's column list still matches it, so adding a column to
+    `db/postgres_schema.sql` without updating the route fails here.
+    """
+    import re as _re
+
+    src = open(app_module_path(), encoding='utf-8').read()
+    schema = open(
+        os.path.join(os.path.dirname(__file__), '..', 'db', 'postgres_schema.sql'),
+        encoding='utf-8',
+    ).read()
+
+    def canonical_columns(table):
+        m = _re.search(
+            rf'CREATE TABLE {table} \((.*?)\n\);', schema, _re.S)
+        assert m, f'{table} is not in the canonical schema'
+        cols = []
+        for line in m.group(1).splitlines():
+            line = line.strip()
+            if not line or line.startswith('--'):
+                continue
+            cols.append(line.split()[0])
+        return cols
+
+    # The two routes fixed, and the table each one targets.
+    for table, route_marker in (
+        ('employee_documents', 'INSERT INTO employee_documents (doc_id'),
+        ('dependents', 'INSERT INTO dependents (dependent_id'),
+    ):
+        assert route_marker in src, f'{table}: the route no longer names its columns'
+        m = _re.search(rf'INSERT INTO {table} \(([^)]*)\)', src)
+        named = [c.strip() for c in m.group(1).split(',')]
+        expected = canonical_columns(table)
+        assert named == expected, (
+            f'{table}: the route names {named} but the canonical schema declares '
+            f'{expected}. A bare VALUES would mis-target every value once the '
+            f'schema gains a column; the seed already names its columns, which is '
+            f'why a mismatch here is invisible until the public flip.'
+        )
+
+
+def app_module_path():
+    return os.path.join(os.path.dirname(__file__), '..', 'app.py')
+
+
+def test_document_and_dependent_creation_is_audited(client):
+    """The other half of the pair the delete routes now record.
+
+    `dependents` is PII by `policy.PII_FIELDS`, so recording one matters for the same
+    reason erasing one did. Both routes also went out with no audit row at all.
+    """
+    _set_admin_session(client, 99161)
+
+    doc = client.post('/api/documents', json={'doc_type': 'PAN Card',
+                                              'file_name': 'pan.pdf'})
+    assert doc.status_code == 201, doc.get_json()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT action FROM audit_log WHERE entity_id = ? ORDER BY log_id',
+            [str(doc.get_json()['id'])],
+        ).fetchall()
+    finally:
+        conn.close()
+    assert ('DOCUMENT_RECORD',) in [tuple(r) for r in row], row
+
+    dep = client.post('/api/dependents', json={'name': 'Aditi', 'relationship': 'Child'})
+    assert dep.status_code == 201, dep.get_json()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT action, "before" FROM audit_log WHERE entity_id = ? ORDER BY log_id',
+            [str(dep.get_json()['id'])],
+        ).fetchall()
+    finally:
+        conn.close()
+    assert ('DEPENDENT_CREATE', None) in [tuple(r) for r in row], row
+
+    # And an admin mailing an arbitrary address is audited on **both** paths — it is a
+    # data-exfiltration route by construction, and recording only the successes would
+    # hide the attempts that matter.
+    sent = client.post('/api/send-notification-email', json={
+        'to': 'someone@example.com', 'subject': 'Payroll', 'body': 'figures',
+    })
+    assert sent.status_code == 200, sent.get_json()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT "after" FROM audit_log WHERE action = ? '
+            'ORDER BY log_id DESC LIMIT 1', ['NOTIFICATION_EMAIL_SENT'],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, 'an admin sent company email with no audit row'
+    assert json.loads(row[0])['to'] == 'someone@example.com', row
+
+    # Marking your own notifications read stays deliberately unaudited.
+    assert 'mark_notifications_read' in KNOWN_UNAUDITED_MUTATIONS, (
+        'the read-receipt exemption needs a reason in this list too, not just a '
+        'deliberate omission'
+    )
+
+
+def test_holiday_creation_is_audited(client):
+    """FR-HOL-01/02's create path wrote no audit row while the row claimed the edit
+    was audited — so the *edit* was on the record and the *creation* was not."""
+    _set_admin_session(client, 99162)
+    created = client.post('/api/holidays', json={
+        'name': 'Audit Probe Day', 'date': '2029-03-19', 'type': 'National',
+    })
+    assert created.status_code == 201, created.get_json()
+    hid = created.get_json()['id']
+
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            'SELECT action, "after" FROM audit_log WHERE entity_id = ? ORDER BY log_id',
+            [str(hid)],
+        ).fetchall()
+    finally:
+        conn.close()
+    try:
+        assert [r[0] for r in rows] == ['HOLIDAY_CREATE'], rows
+        assert json.loads(rows[0][1])['name'] == 'Audit Probe Day', rows
+        # The `after` payload carries the fields an admin would need to reconstruct
+        # the entry, including the org-wide case (location null) that the duplicate
+        # rule treats specially.
+        assert json.loads(rows[0][1])['location'] is None, rows
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM holidays WHERE holiday_id = ?', [hid])
+            conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?',
+                         [str(hid)])
+        finally:
+            conn.close()
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
@@ -1150,11 +1299,13 @@ def test_break_start_and_end_are_audited(client):
 #: state had no test either way, and the absence of a test read as "nothing to
 #: check", which is how an unevidenced IMPLEMENTED row survived.
 KNOWN_UNAUDITED_MUTATIONS = {
-    'dependents_api', 'documents_api', 'add_holiday', 'mark_notifications_read',
+    # `mark_notifications_read` is a deliberate exemption, not an oversight: it is a
+    # read receipt on the caller's own notifications, and a row per click would be
+    # noise that makes the real entries harder to find. The other 14 are gaps.
+    'mark_notifications_read',
     'regularization_api', 'cancel_import_job', 'run_import_job', 'assets_api',
     'return_asset', 'revoke_offboarding_workflow_access', 'salary_api',
-    'payroll_runs_api', 'send_notification_email',
-    'break_approvals_api', 'admin_outbox_dispatch',
+    'payroll_runs_api', 'break_approvals_api',
 }
 
 
