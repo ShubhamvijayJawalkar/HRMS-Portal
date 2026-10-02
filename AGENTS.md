@@ -1975,3 +1975,70 @@ retention, quarterly restore drill". None of it existed.
   so a run nobody is watching still leaves a record of having failed.
 - `backups/` is now gitignored: a dump is a full copy of every employee's record,
   which is exactly what the retention and encryption requirements exist to protect.
+
+## FR-AUTH-01: the rate limits made the SRS's own NFRs unsatisfiable
+The load test the SRS asks for (§10: "k6 load test") was not written, so the §10
+numbers were **asserted and never measured**. Writing the harness immediately paid
+for itself by finding a launch blocker that no amount of reading would have.
+
+- **Two per-IP-only limiters, and both were wrong by an order of magnitude.**
+  `DEFAULT_RATE_LIMIT` was `200 per minute` keyed by `get_remote_address`, and the
+  SRS sustained target is 150 req/s = **9,000 req/min** — 45× short.
+- **The shared-NAT consequence is the blocker.** Measured on a live server with 15
+  distinct employees behind **one** egress address, 25 reads each:
+  **200 of 375 served, 175 × 429.** The 200 is exactly the per-IP bucket, so the
+  first few users' ordinary browsing consumed the whole company's budget. With the
+  SRS's own 500 concurrent sessions behind one corporate NAT that is **0.4
+  requests/minute per user**. Behind a reverse proxy *every* user looked like one
+  address. After the fix: **375/375 served, 0 locked out** — and the same check run
+  against the stashed pre-fix code reproduced the failure, because a check that
+  cannot fail proves nothing.
+- **`LOGIN_RATE_LIMIT` was 20/min against a burst target of 200/min** (1,000
+  logins in a 5-minute shift-start window), so it refused 90% of a legitimate
+  shift start before anybody mistyped a password.
+- **The fix is the split the SRS already names** — "per-account, not per-IP-only":
+  the global key is the **employee identity** once authenticated and the remote
+  address only while anonymous. Anonymous traffic (`/login`,
+  `/api/forgot-password`, `/api/reset-password`) is the surface actually worth
+  limiting, because it is the only one an attacker can hammer without credentials.
+  Keyed on identity rather than session, so ten browser tabs do not buy ten budgets
+  and session multiplication buys nothing.
+- **Raising the login limit to 200/min is only safe because FR-AUTH-03 exists.**
+  The 20/min address limit was standing in for per-account protection; now
+  `lockout.py` locks an employee after 10 consecutive failures in 15 minutes and
+  emails them. That is what makes a looser address limit acceptable, and the two
+  are documented together so neither gets changed alone.
+- **A test of mine asserted the wrong thing, and the honest correction is recorded
+  rather than the assertion loosened.** The first ratchet compared
+  `DEFAULT_RATE_LIMIT` against 9,000 req/min and failed. The *comparison* was the
+  error: "150 req/s across the API" is an **aggregate**, and the limit is now **per
+  employee**, so it compares two different things. The old 200/min was broken
+  precisely because it was an aggregate number applied as a per-user one. The test
+  now checks the per-employee floor (≥120/min — the admin dashboard polls every 5 s,
+  12/min on its own, plus panels) and that 500 sessions × that budget clears the
+  aggregate target, which is the claim that is actually true.
+- **A harness flaw that would have produced a fake finding.** `scripts/loadcheck.py`
+  first reported a **17% error rate** — because its endpoint list included
+  `/api/dashboard-stats`, which is admin-only, and it counted the correct 403 as a
+  server fault. It also now separates 401/403 from errors *and reports them*,
+  because "the load account cannot read this" is itself worth knowing. A load
+  harness that measures authorisation failures while reporting them as latency
+  errors is worse than none: the number looks like a finding about the server.
+- **Measured after the fix** (dev server, 80 req/s offered): p95 181 ms, p99 226 ms,
+  **0.000% errors, 0 lockouts** — against SRS targets of p95 < 300 ms,
+  p99 < 800 ms and errors < 0.1%. Before the fix the same run produced 141 lockouts
+  and a 13% error rate.
+- `ops/load/load.js` is the k6 scenario the SRS names (sustained + burst, with the
+  thresholds as k6 `thresholds`). It refuses to run against an MFA-enrolled account
+  rather than measuring a wall of 401s, because FR-AUTH-11 makes a second factor
+  compulsory for Admin/HR/Finance.
+- `scripts/shared_nat_check.py` reproduces the blocker and is the regression test.
+- Matrix moves FR-AUTH-01 to `IMPLEMENTED`
+  (**60 IMPLEMENTED / 36 PARTIAL / 7 NOT_STARTED / 1 RETIRED**). Unit **269 passed /
+  2 skipped**, browser **22/22**, v2.0 gates **111/111 GET + 55/55 write**, probe
+  run twice for idempotency, preflight and CC-01 green.
+- **A sixth cleanup-helper failure, and the fix that ends the class.** Removing the
+  temporary load-test employees raised an FK violation from `leave_balance` — this
+  file has listed the referencing tables wrongly three times. The cleanup now
+  *discovers* every table with an `emp_id` column from `information_schema` (35 of
+  them) instead of listing them, so the next person does not have to know.

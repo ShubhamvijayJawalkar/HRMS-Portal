@@ -1812,6 +1812,164 @@ def test_health_reports_which_instance_owns_the_scheduler():
         assert body['scheduler_leader'] is None, body
 
 
+def test_rate_limiting_is_per_account_behind_shared_nat_not_per_address():
+    """The shipped limiter made the application's own SRS NFRs unsatisfiable.
+
+    Measured against a live server before this fix: **15 distinct employees behind
+    one egress address, 25 reads each — 200 of 375 served, 175 locked out with
+    429.** The 200 is precisely the old `200 per minute` bucket, so the first few
+    users' legitimate browsing consumed the whole company's budget and everyone
+    else was refused. That is what a corporate NAT, a mobile carrier or a cloud
+    egress does, and behind a reverse proxy *every* user looked like one address.
+
+    The SRS forbids it in as many words: the burst NFR requires 1,000 logins in a
+    shift-start window "without lockouts caused by shared-NAT rate limiting
+    (**per-account, not per-IP-only**)".
+
+    Driven through `test_request_context`, because that is the context
+    flask-limiter evaluates the key in — calling the function outside one raises
+    rather than answering, and a key function that cannot be exercised outside a
+    request is a key function nobody can test.
+    """
+    from flask import session as flask_session
+
+    import app as app_module
+
+    def key_for(emp_id):
+        with app.test_request_context('/api/profile'):
+            if emp_id:
+                flask_session['emp_id'] = emp_id
+            return app_module.rate_limit_key()
+
+    assert key_for('EMP001') == 'user:EMP001'
+    assert key_for('EMP002') == 'user:EMP002'
+
+    # Anonymous traffic stays per-address. That is the surface actually worth
+    # limiting, because it is the only one an attacker can hammer without
+    # credentials — and `/login` is where the brute-force protection belongs.
+    anonymous = key_for(None)
+    assert anonymous.startswith('ip:'), anonymous
+
+    # Keyed on the *identity*, not the session: opening ten tabs must not buy ten
+    # budgets, or session multiplication is a trivial evasion of the limit.
+    keys = {key_for('EMP003') for _ in range(5)}
+    assert keys == {'user:EMP003'}, keys
+
+
+def test_login_rate_limit_meets_the_srs_shift_start_burst_target():
+    """The SRS burst NFR is 1,000 logins in a five-minute shift-start window.
+
+    That is **200/minute from one address**, which is what a company behind a
+    corporate NAT produces. `LOGIN_RATE_LIMIT` shipped at 20/minute, so the
+    application refused 90% of a legitimate shift start — before anybody had typed
+    a wrong password.
+
+    Raising it is only safe because the *per-account* control now exists
+    properly: `lockout.py` locks an employee after 10 consecutive failures inside
+    15 minutes and emails them. The 20/minute address limit was standing in for
+    that before FR-AUTH-03 landed; what remains here is a bound on volumetric
+    abuse from one address, which 200/minute still is.
+
+    This one **is** a like-for-like comparison, because logins are necessarily
+    anonymous and therefore still keyed per address.
+    """
+    import re
+
+    import app as app_module
+
+    source = pathlib.Path(app_module.__file__).read_text()
+    found = re.search(r"LOGIN_RATE_LIMIT', '([^']+)'", source)
+    assert found, 'LOGIN_RATE_LIMIT default not found in app.py'
+    expr = found.group(1)
+
+    match = re.match(r"^\s*(\d+)\s*per\s+(?:(\d+)\s+)?(second|minute|hour|day)s?\b", expr)
+    assert match, f'cannot read a rate expression: {expr!r}'
+    count = int(match.group(1))
+    multiple = int(match.group(2) or 1)
+    seconds = {'second': 1, 'minute': 60, 'hour': 3600, 'day': 86400}[match.group(3)]
+    per_minute = int(count * 60 / (multiple * seconds))
+
+    burst_target = -(-1000 // 5)   # 1,000 logins in 300 s
+    assert per_minute >= burst_target, (
+        f'LOGIN_RATE_LIMIT defaults to {expr!r} = {per_minute}/min, below the SRS '
+        f'burst target of {burst_target}/min.'
+    )
+
+
+def test_the_global_limit_is_a_per_employee_budget_not_an_aggregate_one():
+    """Why the global default is *not* compared to the SRS's 150 req/s figure.
+
+    The first version of this test compared `DEFAULT_RATE_LIMIT` against 9,000
+    req/min and failed — and the comparison was the thing that was wrong. "150 req/s
+    across the API" is an **aggregate** across all users, whereas the limit is now
+    **per employee**, so putting them side by side compares two different things.
+    The old 200/minute was broken precisely because it was an *aggregate* number
+    applied as if it were a per-user one: one shared bucket for the whole company.
+
+    What has to hold now:
+
+    * the per-employee budget is comfortably above what one person's real browsing
+      costs — the admin dashboard polls every 5 s (12/min on its own) plus several
+      panels, so 120/min is the floor worth defending; and
+    * the aggregate the fleet can absorb scales with the number of signed-in
+      employees, which is what makes 150 req/s reachable at all. Checked against
+      the SRS's own 500 concurrent sessions.
+    """
+    import re
+
+    import app as app_module
+
+    source = pathlib.Path(app_module.__file__).read_text()
+    found = re.search(r"DEFAULT_RATE_LIMIT', '([^']+)'", source)
+    assert found, 'DEFAULT_RATE_LIMIT default not found in app.py'
+    expr = found.group(1)
+
+    match = re.match(r"^\s*(\d+)\s*per\s+(?:(\d+)\s+)?(second|minute|hour|day)s?\b", expr)
+    assert match, f'cannot read a rate expression: {expr!r}'
+    count = int(match.group(1))
+    multiple = int(match.group(2) or 1)
+    seconds = {'second': 1, 'minute': 60, 'hour': 3600, 'day': 86400}[match.group(3)]
+    per_employee = int(count * 60 / (multiple * seconds))
+
+    assert per_employee >= 120, (
+        f'DEFAULT_RATE_LIMIT is {per_employee}/min per employee. The admin dashboard '
+        f'polls every 5 s (12/min by itself) plus its panels; below ~120/min a single '
+        f'user can exhaust their own budget through ordinary navigation.'
+    )
+
+    concurrent_sessions = 500      # SRS Scalability NFR
+    sustained_target = 150 * 60    # SRS: 150 req/s across the API
+    fleet_capacity = per_employee * concurrent_sessions
+    assert fleet_capacity >= sustained_target, (
+        f'{concurrent_sessions} concurrent sessions x {per_employee}/min = '
+        f'{fleet_capacity:,}/min, below the SRS sustained target of '
+        f'{sustained_target:,}/min. This was unreachable when the limit was a single '
+        f'shared per-address bucket.'
+    )
+
+
+def test_an_orphaned_session_cannot_be_used_to_lose_the_address_key():
+    """A key function reading `session` must still work with no identity in it.
+
+    The failure this guards against is subtle and would be a security regression:
+    anything that made the identity branch return `None` — a cleared session, a
+    failed login, a logout that left a partial session — would produce an empty
+    bucket name and merge unrelated anonymous callers into one shared counter.
+    """
+    from flask import session as flask_session
+
+    import app as app_module
+
+    with app.test_request_context('/api/profile'):
+        assert app_module.rate_limit_key() != ''
+        assert app_module.rate_limit_key().startswith('ip:')
+        # An empty-string identity is falsy, so it must fall through, not become a
+        # key of `user:` that every such caller shares.
+        flask_session['emp_id'] = ''
+        assert app_module.rate_limit_key().startswith('ip:')
+        assert app_module.rate_limit_key() != 'user:'
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating

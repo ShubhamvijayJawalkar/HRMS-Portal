@@ -162,13 +162,56 @@ maybe_enable_redis_sessions(app)
 IST = ZoneInfo('Asia/Kolkata')
 
 # ── Rate Limiter ──────────────────────────────────────────────────────
+def rate_limit_key() -> str:
+    """Who to charge for this request.
+
+    This was `get_remote_address`, and measuring it against the SRS's own §10
+    targets showed the shipped defaults **cannot meet them**:
+
+    * Sustained NFR is 150 req/s = **9,000 req/min**; the default global limit was
+      200 req/min, keyed per address — 45× short.
+    * 500 concurrent users behind one corporate NAT share a single 200/min bucket,
+      so each gets **0.4 requests per minute**. One employee refreshing a dashboard
+      every 5 s exhausts the entire company's budget and everybody is 429'd.
+    * The burst NFR is 1,000 logins in five minutes = 200/min from one address, and
+      `LOGIN_RATE_LIMIT` was 20/min — 10× short.
+
+    Measured: one signed-in user issuing 260 rapid requests got 200 × 200 and then
+    60 × 429. Behind shared NAT the second user would never get to be served at all.
+
+    The SRS resolves this itself: the burst target says "without lockouts caused by
+    shared-NAT rate limiting (**per-account, not per-IP-only**)". So authenticated
+    traffic is charged to the **employee**, and anonymous traffic to the address:
+
+    * **Anonymous** (`/login`, `/api/forgot-password`, `/api/reset-password`) stays
+      per-address. That is the surface actually worth rate-limiting, because it is
+      the only one an attacker can hammer without credentials.
+    * **Authenticated** is per-`emp_id`. Fair to the person browsing, and immune to
+      shared NAT. Keyed on the *identity*, not the session, so opening ten browser
+      tabs does not buy ten budgets and a session-multiplication evasion gets
+      nothing. Behind a proxy this also fixes the case the old key silently got
+      wrong: every user looked like one address.
+    """
+    from flask import session as _session
+
+    emp_id = _session.get('emp_id')
+    if emp_id:
+        return f'user:{emp_id}'
+    return f'ip:{get_remote_address()}'
+
+
 limiter = Limiter(
-    key_func=get_remote_address,
+    key_func=rate_limit_key,
     app=app,
+    # Per employee once authenticated, per address before that. 600/minute is
+    # roughly ten requests a second, which a dashboard polling every 5 s plus a few
+    # panels stays well inside; the previous 200/minute was not a security posture,
+    # it was an unmeasured default that happened to break the NFR.
+    #
     # Overridable for test runs: a full suite issues thousands of requests in a
     # couple of minutes, and a 429 on the CSRF-token fetch shows up later as a
     # confusing "CSRF token missing or invalid" on an unrelated assertion.
-    default_limits=[os.getenv('DEFAULT_RATE_LIMIT', '200 per minute')],
+    default_limits=[os.getenv('DEFAULT_RATE_LIMIT', '600 per minute')],
     storage_uri="memory://",
 )
 
@@ -2940,7 +2983,18 @@ def _count_failed_login(conn, emp_id, name, email):
             logger.exception('Could not send the account-lockout email to %s', emp_id)
 
 
-@limiter.limit(os.getenv('LOGIN_RATE_LIMIT', '20 per minute'))
+# The SRS's shift-start burst target is 1,000 logins inside a five-minute window,
+# which is 200/minute from whatever egress address a corporate NAT shares — and it
+# qualifies it precisely: "without lockouts caused by shared-NAT rate limiting
+# (**per-account, not per-IP-only**)". At 20/minute this route refused 90% of a
+# legitimate shift start before anybody had typed a wrong password.
+#
+# Raising it is only safe because the *per-account* control now exists properly:
+# `lockout.py` locks an employee after 10 consecutive failures inside 15 minutes
+# and emails them. That is the defence against guessing, and this limit was
+# standing in for it before FR-AUTH-03 landed. What remains here is a bound on
+# volumetric abuse from one address, which 200/minute still is.
+@limiter.limit(os.getenv('LOGIN_RATE_LIMIT', '200 per minute'))
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """User login

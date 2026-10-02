@@ -101,10 +101,29 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'gate of the linked route never disagree.'),
 
     # ── FR-AUTH: authentication ─────────────────────────────────────────
-    'FR-AUTH-01': ('M', 'C', 'PARTIAL', ('/login',),
-                   'Employee code is trimmed and matched case-insensitively, with a '
-                   'rate limit (LOGIN_RATE_LIMIT, default 20/min). The limit is per '
-                   'remote address rather than per account *and* per IP.'),
+    'FR-AUTH-01': ('M', 'C', 'IMPLEMENTED', ('/login', '/api/forgot-password',
+                                              '/api/reset-password'),
+                   'Employee code is trimmed and matched case-insensitively. '
+                   'PER-ACCOUNT *AND* PER-IP, which is the whole requirement and was '
+                   'measured rather than asserted. Two per-IP-only limiters existed: '
+                   'LOGIN_RATE_LIMIT at 20/min (10x below the SRS shift-start burst of '
+                   '1,000 logins in 5 minutes = 200/min from one address, so it '
+                   'refused 90% of a legitimate shift start) and the global '
+                   'DEFAULT_RATE_LIMIT at 200/min keyed by remote address - measured '
+                   'at 15 distinct employees behind one egress address and 25 reads '
+                   'each: 200 of 375 served, 175 locked out with 429, because the '
+                   'first users consumed a bucket shared by the whole company. With '
+                   '500 concurrent sessions behind one corporate NAT that is 0.4 req/min '
+                   'per user. The global key is now the employee identity once '
+                   'authenticated and the remote address only while anonymous, so '
+                   'authenticated browsing is fair and NAT-safe; anonymous traffic '
+                   '(the surface actually worth limiting) stays per address; and '
+                   'login gains the per-account dimension from lockout.py (10 '
+                   'consecutive failures in 15 minutes, FR-AUTH-03), which is what '
+                   'makes a looser address limit safe. login/forgot-password/'
+                   'reset-password are all env-overridable. The shared-NAT case is '
+                   'reproduced by scripts/shared_nat_check.py, and two ratchet tests '
+                   'fail if a default drifts back below the SRS figures.'),
     'FR-AUTH-02': ('M', 'N', 'IMPLEMENTED', ('/login',),
                    'Every refusal is the same 401 {"error":"invalid_credentials"}: '
                    'unknown account, wrong password, blocked, archived, pre-hire, '

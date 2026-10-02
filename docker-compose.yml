@@ -71,6 +71,10 @@ services:
       # its scheduler down if the lease is lost, so this bounds how long a crashed
       # leader's jobs go unowned.
       SCHEDULER_LEASE_TTL: ${SCHEDULER_LEASE_TTL:-60}
+      # Rate limits (SRS §10 / FR-AUTH-01). Per-employee once authenticated,
+      # per-address while anonymous; 200/min is the shift-start burst target.
+      DEFAULT_RATE_LIMIT: ${DEFAULT_RATE_LIMIT:-600 per minute}
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-200 per minute}
       # Password-reset route limits. The SRS says 5/min; overridable because a hardcoded
       # literal is a deployment knob nobody can turn.
       FORGOT_PASSWORD_RATE_LIMIT: ${FORGOT_PASSWORD_RATE_LIMIT:-5 per minute}
