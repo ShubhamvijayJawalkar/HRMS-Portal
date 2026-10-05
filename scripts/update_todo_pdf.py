@@ -51,6 +51,49 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "FR-LEA-09 (and FR-LEA-02): one working-day function, called from one place. The "
+     "SRS states the defect and the fix together - the working-day/holiday-deduction function used "
+     "for leave days, the payroll LOP calculation and the reports 'working days' figure IS the same "
+     "function, called from one place; v1.0 used three different day-counting rules including a "
+     "separate Mon-Fri helper. SIX rules were live, not three, and they disagreed. Leave counted "
+     "(end - start).days + 1, so booking Friday to Monday cost FOUR days of a twelve-day allowance, "
+     "two of them a weekend the employee never intended to take. Payroll counted attendance_days "
+     "rows with status Absent OR Half-day, so an employee marked half-present lost a FULL day's pay "
+     "- FR-JOB-01's classification had already made that distinction and the money threw it away. "
+     "Reports had no working-day figure at all, reporting days-with-a-login from user_sessions, which "
+     "is a fifth rule answering a different question. And leave_policy.days_between was a sixth copy "
+     "of the calendar rule, and the dangerous one: apply reserved working days while reject and "
+     "cancel gave back CALENDAR days, so every rejected leave silently INCREASED the balance. "
+     "working_days.py now owns the rule and all six route through it, with a test that walks the AST "
+     "of app.py and fails if an inline day-count expression or an unexpected call site appears. "
+     "Working days are PER EMPLOYEE via get_weekly_off_pattern, because this application has no "
+     "company-wide Mon-Fri week and never did (FR-ATT-17) - a night-shift operator is not off on "
+     "Saturday, so the v1.0 Mon-Fri helper was wrong for them specifically. Holidays are deducted "
+     "through _is_attendance_holiday so National applies to everyone and Optional only to an approved "
+     "opt-in (FR-HOL-03). A range with no working days is refused with a 400 naming the reason rather "
+     "than recorded as a Pending request reserving zero. The figure is now STORED on the request "
+     "(Alembic 0010, nullable and deliberately unbackfilled because a request approved under the old "
+     "rule has no honest value to reconstruct), so approve and cancel move exactly what apply "
+     "reserved: a holiday added between applying and approving would otherwise make approve release a "
+     "different number of days, with every audit row still honest, which is the FR-LEA-06 ledger "
+     "defect reappearing one layer down. FR-LEA-02 also gained the `session` field (Full | First-half "
+     "| Second-half), which the SRS lists in the create payload: the column existed on the canonical "
+     "schema with no writer and no reader, so a half-day leave could not be expressed at all and an "
+     "employee on a four-hour shift had to book a whole day. Six behaviour-changing bugs found along "
+     "the way, all mine and all recorded rather than quietly fixed: reject_leave had a 5-column "
+     "SELECT while the new code read index 6, which is an IndexError; leave_policy.cancel read "
+     "request_row[7] for days when the route's column order puts days at 6 and session at 7, passing "
+     "the string 'Full' into an INTEGER parameter two frames from the cause; the export route closes "
+     "its connection in a finally before the row comprehension, so a per-row function call ran on a "
+     "closed cursor (fixed by reporting the STORED figure, which also guarantees the sheet agrees "
+     "with the ledger); three test fixtures and two probe flows used dates landing on weekends and "
+     "were correctly refused; the probe's Monday anchor was defeated by +40 because 40 % 7 is 5, so "
+     "anchoring to Monday then adding 40 lands on a Saturday; and two hardcoded calendar-day "
+     "expectations (== 3, == 8) now read the figure from the response, because a shared function "
+     "called twice can legitimately answer differently the second time and the ledger assertions "
+     "should check symmetry rather than re-derive a calendar the test does not own. Matrix 65 "
+     "IMPLEMENTED / 32 PARTIAL / 6 NOT_STARTED / 1 RETIRED. Unit 299 passed / 2 skipped, browser "
+     "23/23, v2.0 gates 111/111 GET + 57/57 write, probe run twice for idempotency."),
     ("2026-10-02", "ToDo list restructured to be SRS-driven, with the requirement coverage section "
      "GENERATED from traceability.py rather than maintained by hand. Asked to update the list "
      "only, which is when it became clear the document had two problems. First, it answered the "
@@ -1089,12 +1132,12 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "293 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "293 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "299 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "299 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0009_account_lockout, identity/sequence rules, required tables, count deltas"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0010_leave_days_stored, identity/sequence rules, required tables, count deltas"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "111/111 GET + 57/57 write flows; run twice to confirm idempotency"),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),

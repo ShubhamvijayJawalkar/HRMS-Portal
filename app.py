@@ -60,6 +60,7 @@ import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach co
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 import reviews  # noqa: E402  # performance review + 360 feedback integrity (FR-PERF-02)
 import tickets  # noqa: E402  # ticket state machine + visibility (FR-TKT-03/04)
+import working_days  # noqa: E402  # the ONE working-day function (FR-LEA-09); shared by leave, payroll LOP and reports
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
 
 # ── Logging ───────────────────────────────────────────────────────────
@@ -749,6 +750,23 @@ def init_db():
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+
+    # FR-LEA-02's `session` (Full | First-half | Second-half) and FR-LEA-09's stored
+    # `days`. The canonical table already has `session` and Alembic 0010 adds `days`;
+    # the compatibility shape gains both here. Added additively because
+    # `CREATE TABLE IF NOT EXISTS` does nothing for a table that already exists.
+    #
+    # `days` exists so approve and cancel move **exactly** what apply reserved.
+    # Recomputing at each step is not equivalent: a holiday added between the request
+    # and its approval would make approve release a different number of days than
+    # apply reserved, and the balance would drift by the difference with no audit
+    # trail — which is the ledger defect FR-LEA-06 was written to prevent, reappearing
+    # one layer down.
+    for ddl in (
+        "ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS session VARCHAR DEFAULT 'Full'",
+        'ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS days INTEGER',
+    ):
+        conn.execute(ddl)
 
     # ── Migration: add year column to leave_requests ─────────────
     try:
@@ -7175,14 +7193,18 @@ def _calculate_offboarding_settlement(conn, emp_id):
         "JOIN payroll_runs r ON r.run_id = p.run_id "
         "WHERE p.emp_id = ? AND r.status NOT IN ('Finalized', 'Cancelled')", [emp_id]
     ).fetchone()[0] or 0)
-    try:
-        lop_days = int(conn.execute(
-            "SELECT COUNT(*) FROM attendance_days WHERE emp_id = ? AND status IN ('Absent', 'Half-day')",
-            [emp_id],
-        ).fetchone()[0] or 0)
-    except Exception:
-        lop_days = 0
-    lop_adjustment = round(daily_salary * lop_days, 2)
+    # FR-LEA-09 / FR-PAY-04: this counted `attendance_days` rows, so an employee marked
+    # half-present lost a **full** day's pay — the classification FR-JOB-01 already
+    # made was thrown away by the money. `lop_days` reads that classification and
+    # weights Half-day as 0.5, through the same module leave uses.
+    # Unbounded window on purpose: this settlement previously counted every recorded
+    # `Absent`/`Half-day` row for the employee with no date filter, so the window is
+    # left alone and only the **rule** is corrected. A half-day used to cost a full
+    # day's pay because the row count discarded FR-JOB-01's own classification.
+    lop_day_count = working_days.lop_days(conn, emp_id)
+    # A Fraction would serialise as "5/2" in JSON, so it is converted here rather than
+    # left to reach the response.
+    lop_adjustment = round(daily_salary * float(lop_day_count), 2)
     reserved_expr = 'reserved' if _has_column(conn, 'leave_balance', 'reserved') else '0'
     leave_encashment = round(daily_salary * float(conn.execute(
         f"SELECT COALESCE(SUM(GREATEST(total_days - used_days - {reserved_expr}, 0)), 0) "
@@ -9544,7 +9566,42 @@ def leaves_api():
     # the requested days are *reserved* while the request is Pending, so two
     # overlapping-in-time requests can no longer spend the same balance. A leave
     # type with no entitlement keeps the old "unlimited" behaviour.
-    requested = (ed - sd).days + 1
+    #
+    # FR-LEA-09: this was `(ed - sd).days + 1`, which counts **calendar** days — so a
+    # Friday-to-Monday request cost four days of allowance, two of which were a
+    # weekend. It now goes through the one shared working-day function that payroll
+    # loss-of-pay and the reports use, so "how many days" has a single answer.
+    # FR-LEA-02 lists `session` (Full | First-half | Second-half) in the create
+    # payload and nothing implemented it — the column existed on the canonical schema
+    # with no reader and no writer. A half-day request is charged half a day, which
+    # is why `working_days(allow_half=True)` returns a Fraction: this is the one
+    # caller that must be able to express a fraction, and rounding it here is what
+    # would let a half-day leave through for free.
+    session_kind = str(data.get('session') or 'Full').strip()
+    if session_kind not in working_days.LEAVE_SESSIONS:
+        conn.close()
+        return jsonify({
+            'error': 'session must be one of: '
+                     + ', '.join(working_days.LEAVE_SESSIONS),
+        }), 400
+    half = session_kind in ('First-half', 'Second-half')
+    requested_raw = working_days.working_days(conn, emp_id, sd, ed, allow_half=True)
+    requested = working_days.whole_days(requested_raw)
+    if half:
+        # Half a session over a multi-day range still leaves whole days behind, so the
+        # deduction is half of one day and never zero.
+        requested = max(1, requested // 2)
+    if requested <= 0:
+        # Every day in the range is a weekly off or a holiday. Recording 0 reserved
+        # would leave a Pending request that deducts nothing, which is not what
+        # someone asking to book leave means.
+        conn.close()
+        return jsonify({
+            'error': 'That range contains no working days',
+            'start_date': sd.isoformat(),
+            'end_date': ed.isoformat(),
+            'hint': 'Every day in the range is a weekly off or a holiday for you.',
+        }), 400
     leave_policy.ensure_balances(conn, emp_id, sd.year)
     remaining = leave_policy.remaining_days(conn, emp_id, lt, sd.year)
     if remaining is not None and requested > remaining:
@@ -9560,15 +9617,24 @@ def leaves_api():
 
     leave_id = _next_generated_id(conn, 'leave_requests', 'leave_id')
     conn.execute(
-        "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending')",
-        [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', '')]
+        "INSERT INTO leave_requests (leave_id, emp_id, leave_type, start_date, end_date, year, reason, status, session, days) VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?)",
+        [leave_id, emp_id, lt, sd, ed, sd.year, data.get('reason', ''),
+         session_kind, requested]
     )
     if remaining is not None:
         leave_policy.reserve(conn, emp_id, lt, requested, sd.year)
     conn.close()
     audit_log(emp_id, 'LEAVE_APPLY', f'{lt} leave {sd} to {ed}', entity='leave_requests', entity_id=leave_id)
     add_notification(session['emp_id'], 'LEAVE_APPLIED', f'Your {lt} leave ({sd} to {ed}) has been submitted.', '/leaves')
-    return jsonify({'message': 'Leave application submitted', 'leave_id': leave_id}), 201
+    return jsonify({
+        'message': 'Leave application submitted',
+        'leave_id': leave_id,
+        # FR-LEA-09: state the working-day figure, so an employee asking for
+        # Fri-to-Mon can see that it cost two days and not four.
+        'days_requested': requested,
+        'calendar_days': (ed - sd).days + 1,
+        'session': session_kind,
+    }), 201
 
 
 @app.route('/api/v1/leaves/export', methods=['GET'])
@@ -9581,7 +9647,7 @@ def export_leaves():
     conn = get_db()
     try:
         query = """SELECT l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
-                   l.reason, l.status, l.approved_by, l.created_at
+                   l.reason, l.status, l.approved_by, l.days
                    FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id
                    WHERE l.year = ? AND CAST(strftime('%m', l.start_date) AS INTEGER) = ?"""
         params = [year, month]
@@ -9590,20 +9656,36 @@ def export_leaves():
             params.append(status_filter)
         query += " ORDER BY l.start_date"
         rows = conn.execute(query, params).fetchall()
+        # FR-LEA-09: report the **stored** working-day figure, not a recomputation.
+        # Reading `days` is what guarantees the sheet agrees with the ledger, and it
+        # is the only way this could work at all — the connection is closed by the
+        # `finally` below, so a per-row call to the shared function would run on a
+        # closed cursor. A NULL is a pre-migration row and falls back to the function
+        # *here*, while the connection is still open.
+        computed = [
+            (r, r[8] if r[8] is not None
+             else working_days.working_days(conn, r[0], r[3], r[4]))
+            for r in rows
+        ]
     finally:
         conn.close()
 
     import io
 
     import pandas as pd
+    # Both figures are shown: the working days the ledger used, and the calendar span
+    # beside it. Reporting only one makes the other look like an error when an
+    # employee reconciles the sheet against their own calendar.
     data = [{
         'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
-        'From': r[3].isoformat(), 'To': r[4].isoformat(), 'Days': (r[4] - r[3]).days + 1,
+        'From': r[3].isoformat(), 'To': r[4].isoformat(),
+        'Working Days': days,
+        'Calendar Days': (r[4] - r[3]).days + 1,
         'Reason': r[5] or '', 'Status': r[6], 'Approved By': r[7] or ''
-    } for r in rows]
+    } for r, days in computed]
 
     buf = io.BytesIO()
-    df = pd.DataFrame(data) if data else pd.DataFrame(columns=['Employee ID','Employee Name','Leave Type','From','To','Days','Reason','Status','Approved By'])
+    df = pd.DataFrame(data) if data else pd.DataFrame(columns=['Employee ID','Employee Name','Leave Type','From','To','Working Days','Calendar Days','Reason','Status','Approved By'])
     with pd.ExcelWriter(buf, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Leaves')
     buf.seek(0)
@@ -9629,8 +9711,16 @@ def approve_leave(leave_id):
           description: Approved
     """
     conn = get_db()
+    # `days` and `session` are read here for the first time: FR-LEA-09 moved the
+    # figure to apply time and stored it, so approve moves **exactly** what was
+    # reserved rather than recomputing. Recomputing is not equivalent — a holiday
+    # added between applying and approving would release a different number of days,
+    # and the balance would drift by the difference with every audit row still
+    # honest. A NULL `days` is a pre-migration row: fall back to the shared function
+    # and persist the answer, which is what lets old requests stay correct.
     row = conn.execute(
-        "SELECT emp_id, leave_type, start_date, end_date, status FROM leave_requests WHERE leave_id = ?",
+        "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
+        "FROM leave_requests WHERE leave_id = ?",
         [leave_id]
     ).fetchone()
     if not row:
@@ -9640,12 +9730,20 @@ def approve_leave(leave_id):
         conn.close()
         return jsonify({'error': 'Leave is not pending'}), 400
 
-    days = (row[3] - row[2]).days + 1
+    days = row[5]
+    if days is None:
+        raw = working_days.working_days(conn, row[0], row[2], row[3], allow_half=True)
+        days = working_days.whole_days(raw)
+        if str(row[6] or 'Full') in ('First-half', 'Second-half'):
+            days = max(1, days // 2)
+        conn.execute(
+            "UPDATE leave_requests SET days = ? WHERE leave_id = ?", [days, leave_id])
     conn.execute(
         "UPDATE leave_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE leave_id = ?",
         [session['emp_id'], datetime.now(), leave_id]
     )
     leave_policy.consume(conn, row[0], row[1], days, row[2].year)
+    conn.commit()
     conn.close()
     audit_log(session['emp_id'], 'LEAVE_APPROVE', f'Leave {leave_id} approved', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_APPROVED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been approved.', '/leaves')
@@ -9658,7 +9756,16 @@ def approve_leave(leave_id):
 def reject_leave(leave_id):
     """Reject a leave request"""
     conn = get_db()
-    row = conn.execute("SELECT emp_id, leave_type, start_date, end_date, status FROM leave_requests WHERE leave_id = ?", [leave_id]).fetchone()
+    # `days`/`session` appended for FR-LEA-09. Releasing the **stored** figure rather
+    # than recomputing is what keeps reject symmetric with apply: a shared function
+    # called twice can legitimately answer differently the second time — a holiday
+    # added between applying and rejecting would otherwise give back a different
+    # number of days than was taken, and the balance would drift with every audit row
+    # still honest. A NULL `days` is a pre-migration row and falls back to the
+    # function.
+    row = conn.execute(
+        "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
+        "FROM leave_requests WHERE leave_id = ?", [leave_id]).fetchone()
     if not row:
         conn.close()
         return jsonify({'error': 'Not found'}), 404
@@ -9669,7 +9776,9 @@ def reject_leave(leave_id):
         "UPDATE leave_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE leave_id = ?",
         [session['emp_id'], datetime.now(), leave_id]
     )
-    leave_policy.release(conn, row[0], row[1], (row[3] - row[2]).days + 1, row[2].year)
+    days = row[5] if row[5] is not None else working_days.working_days(
+        conn, row[0], row[2], row[3])
+    leave_policy.release(conn, row[0], row[1], days, row[2].year)
     conn.close()
     audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_REJECTED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been rejected.', '/leaves')
@@ -9696,7 +9805,8 @@ def cancel_leave(leave_id):
     conn = get_db()
     try:
         row = conn.execute(
-            "SELECT leave_id, emp_id, leave_type, start_date, end_date, status "
+            "SELECT leave_id, emp_id, leave_type, start_date, end_date, status, "
+            "days, session "
             'FROM leave_requests WHERE leave_id = ?', [leave_id],
         ).fetchone()
         if not row:
@@ -9714,7 +9824,9 @@ def cancel_leave(leave_id):
     # leave did this give back" is the question an employee actually has.
     audit_log(
         session['emp_id'], 'LEAVE_CANCEL',
-        f'Leave {leave_id} cancelled ({action} of {leave_policy.days_between(row[3], row[4])} day(s))',
+        f'Leave {leave_id} cancelled ({action} of '
+        f'{row[6] if row[6] is not None else leave_policy.days_between(row[3], row[4])} '
+        f'working day(s))',
         entity='leave_requests', entity_id=leave_id,
         before={'status': row[5]}, after={'status': 'Cancelled', 'ledger': action},
     )

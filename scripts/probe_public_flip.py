@@ -843,17 +843,25 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     # could ever release. This applies, cancels, and reads the ledger back to
     # prove the days came home.
     def leave_cancel():
-        days = 3
+        # FR-LEA-09: `days_requested` counts **working** days, so a fixed `days = 3` is
+        # no longer what a three-calendar-day request costs whenever the range covers a
+        # weekend. The figure the server reported is used throughout, so the flow asserts
+        # the property that matters — cancel gives back exactly what apply took — in any
+        # month, rather than re-deriving a calendar this flow does not own.
         start = (today + timedelta(days=40)).isoformat()
-        end = (today + timedelta(days=40 + days - 1)).isoformat()
+        end = (today + timedelta(days=42)).isoformat()
         applied = _post(cl, tok, "/api/leaves",
                         {"leave_type": "Casual", "start_date": start,
                          "end_date": end, "reason": "public write probe"})
         if applied.status_code != 201:
             return applied.status_code
-        lid = (applied.get_json() or {}).get("leave_id")
+        body = applied.get_json() or {}
+        lid = body.get("leave_id")
         if not lid:
             return 409
+        days = body.get("days_requested")
+        if not days or days > body.get("calendar_days", 0):
+            return 409   # working days can never exceed the calendar span
         # Read *after* the apply, and assert the *delta* rather than a global zero:
         # an earlier flow in this run holds a reservation of its own, so
         # `reserved_days == 0` afterwards would be measuring somebody else's leave.
@@ -1504,10 +1512,19 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     def idem_replay():
         url = "/api/leaves"
+        # Anchored to a **Monday**, not "today + 40". FR-LEA-09 makes a leave
+        # request's cost a count of working days, so a single-day request landing on a
+        # weekend is refused outright with 400 "no working days" — which the probe read
+        # as the replay guard misfiring.
+        #
+        # The extra offset is **42, not 40**: 40 % 7 == 5, so anchoring to a Monday and
+        # then adding 40 lands on a Saturday. `days_until_monday` already exists in
+        # this scope for exactly this reason, and the first attempt here got it wrong.
+        leave_day = (today + timedelta(days=days_until_monday + 42)).isoformat()
         body = {
             "leave_type": "Casual",
-            "start_date": (today + timedelta(days=40)).isoformat(),
-            "end_date": (today + timedelta(days=40)).isoformat(),
+            "start_date": leave_day,
+            "end_date": leave_day,
             "reason": "idempotency probe",
         }
         hdrs = {"X-CSRF-Token": tok_a, "Content-Type": "application/json",

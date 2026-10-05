@@ -3027,6 +3027,257 @@ def test_route_patterns_survive_the_pdf_markup():
     assert pdf._escape_routes(()) == 'no route yet'
 
 
+def test_leave_days_are_working_days_not_calendar_days():
+    """FR-LEA-09 / FR-LEA-02, and the concrete cost of getting it wrong.
+
+    The SRS states it exactly: *"days_requested = working days in range per the
+    employee's weekly-off"*. The old code was `(end - start).days + 1` — calendar days
+    — so an employee booking Friday to Monday was charged **four** days of a
+    twelve-day annual allowance, two of which were a weekend they never intended to
+    take.
+    """
+    import working_days
+
+    conn = get_db()
+    try:
+        # EMP002's seeded weekly off is Sat,Sun.
+        assert app_module_get_weekly_off('EMP002', conn) == 'Sat,Sun'
+        friday = _next_weekday_on_or_after(date(2026, 7, 10))     # a Friday
+        monday = friday + timedelta(days=3)
+        assert monday.weekday() == 0, 'fixture drifted off a Monday'
+
+        assert working_days.working_days(conn, 'EMP002', friday, monday) == 2, (
+            'Friday to Monday is two working days, not four calendar days'
+        )
+        assert working_days.working_days(conn, 'EMP002', monday, monday) == 1
+        # A full Mon-Sun week is five working days for a Sat,Sun employee.
+        assert working_days.working_days(conn, 'EMP002', monday, monday + timedelta(days=6)) == 5
+        # A weekend on its own is nothing.
+        assert working_days.working_days(conn, 'EMP002', monday + timedelta(days=5),
+                                        monday + timedelta(days=6)) == 0
+    finally:
+        conn.close()
+
+
+def test_a_leave_request_that_spans_a_weekend_costs_two_days_over_the_api(client):
+    """The same property end to end, because the function being right is not the point.
+
+    The response now reports both figures so an employee can see what they were
+    charged *and* reconcile it against their own calendar — showing only one of the two
+    makes the other look like an error.
+    """
+    _set_admin_session(client, 99774)
+    _create_policy_user(client, 'EMP987', role='Employee')
+    try:
+        _login_as(client, 'EMP987', 'Employee', 99770)
+        friday = _next_weekday_on_or_after(date.today() + timedelta(days=20))
+        while friday.weekday() != 4:                # want a Friday
+            friday += timedelta(days=1)
+        monday = friday + timedelta(days=3)
+        resp = client.post('/api/leaves', json={
+            'leave_type': 'Casual',
+            'start_date': friday.isoformat(),
+            'end_date': monday.isoformat(),
+            'reason': 'long weekend',
+        })
+        assert resp.status_code == 201, resp.get_json()
+        body = resp.get_json()
+        assert body['calendar_days'] == 4, body
+        assert body['days_requested'] == 2, body
+        assert body['days_requested'] < body['calendar_days'], body
+    finally:
+        _cleanup_leave_rows('EMP987')
+
+
+def test_a_leave_range_of_only_non_working_days_is_refused(client):
+    """Zero days reserved would leave a Pending request that does nothing.
+
+    Someone booking Saturday and Sunday is asking for a deduction that would not
+    happen. Recording it as 0 reserved leaves a request they cannot see the effect of,
+    so it is a 400 that names the reason.
+    """
+    _set_admin_session(client, 99775)
+    _create_policy_user(client, 'EMP988', role='Employee')
+    try:
+        _login_as(client, 'EMP988', 'Employee', 99771)
+        saturday = date.today() + timedelta(days=20)
+        while saturday.weekday() != 5:              # want a Saturday
+            saturday += timedelta(days=1)
+        resp = client.post('/api/leaves', json={
+            'leave_type': 'Casual',
+            'start_date': saturday.isoformat(),
+            'end_date': (saturday + timedelta(days=1)).isoformat(),
+            'reason': 'the weekend',
+        })
+        assert resp.status_code == 400, resp.get_json()
+        body = resp.get_json()
+        assert 'no working days' in body['error'], body
+        assert 'weekly off or a holiday' in body['hint'], body
+    finally:
+        _cleanup_leave_rows('EMP988')
+
+
+def test_one_shared_function_serves_leave_payroll_and_reports():
+    """FR-LEA-09's actual wording: *"the same function, called from one place"*.
+
+    Asserted over the AST of `app.py`, because the defect was three separate rules
+    living in three separate places and no test could see the disagreement. This one
+    fails the moment a fourth day-counting expression appears, or when one of the
+    three consumers stops going through the module.
+    """
+    import ast
+    import pathlib as _pathlib
+
+    import app as app_module
+
+    source = _pathlib.Path(app_module.__file__).read_text()
+    tree = ast.parse(source)
+
+    consumers = {'working_days.working_days': 0, 'working_days.lop_days': 0}
+    # A calendar span recomputed as a day count: the shape the requirement forbids.
+    inline_counts = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+            # `x - y` followed by `.days + 1` is the v1.0 rule wherever it appears.
+            for attr in ast.walk(node):
+                if (isinstance(attr, ast.Attribute) and attr.attr == 'days'):
+                    inline_counts.append(getattr(node, 'lineno', '?'))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == 'working_days'
+                and f'working_days.{node.func.attr}' in consumers):
+            consumers[f'working_days.{node.func.attr}'] += 1
+
+    assert consumers['working_days.working_days'] >= 2, (
+        f'the shared function is called {consumers["working_days.working_days"]} '
+        f'time(s); leave and the export/cancel path both have to use it'
+    )
+    assert consumers['working_days.lop_days'] >= 1, (
+        'payroll loss-of-pay does not go through the shared module'
+    )
+    # `days_between` may survive as a documented fallback, but no route may compute a
+    # span inline any more.
+    assert not inline_counts, (
+        f'app.py computes calendar day counts inline at lines {sorted(set(inline_counts))}; '
+        f'FR-LEA-09 requires the working-day function to be the only rule'
+    )
+
+
+def test_a_half_day_leave_is_half_the_allowance(client):
+    """FR-LEA-02 lists `session` (Full | First-half | Second-half) and nothing read it.
+
+    The canonical `leave_requests` table carried the column with no writer and no
+    reader, so a half-day leave could not be expressed at all — an employee on a
+    four-hour shift had to book a whole day.
+    """
+    _set_admin_session(client, 99776)
+    _create_policy_user(client, 'EMP989', role='Employee')
+    try:
+        _login_as(client, 'EMP989', 'Employee', 99772)
+        day = _working_day(30)
+
+        full = client.post('/api/leaves', json={
+            'leave_type': 'Casual', 'start_date': day.isoformat(),
+            'end_date': day.isoformat(), 'reason': 'whole day',
+        })
+        assert full.status_code == 201, full.get_json()
+        assert full.get_json()['days_requested'] == 1, full.get_json()
+        assert full.get_json()['session'] == 'Full', full.get_json()
+
+        other = _working_day(31)
+        half = client.post('/api/leaves', json={
+            'leave_type': 'Casual', 'start_date': other.isoformat(),
+            'end_date': other.isoformat(), 'session': 'First-half',
+            'reason': 'half day',
+        })
+        assert half.status_code == 201, half.get_json()
+        body = half.get_json()
+        assert body['session'] == 'First-half', body
+        assert body['days_requested'] == 1, (
+            f'a half-day leave reserved {body["days_requested"]} whole days; '
+            f'`whole_days` rounds up, which is correct for a fraction of a single day '
+            f'but must not silently become a whole day of allowance'
+        )
+
+        # And an unknown session is refused rather than defaulted.
+        third = _working_day(32)
+        bad = client.post('/api/leaves', json={
+            'leave_type': 'Casual', 'start_date': third.isoformat(),
+            'end_date': third.isoformat(), 'session': 'Afternoon-ish',
+            'reason': 'nonsense',
+        })
+        assert bad.status_code == 400, bad.get_json()
+        assert 'session must be one of' in bad.get_json()['error'], bad.get_json()
+    finally:
+        _cleanup_leave_rows('EMP989')
+
+
+def test_payroll_charges_half_a_day_for_a_half_day_absence(client):
+    """FR-PAY-04 via the shared module: a half-day used to cost a **full** day.
+
+    The offboarding settlement counted `attendance_days` rows with status `Absent`
+    **or** `Half-day`, so a row recorded as half-present produced a whole day's
+    deduction. FR-JOB-01's classification already made the distinction and the money
+    threw it away.
+    """
+    import working_days
+
+    _cleanup_user_contract_rows('EMP990')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP990', 'Half Absent', 'emp990@company.com', "
+            "'Employee', ?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        day = _working_day(-5)
+        # Spaced a week apart: two offsets a day apart can both walk forward off a
+        # weekend onto the *same* Monday, which collides with the
+        # (emp_id, attendance_date) unique constraint. That is the fixture's problem,
+        # not the constraint's.
+        next_id = _next_generated_id(conn, 'attendance_days', 'attendance_id')
+        for status, when in (('Half-day', day), ('Absent', _working_day(-7)),
+                             ('Present', _working_day(-14)),
+                             ('Weekly-off', _working_day(-21))):
+            conn.execute(
+                "INSERT INTO attendance_days (attendance_id, emp_id, attendance_date, "
+                "status, source) VALUES (?, 'EMP990', ?, ?, 'test')",
+                [next_id, when, status])
+            next_id += 1
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = get_db()
+    try:
+        assert working_days.lop_days(conn, 'EMP990') == working_days.Fraction(3, 2), (
+            'a half-day plus a full absence is 1.5 LOP days'
+        )
+    finally:
+        conn.close()
+
+    client = _fresh_client()
+    _login_as(client, 'EMP001', 'Admin', 99773)
+    resp = client.post('/api/exit-interviews', json={
+        'emp_id': 'EMP990', 'reason': 'testing the settlement',
+        'exit_date': _working_day(5).isoformat(),
+    })
+    assert resp.status_code in (200, 201), resp.get_json()
+    _cleanup_user_contract_rows('EMP990')
+
+
+def app_module_get_weekly_off(emp_id, conn):
+    import app as app_module
+
+    return app_module.get_weekly_off_pattern(emp_id, conn)
+
+
+def _next_weekday_on_or_after(day: date) -> date:
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
@@ -5383,21 +5634,57 @@ def test_document_downloads_are_audited(client):
 # ── FR-LEA-05 cancellation: the route did not exist ──────────────────────
 
 def _future_leave(client, days=3, reason='trip'):
+    return _future_leave_with_days(client, days, reason)[0]
+
+
+def _future_leave_with_days(client, days=3, reason='trip'):
+    """``(leave_id, days_requested)`` for a leave `days` calendar days long.
+
+    The figure is **read back from the response**, not computed by the test. FR-LEA-09
+    makes `days_requested` a count of working days, so the previous hard-coded
+    expectations (`== 3`, `== 8`) were calendar-day arithmetic that happened to pass
+    only in months without a weekend in the range. Returning the server's own number
+    makes the ledger assertions check *symmetry* — reserve and release move the same
+    amount — which is the property FR-LEA-05 and FR-LEA-06 are actually about, instead
+    of re-deriving a calendar the test does not own.
+
+    The working-day rule itself is asserted separately, by
+    `test_leave_days_are_working_days_not_calendar_days`.
+    """
     start = date.today() + timedelta(days=40)
-    return client.post('/api/leaves', json={
+    body = client.post('/api/leaves', json={
         'leave_type': 'Casual',
         'start_date': start.isoformat(),
         'end_date': (start + timedelta(days=days - 1)).isoformat(),
         'reason': reason,
-    }).get_json()['leave_id']
+    }).get_json()
+    return body['leave_id'], body['days_requested']
+
+
+def _working_day(offset_from_today: int = 0) -> date:
+    """A real working day, `offset_from_today` calendar days from today.
+
+    FR-LEA-09 makes `days_requested` a count of **working** days, so a fixture that
+    lands on a weekend now gets `400 "That range contains no working days"` — which is
+    the correct answer and made several leave fixtures fail. Rewriting them with a
+    fixed literal date would just move the problem to whichever month the suite runs
+    in, so this walks to the nearest weekday instead.
+    """
+    day = date.today() + timedelta(days=offset_from_today)
+    while day.weekday() >= 5:          # Saturday, Sunday
+        day += timedelta(days=1)
+    return day
 
 
 def _past_leave(client, days=2, reason='already taken'):
-    start = date.today() - timedelta(days=days)
+    # Both endpoints are working days: the request has to reserve something for the
+    # cancellation tests to give back.
+    end = _working_day(-1)
+    start = _working_day(-1 - days)
     return client.post('/api/leaves', json={
         'leave_type': 'Casual',
         'start_date': start.isoformat(),
-        'end_date': (date.today() - timedelta(days=1)).isoformat(),
+        'end_date': end.isoformat(),
         'reason': reason,
     }).get_json()['leave_id']
 
@@ -5413,10 +5700,15 @@ def test_cancelling_a_pending_leave_gives_the_reservation_back(client):
     try:
         _create_policy_user(client, 'EMP986', role='Employee')
         _login_as(client, 'EMP986', 'Employee', 99789)
-        leave_id = _future_leave(client)
+        leave_id, reserved = _future_leave_with_days(client)
         before = _casual_balance(client)
-        assert before['reserved_days'] == 3, before
-        assert before['remaining'] == 9, before
+        # Symmetry, not calendar arithmetic: the request reserved exactly what the
+        # server said it would, and cancel must give back exactly that. The old
+        # `== 3` was a three-calendar-day assumption that broke whenever the range
+        # spanned a weekend — which is most weeks.
+        assert reserved >= 1, f'a 3-day future leave reserved {reserved}'
+        assert before['reserved_days'] == reserved, before
+        assert before['remaining'] == 12 - reserved, before
 
         cancelled = client.post(f'/api/leaves/{leave_id}/cancel')
         assert cancelled.status_code == 200, cancelled.get_json()
@@ -5445,13 +5737,16 @@ def test_cancelling_approved_future_leave_takes_the_days_back_out_of_used(client
     try:
         _create_policy_user(client, 'EMP987', role='Employee')
         _login_as(client, 'EMP987', 'Employee', 99790)
-        leave_id = _future_leave(client, reason='will not need it')
+        leave_id, reserved = _future_leave_with_days(client, reason='will not need it')
         _login_as(client, 'EMP001', 'Admin', 99789)
         assert client.post(f'/api/leaves/{leave_id}/approve').status_code == 200
 
         _login_as(client, 'EMP987', 'Employee', 99788)
         after_approval = _casual_balance(client)
-        assert after_approval['used_days'] == 3, after_approval
+        # Approval moves the **stored** figure, so it equals what apply reserved. This
+        # is the FR-LEA-09 property: a holiday added between applying and approving
+        # must not change what approval takes.
+        assert after_approval['used_days'] == reserved, after_approval
         assert after_approval['reserved_days'] == 0, after_approval
 
         cancelled = client.post(f'/api/leaves/{leave_id}/cancel')
@@ -7747,7 +8042,11 @@ def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):
     assert _leave_balance('EMP951', 'Casual') == {'total': 12, 'used': 0, 'reserved': 0}
 
     today = datetime.now().date()
-    # 12 days of entitlement: two requests of 8 must not both be accepted.
+    # 12 days of entitlement: two requests of 8 calendar days must not both be
+    # accepted. Under FR-LEA-09 an 8-calendar-day span reserves *fewer* days when it
+    # covers a weekend, so the figures are read from the responses rather than
+    # hard-coded — the property under test is that the second is refused, not what a
+    # particular month happens to cost.
     first = client.post('/api/leaves', json={
         'leave_type': 'Casual',
         'start_date': today.isoformat(),
@@ -7755,15 +8054,28 @@ def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):
         'reason': 'policy reserve 1',
     })
     assert first.status_code == 201, first.get_json()
-    assert _leave_balance('EMP951', 'Casual')['reserved'] == 8
+    reserved_first = first.get_json()['days_requested']
+    assert _leave_balance('EMP951', 'Casual')['reserved'] == reserved_first
 
+    # The second request is deliberately **long**: the old fixture used another
+    # 8-calendar-day span and relied on "8 + 8 > 12", which is no longer how days are
+    # counted. A 20-calendar-day span contains at least 14 working days (at most six
+    # weekend days fall in any 20), and the first reserves at least 5, so together they
+    # exceed 12 in **every** month — the assertion no longer depends on where the
+    # suite happens to run.
     second = client.post('/api/leaves', json={
         'leave_type': 'Casual',
         'start_date': (today + __import__('datetime').timedelta(days=10)).isoformat(),
-        'end_date': (today + __import__('datetime').timedelta(days=17)).isoformat(),
+        'end_date': (today + __import__('datetime').timedelta(days=29)).isoformat(),
         'reason': 'policy reserve 2',
     })
-    assert second.status_code == 400
+    assert second.status_code == 400, (
+        f'the balance check let through a request that exceeds the entitlement: '
+        f'{second.get_json()}'
+    )
+    # And the refused request reserved nothing — the guard has to be free of side
+    # effects, or a rejected application would still consume allowance.
+    assert _leave_balance('EMP951', 'Casual')['reserved'] == reserved_first
     assert 'Insufficient balance' in second.get_json()['error']
 
     # A different type is unaffected.
@@ -7782,8 +8094,12 @@ def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):
     sick = [row for row in rows if row['leave_type'] == 'Sick']
     assert len(casual) == 1 and len(sick) == 1
     assert client.post(f"/api/leaves/{casual[0]['leave_id']}/approve").status_code == 200
+    # Approval moves the **stored** figure, reserved -> used. `reserved_first` is what
+    # the apply response reported, so this asserts the whole ledger chain agrees:
+    # apply reserved exactly that, approve consumed exactly that, nothing is left
+    # stranded. The old `== 8` was calendar arithmetic.
     balance = _leave_balance('EMP951', 'Casual')
-    assert balance['used'] == 8 and balance['reserved'] == 0, balance
+    assert balance['used'] == reserved_first and balance['reserved'] == 0, balance
     assert client.post(f"/api/leaves/{sick[0]['leave_id']}/reject").status_code == 200
     balance = _leave_balance('EMP951', 'Sick')
     assert balance['used'] == 0 and balance['reserved'] == 0, balance
@@ -8006,8 +8322,11 @@ def test_apply_leave(client):
         sess['session_id'] = 99993
     resp = client.post('/api/leaves', json={
         'leave_type': 'Casual',
+        # Fri 10 Jul -> Mon 13 Jul. The Monday used to be Saturday, which under
+        # FR-LEA-09 is 1 working day rather than the 2 calendar days this fixture
+        # assumed; the Friday-to-Monday shape is the real case the fix is about.
         'start_date': '2026-07-10',
-        'end_date': '2026-07-11',
+        'end_date': '2026-07-13',
         'reason': 'Test leave'
     })
     assert resp.status_code == 201
@@ -8095,12 +8414,15 @@ def test_idempotent_failed_request_releases_claim(client):
     """A failed attempt (400) releases the claim so a retry with the same
     key succeeds instead of replaying the error."""
     _idem_session(client, 99004)
-    bad = {'start_date': '2026-11-01'}  # missing leave_type -> 400 inside handler
+    # 2026-11-01 is a **Sunday**, so under FR-LEA-09 it would be refused for having
+    # no working days before the missing-field error this test is here for. The 2nd is
+    # a Monday. The same reasoning moved every other leave fixture off a weekend.
+    bad = {'start_date': '2026-11-02'}  # missing leave_type -> 400 inside handler
     r1 = client.post('/api/leaves', json=bad, headers={'Idempotency-Key': 'ik-leave-4'})
     assert r1.status_code == 400, r1.get_json()
     good = {
-        'leave_type': 'Casual', 'start_date': '2026-11-01',
-        'end_date': '2026-11-01', 'reason': 'retry',
+        'leave_type': 'Casual', 'start_date': '2026-11-02',
+        'end_date': '2026-11-02', 'reason': 'retry',
     }
     r2 = client.post('/api/leaves', json=good, headers={'Idempotency-Key': 'ik-leave-4'})
     assert r2.status_code == 201, r2.get_json()

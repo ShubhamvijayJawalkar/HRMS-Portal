@@ -389,10 +389,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     # ── FR-LEA: leave ───────────────────────────────────────────────────
     'FR-LEA-01': ('M', 'R', 'PARTIAL', ('/api/leaves',),
                   'Filters and the scope split ship. Missing: delegated-manager visibility.'),
-    'FR-LEA-02': ('M', 'C', 'PARTIAL', ('/api/leaves',),
-                  'Dates are swapped if reversed and the session is recorded. Working-day '
-                  'deduction ignores holidays — FR-LEA-09 asks for one shared function '
-                  'and there is none.'),
+    'FR-LEA-02': ('M', 'C', 'IMPLEMENTED', ('/api/leaves',),
+                  'Dates parsed and swapped if reversed, and days_requested is now the '
+                  'working-day count the SRS names (days_requested = working days in range '
+                  'per the employees weekly-off), shared with payroll and reports per '
+                  'FR-LEA-09 rather than counted in calendar days as it was. The `session` '
+                  'field (Full | First-half | Second-half) is IMPLEMENTED: the column '
+                  'existed on the canonical schema with no writer and no reader, so a '
+                  'half-day leave could not be expressed at all and an employee on a '
+                  'four-hour shift had to book a whole day. An unknown session is a 400 listing '
+                  'the three values rather than being defaulted. The apply response reports '
+                  'days_requested, calendar_days and session, so an employee can see what '
+                  'they were charged and reconcile it against their own calendar.'),
     'FR-LEA-03': ('M', 'N', 'PARTIAL', ('/api/leaves/export',),
                   'Excel export ships, synchronously. The async variant for large ranges '
                   'is not implemented.'),
@@ -423,12 +431,41 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'approval_delegations exists in the canonical schema with a '
                    'no-overlap exclusion constraint, but no route reads or writes it. '
                    'A manager going on leave has no way to delegate.'),
-    'FR-LEA-09': ('M', 'C', 'NOT_STARTED', (),
-                  'There is no single working-day/holiday-deduction function. Leave day '
-                  'counting, payroll LOP and the reports each approximate it '
-                  'differently, which is the inconsistency the requirement exists to remove.'),
-
-    # ── FR-NOT: notifications ───────────────────────────────────────────
+    'FR-LEA-09': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/leaves', '/api/leaves/<int:leave_id>/approve',
+                   '/api/leaves/<int:leave_id>/reject',
+                   '/api/leaves/<int:leave_id>/cancel', '/api/leaves/export',
+                   '/api/exit-interviews'),
+                  'One function, called from one place (working_days.py), for leave days, '
+                  'payroll loss-of-pay and the reports figure - the requirement as worded. '
+                  'FOUR rules were live and they disagreed. Leave counted '
+                  '(end - start).days + 1, so Friday-to-Monday cost four days of a '
+                  'twelve-day allowance, two of them a weekend. Payroll counted '
+                  'attendance_days rows with status Absent OR Half-day, so an employee marked '
+                  'half-present lost a FULL day of pay - FR-JOB-01 classification made the '
+                  'distinction and the money threw it away. Reports had no working-day figure '
+                  'at all, reporting days-with-a-login from user_sessions, which is a fifth '
+                  'rule answering a different question. leave_policy.days_between was a '
+                  'sixth copy of the calendar rule and the dangerous one: apply reserved '
+                  'working days while reject and cancel gave back calendar days, so every '
+                  'REJECTED leave silently INCREASED the balance. All six now route through '
+                  'the module; a test walks the AST of app.py and fails if an inline '
+                  'day-count expression or a new module call site appears. Working days are '
+                  'PER EMPLOYEE via get_weekly_off_pattern, because this application has no '
+                  'company-wide Mon-Fri week and never did (FR-ATT-17) - a night-shift '
+                  'operator is not off on Saturday. Holidays are deducted through '
+                  '_is_attendance_holiday, so National applies to everyone and Optional only to '
+                  'an approved opt-in (FR-HOL-03). A range with no working days is refused '
+                  'with a 400 naming the reason rather than recorded as a Pending request '
+                  'reserving zero. The figure is now STORED on the request (Alembic 0010, '
+                  'nullable and deliberately unbackfilled, because a request approved under '
+                  'the old rule has no honest value to reconstruct), so approve and cancel '
+                  'move exactly what apply reserved - a holiday added in between would '
+                  'otherwise make approve release a different number of days with every audit '
+                  'row still honest, which is the FR-LEA-06 ledger defect reappearing one '
+                  'layer down. Behaviour change recorded: leave and payroll now count working '
+                  'days, so existing balances shift by however many weekends a request '
+                  'spanned.'),
     'FR-NOT-01': ('M', 'C', 'IMPLEMENTED', ('/api/notifications',
                                                '/api/send-notification-email'),
                   'Last-50 list with an unread count, and delivery through the '

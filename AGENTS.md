@@ -2330,3 +2330,83 @@ work, and listing it would put a finished item on a to-do list.
 Three new tests keep it honest: the section is generated and agrees with the matrix,
 every open requirement extracts a readable gap that names a limitation, and route
 patterns survive the markup. Unit **293 passed / 2 skipped**.
+
+## FR-LEA-09: one working-day function, called from one place
+The SRS states the defect and the fix in the same sentence: the working-day /
+holiday-deduction function used for leave days, payroll loss-of-pay and the reports'
+"working days" figure **is the same function, called from one place** — and v1.0 used
+three different rules, including a separate Mon–Fri helper.
+
+**Six rules were live, not three, and they disagreed.**
+
+- **Leave** counted `(end - start).days + 1`. Booking Friday to Monday cost **four**
+  days of a twelve-day annual allowance, two of which were a weekend.
+- **Payroll LOP** counted `attendance_days` rows with status `Absent` **or
+  `Half-day`** — so an employee marked half-present lost a **full** day's pay.
+  FR-JOB-01's classification had already made that distinction and the money threw it
+  away.
+- **Reports** had no working-day figure at all; it reported days-with-a-login from
+  `user_sessions`. A fifth rule, answering a different question.
+- **`leave_policy.days_between`** was a **sixth** copy of the calendar rule, and the
+  dangerous one: apply reserved working days while reject and cancel gave back
+  calendar days — so **every rejected leave silently increased the balance**.
+
+**Working days are per employee**, via `get_weekly_off_pattern`, because this
+application has no company-wide Mon–Fri week and never did (FR-ATT-17). A night-shift
+operator is not off on Saturday, so the v1.0 helper was wrong for them specifically.
+Holidays go through `_is_attendance_holiday`, so National applies to everyone and
+Optional only to an approved opt-in (FR-HOL-03).
+
+**A range with no working days is refused** with a 400 naming the reason. Recording it
+as a Pending request reserving zero leaves a request the employee cannot see the
+effect of.
+
+**The figure is now stored** on the request (Alembic `0010_leave_days_stored`,
+nullable and deliberately unbackfilled — a request approved under the old rule has no
+honest value to reconstruct, and backfilling with today's calendar would silently
+restate history). So approve and cancel move **exactly** what apply reserved. Without
+it: a holiday added between applying and approving makes approve release a different
+number of days, with every audit row still honest — which is the FR-LEA-06 ledger
+defect reappearing one layer down.
+
+**FR-LEA-02 also gained `session` (Full | First-half | Second-half)**, which the SRS
+lists in the create payload. The canonical column existed with **no writer and no
+reader**, so a half-day leave could not be expressed at all and an employee on a
+four-hour shift had to book a whole day.
+
+## Six bugs of my own, found while implementing it
+
+Recorded rather than quietly fixed, because each is a class this project keeps hitting:
+
+1. **`reject_leave` had a 5-column `SELECT`** while the new code read index 6 — an
+   `IndexError` waiting for the first rejection.
+2. **`leave_policy.cancel` read `request_row[7]` for `days`** when the route's column
+   order puts `days` at 6 and `session` at 7, passing the string `'Full'` into an
+   INTEGER parameter. The error surfaced two frames from the cause as *"invalid input
+   syntax for type integer: Full"*. The index now has a comment naming the column
+   order.
+3. **The export route closes its connection in a `finally`** *before* the row
+   comprehension, so a per-row function call ran on a closed cursor. Fixed by
+   reporting the **stored** figure — which also guarantees the sheet agrees with the
+   ledger instead of recomputing it.
+4. **Three test fixtures and two probe flows used dates landing on weekends** and were
+   correctly refused. The probe's Monday anchor was additionally defeated by `+40`,
+   because **40 % 7 is 5** — anchoring to Monday and then adding 40 lands on a
+   Saturday. `+42` keeps the alignment.
+5. **Two hardcoded calendar-day expectations (`== 3`, `== 8`)** now read the figure
+   from the response. A shared function called twice can legitimately answer
+   differently the second time, so the ledger assertions should check **symmetry** —
+   reserve and release move the same amount — rather than re-derive a calendar the test
+   does not own.
+6. **A `_working_day` helper collided with itself**: offsets one day apart both walk
+   forward off a weekend onto the *same* Monday, violating
+   `attendance_days (emp_id, attendance_date)`. That is the fixture's problem, not the
+   constraint's.
+
+**Behaviour change, recorded:** leave and payroll now count working days, so existing
+balances shift by however many weekends each request spanned. That is the correct
+reading of the SRS and it is not backwards-compatible.
+
+Unit **299 passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET + 57/57
+write**, probe run twice for idempotency, preflight and CC-01 green at head
+`0010_leave_days_stored`.

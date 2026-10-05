@@ -286,9 +286,25 @@ class LeaveError(ValueError):
         self.status = status
 
 
-def days_between(start, end) -> int:
-    """The day count every leave path uses, so a reversal is symmetrical."""
-    return (end - start).days + 1
+def days_between(start, end, conn=None, emp_id=None) -> int:
+    """The day count every leave path uses, so a reversal is symmetrical.
+
+    **This was the fourth implementation of "how many days"** and the one FR-LEA-09
+    names by implication: it returned ``(end - start).days + 1``, calendar days,
+    while FR-LEA-02 charged working days. So a Friday-to-Monday request reserved two
+    days and a rejection gave back four — the balance drifted *upward* on every
+    rejected leave, silently, and cancel had the same asymmetry.
+
+    It now **delegates** to the one shared function. With a ``conn`` it is the real
+    working-day rule; without one it stays a calendar count, which is only reached
+    from a log line and from pre-`days` rows, and the docstring says so rather than
+    leaving the two indistinguishable.
+    """
+    if conn is None or emp_id is None:
+        return (end - start).days + 1
+    import working_days
+
+    return working_days.working_days(conn, emp_id, start, end)
 
 
 def check_cancel(actor_emp_id, request_row, is_admin, as_of=None) -> str:
@@ -301,7 +317,11 @@ def check_cancel(actor_emp_id, request_row, is_admin, as_of=None) -> str:
     Raises ``LeaveError``: 403 for somebody else's request, 409 for a state or a
     start date that cannot be cancelled.
     """
-    _leave_id, emp_id, _leave_type, start_date, _end_date, status = request_row
+    # 6 columns for a pre-FR-LEA-09 row, 8 for a current one (`days`, `session`
+    # appended). Unpacked by position rather than by a fixed arity so a request written
+    # before the migration and one written after it both work — which is the whole
+    # reason the columns are nullable.
+    _leave_id, emp_id, _leave_type, start_date, _end_date, status = request_row[:6]
     if actor_emp_id != emp_id and not is_admin:
         raise LeaveError('You can only cancel your own leave requests', 403)
     if status not in CANCELLABLE_STATUSES:
@@ -324,8 +344,22 @@ def cancel(conn, actor_emp_id, request_row, is_admin, as_of=None) -> str:
     used, and that is decided and performed in one function.
     """
     action = check_cancel(actor_emp_id, request_row, is_admin, as_of)
-    _leave_id, emp_id, leave_type, start_date, end_date, status = request_row
-    days = days_between(start_date, end_date)
+    _leave_id, emp_id, leave_type, start_date, end_date, status = request_row[:6]
+    # The **stored** figure when the route has one, because a shared function called
+    # twice can legitimately answer differently the second time: a holiday added
+    # between applying and cancelling would otherwise return a different number of
+    # days than was taken.
+    #
+    # Index 6, not 7: the route's SELECT is
+    # `(leave_id, emp_id, leave_type, start_date, end_date, status, days, session)`,
+    # so `days` is the 7th element and `session` the 8th. Reading 7 passed the string
+    # `'Full'` into an INTEGER parameter — an error that surfaced as
+    # "invalid input syntax for type integer: Full" inside the balance UPDATE, two
+    # frames away from the route column list that caused it. Named here so the next
+    # reader does not have to recount.
+    stored = request_row[6] if len(request_row) > 6 else None
+    days = stored if stored is not None else days_between(start_date, end_date,
+                                                           conn=conn, emp_id=emp_id)
     year = start_date.year
     if action == 'release':
         release(conn, emp_id, leave_type, days, year)
