@@ -2528,3 +2528,72 @@ thread is *a failure that looks like evidence*.
 
 Unit **310 passed / 2 skipped**, browser **23/23**, v2.0 gates **113/113 GET + 59/59
 write**, probe run twice with zero leaked fixtures.
+
+## FR-ATT-09: one shift-length rule, capped and flagged
+Asked to check whether the breaks module was complete. It was not: **9 of 17 FR-ATT
+rows `IMPLEMENTED`, 7 `PARTIAL`, 1 retired**. Starting with FR-ATT-09 (High), which
+turned out to be the **second instance of the FR-LEA-09 defect class** — closed three
+commits earlier.
+
+The SRS asks for `shift_hours = last_logout − first_login` (**not** the sum of
+sessions) when both exist, else `now − first_login` for an open shift, **capped at the
+scheduled shift length +25%** and **flagged `estimated: true`**. Both the cap and the
+flag were missing.
+
+- **The miss was that one of two implementations had the rule and the other did not.**
+  `_attendance_worked_hours` already implemented the cap; `/api/user/shift-summary` did
+  not. So an employee who forgot to log out saw a figure that grew without limit on
+  their own dashboard while payroll was credited the capped one — a support call every
+  time, and an employee whose screen disagrees with their payslip has no reason to
+  trust either. `shift_hours.py` is now the single rule called from both, with a test
+  walking the AST of `app.py` so a third implementation cannot appear.
+- **The cap is on the open-shift branch only.** The SRS attaches it there — *to avoid a
+  forgotten-logout skewing the figure* — and a closed shift is real recorded data.
+  Capping it would under-credit genuine overtime, which is a payroll decision rather
+  than a data-quality one. The payroll credit ceiling stays *on top* of the shared rule
+  for the same reason.
+- **Four judgement calls, all recorded in the matrix:**
+  - `estimated` is reported for **any** open shift, not only a capped one. The SRS says
+    "in that case", which reads most directly as the capped case; reporting the superset
+    is strictly more informative and serves the stated intent, since an open shift's
+    end is by definition not yet observed.
+  - `capped` is reported separately, so a consumer can tell "still running" from
+    "clamped down" without inferring one from the other.
+  - `scheduled_hours` and `shift_configured` are reported because **an employee with no
+    configured shift resolves to midnight-to-midnight — a 24-hour span** — so the +25%
+    cap would be **30 hours** and the skew this requirement prevents would arrive by a
+    different route. The module's documented 8-hour default applies instead, and
+    `shift_configured: false` says so rather than leaving a 30-hour figure to be
+    explained. The `_get_shift_*` helpers are deliberately left alone: attendance
+    finalisation uses the same values as its Present/Half-day thresholds, and what
+    "no shift" means there is FR-JOB-01's decision.
+  - **A night shift whose end precedes its start has its negative span rolled forward a
+    day**, not clamped to zero — which would make every overnight shift look
+    instantaneous and cap it at *zero* hours, crediting an employee on nights nothing.
+
+## Two of my own bugs, both found by tests written to be time-independent
+
+- **A textual check matched my own comment.** `assert 'now - first_login' not in src`
+  matched the sentence in `app.py` *describing* the defect it removed. Replaced with an
+  AST check. A source-text search in a codebase that documents its own bugs will always
+  find them in the prose.
+- **A literal assertion made a route test depend on the wall clock.** Asserting
+  `shift_hours == 10.0` failed early in the morning, because the fixture session is
+  dated *today* and the elapsed figure was still under the cap. It now asserts the
+  **invariant** the rule guarantees — an open shift never exceeds scheduled + 25% — with
+  the arithmetic pinned separately by the module's own tests.
+
+## One unreproduced flake, recorded rather than hidden
+
+`test_defaults_are_true_and_a_notification_is_delivered_by_default` failed **once** in a
+full run and passed in 2 subsequent full runs and 3 in isolation. Not evidence of a
+regression, and not chased further — but recorded because "it passed on a rerun" is not
+the same as "it cannot happen".
+
+Matrix **68 IMPLEMENTED / 31 PARTIAL / 4 NOT_STARTED / 1 RETIRED**. Unit **314 passed /
+2 skipped**, browser **23/23**, v2.0 gates **113/113 GET + 59/59 write**, probe run
+twice.
+
+**Breaks remaining after this slice:** FR-ATT-06 (High, needs FR-LEA-08a), FR-ATT-05
+(High, concurrency index), FR-ATT-01 (M, break-type CRUD), FR-ATT-02 (M, one
+transaction on the compat schema), FR-ATT-15 (M, cache), FR-ATT-07 (L, one projection).

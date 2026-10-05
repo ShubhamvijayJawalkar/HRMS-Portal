@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 67 | 64% |
-| `PARTIAL` | 32 | 31% |
+| `IMPLEMENTED` | 68 | 65% |
+| `PARTIAL` | 31 | 30% |
 | `NOT_STARTED` | 4 | 4% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (67)
+### IMPLEMENTED (68)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -42,6 +42,7 @@ rather than quietly invalidating this document.
 | `FR-ATT-03` | M | R | `/api/end-break/<int:break_id>` | Ownership checked against the session employee, duration computed from the timestamps, action audited. The audit half was missing while this row claimed it: a break is the origin of an attendance record that feeds the payroll LOP calculation, so closing one wrote no record of who closed it or when. It does now, with before/after. start_break audits too, including the auto-end of a previous break. |
 | `FR-ATT-04` | M | R | `/api/user-breaks` | Own breaks only, UNIONed with any Active break from another date so a forgotten break-end is still visible. |
 | `FR-ATT-08` | M | R | `/api/login-hours` | First login to last logout, scoped to a shift date. |
+| `FR-ATT-09` | M | C | `/api/user/shift-summary` | shift_hours = last_logout - first_login (NOT the sum of sessions) when both exist, else now - first_login for an open shift, CAPPED at the scheduled shift length +25% and flagged estimated:true. The cap and the flag were both missing, and the miss was the second instance of the FR-LEA-09 defect class: _attendance_worked_hours already implemented the cap and /api/user/shift-summary did not, so an employee who forgot to log out saw a figure that grew without limit on their own dashboard while payroll was credited the capped one - a support call every time, and an employee whose screen disagrees with their payslip has no reason to trust either. shift_hours.py is now the single rule, called from both, and a test walks the AST of app.py so a third implementation cannot appear. The cap is on the OPEN-SHIFT branch only: the SRS attaches it there (to avoid a forgotten-logout skewing the figure) and a closed shift is real recorded data - capping it would under-credit genuine overtime, which is a payroll decision rather than a data-quality one. The payroll credit ceiling stays on top of the shared rule for the same reason. Reported: estimated (any open shift, since its end is by definition not yet observed - a superset of the SRS wording that serves its intent), capped (the 25% allowance actually bound, i.e. a logout was probably forgotten), scheduled_hours, and shift_configured. Those last two exist because an employee with NO configured shift resolves to midnight-to-midnight = a 24h scheduled span, so the +25% cap would be 30 hours and the skew this requirement prevents would arrive by another route; the module s documented 8h default applies instead and shift_configured says so. A night shift whose end is earlier than its start has its negative span rolled forward a day rather than clamped to zero, which would otherwise make every overnight shift look instantaneous and cap it at zero hours. |
 | `FR-ATT-11` | H | C | `/api/user/calendar` | Sessions, breaks, day-expanded leaves, holidays and the finalised FR-JOB-01 status per day. |
 | `FR-ATT-12` | L | R | `/api/live-monitoring` | Active-break monitoring. |
 | `FR-ATT-13` | L | R | `/api/break-summary` | Per-employee counts and minutes. |
@@ -102,7 +103,7 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. Create and delete are both audited, because policy.PII_FIELDS classifies dependents as PII - a third party with no statutory retention of their own - and a silent erase of one was the gap the audit pass found. The create also used a bare INSERT INTO dependents VALUES (...), now a named column list. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (32)
+### PARTIAL (31)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -113,7 +114,6 @@ rather than quietly invalidating this document.
 | `FR-ATT-05` | H | C | `/api/break-approvals` | Lunch only, one Pending per employee enforced in the handler. The partial unique index that would enforce it under concurrency exists only in the v2.0 schema. |
 | `FR-ATT-06` | H | C | `/api/break-approvals/<int:aid>/approve`<br>`/api/break-approvals/<int:aid>/reject` | Manager/HR/Admin may approve, the update is conditional (CC-04), the action is audited and the employee is notified. Every one of those four clauses was false while this row asserted them. The gate was @admin_required, so a Team Leader could not approve their own report - the third instance of that bug here after FR-EXP-03 and FR-PERF-01 - and the requirement was unreachable for the role the SRS names. The approve write was unconditional, so two approvers both won. Nothing was audited, and the employee was never notified. reject additionally answered 200 {"message": "Break rejected"} whether or not it rejected anything, the same always-200 lie the regularization routes had. All fixed, reusing the reporting_line_required gate from FR-PERF-01. Delegated approvers (FR-LEA-08a) are still not consulted, which is why this stays PARTIAL. |
 | `FR-ATT-07` | L | R | `/api/break-types`<br>`/api/user-breaks` | Minutes used and the approval flag are exposed. The per-type summary is assembled by the client from two calls rather than served as one projection. |
-| `FR-ATT-09` | H | C | `/api/user/shift-summary` | last_logout - first_login, productive_hours and efficiency all ship. The 25% cap on an open shift and the estimated flag are missing, so a forgotten logout inflates the figure. |
 | `FR-ATT-15` | M | C | `/api/dashboard-stats` | The five keys are stable. They are recomputed per request, with no Redis 15 s cache and no worker refresh, so the cost grows with the employee count. |
 | `FR-AUD-01` | H | C | `/api/audit-log` | actor/action/entity/entity_id/before/after/ip/request_id/created_at, written from a scheduler thread without raising (which it used to, and its own except swallowed it, so those rows never existed), and the log is never purged by the application. Every mutating handler now writes an audit row **except one deliberate exemption**, so the SRS "every mutating action" holds in substance; the row stays PARTIAL only because the SRS also asks for the row to be written *via the transactional outbox* (CC-09) and audit_log() writes straight to the table. The exemption is mark_notifications_read - a read receipt on the caller own notifications, where a row per click would be noise that makes the real entries harder to find. Getting here took three grouped passes and fixed a great deal on the way: regularization approve/reject returned 200 whatever happened (including {"message": "Rejected"} for a request still Approved) and audited nothing; document *deletion* wrote no row while document *download* did, which is backwards since deleting removes the row and the file; deleting a dependent erased policy-classified PII with no trail; the break lifecycle claimed auditing that did not exist, an unconditional approve, and an admin dispose with neither a reason nor a row; returning an asset updated unconditionally and answered 200 whether or not it returned anything. Two of those were the same always-200 lie in unrelated routes. A ratchet test holds the position: it fails if a new mutating route skips the audit log, and fails if the exemption is removed or a fixed handler left behind on the list. A second test reads db/postgres_schema.sql and fails if a route insert stops matching the canonical columns - three bare INSERT INTO <table> VALUES (...) were fixed on the way. |
 | `FR-AUTH-04` | M | C | `/logout` | Server-side Redis sessions (opaque cookie, 8 h TTL), HttpOnly, SameSite=Lax, Secure in production; logout deletes the server copy. There is no 24 h *absolute* timeout distinct from the 8 h idle one. |

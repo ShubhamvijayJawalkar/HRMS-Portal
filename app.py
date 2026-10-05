@@ -60,6 +60,7 @@ import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
 import policy  # noqa: E402  # FR-USR-09/15 role + permission matrix (policy.py)
 import reviews  # noqa: E402  # performance review + 360 feedback integrity (FR-PERF-02)
+import shift_hours  # noqa: E402  # the ONE shift-length rule (FR-ATT-09): shared by the shift summary and payroll finalisation
 import tickets  # noqa: E402  # ticket state machine + visibility (FR-TKT-03/04)
 import working_days  # noqa: E402  # the ONE working-day function (FR-LEA-09); shared by leave, payroll LOP and reports
 from idempotency import idempotent  # noqa: E402  # CC-07 idempotent writes (Idempotency-Key replay)
@@ -2295,11 +2296,16 @@ def _attendance_worked_hours(emp_id, target_date, shift_start_dt, shift_end_dt, 
     if not login_times:
         return 0.0
     first_login = min(login_times)
-    if any(row[1] is None for row in rows):
+    open_shift = any(row[1] is None for row in rows)
+    if open_shift:
+        # The clock-time bound and the duration cap both come from the shared rule
+        # (FR-ATT-09), so the figure an employee sees on the shift summary and the one
+        # written to `attendance_days` are computed the same way. They used to be two
+        # implementations and only this one had the cap — so a forgotten logout showed
+        # 30 hours on the dashboard and the capped figure on the payslip.
         as_of = as_of or datetime.now()
-        scheduled = max(0.0, (shift_end_dt - shift_start_dt).total_seconds() / 3600)
-        orphan_cap = shift_end_dt + timedelta(hours=scheduled * 0.25)
-        last_event = min(as_of, orphan_cap)
+        last_event = min(as_of, shift_hours.clock_cap(shift_start_dt, shift_end_dt)
+                         or as_of)
     else:
         logout_times = [row[1] for row in rows if row[1]]
         last_event = max(logout_times) if logout_times else first_login
@@ -2307,8 +2313,11 @@ def _attendance_worked_hours(emp_id, target_date, shift_start_dt, shift_end_dt, 
         return 0.0
 
     raw_hours = max(0.0, (last_event - first_login).total_seconds() / 3600)
-    scheduled = max(0.0, (shift_end_dt - shift_start_dt).total_seconds() / 3600)
-    credit_cap = scheduled * 1.25
+    # The **payroll** ceiling, deliberately kept on top of the shared rule and not
+    # folded into it: it bounds what a long-but-legitimate day is worth, which is a
+    # payroll policy question rather than a data-quality one. FR-ATT-09's cap is about
+    # an unreliable figure; this one is about entitlement.
+    credit_cap = shift_hours.scheduled_hours(shift_start_dt, shift_end_dt) * 1.25
     return round(min(raw_hours, credit_cap), 2)
 
 
@@ -10628,6 +10637,21 @@ def get_shift_summary():
     shift_start_dt = _get_shift_start_dt(emp_id, conn, target_date)
     shift_end_dt = _get_shift_end_dt(emp_id, shift_start_dt, conn)
 
+    # A shiftless employee resolves to midnight-to-midnight — a **24 hour** scheduled
+    # span — so the +25% cap would be 30 hours and a forgotten logout would show a
+    # 30-hour day. That is the skew this requirement exists to prevent, arriving by a
+    # different route. The shared rule's documented 8-hour default applies instead, and
+    # `shift_configured` says so in the response rather than leaving a 30-hour figure to
+    # be explained.
+    #
+    # The helpers themselves are left alone: the attendance finalisation path uses the
+    # same values as its Present/Half-day thresholds and changing what "no shift"
+    # means there is FR-JOB-01's decision, not this one.
+    configured_start, _configured_end = get_shift(emp_id, conn)
+    shift_configured = bool(configured_start and configured_start != '24x7')
+    cap_start = shift_start_dt if shift_configured else None
+    cap_end = shift_end_dt if shift_configured else None
+
     sessions = conn.execute(
         "SELECT login_time, logout_time, total_hours, session_date FROM user_sessions WHERE emp_id = ? AND session_date = ? ORDER BY login_time ASC",
         [emp_id, target_date]
@@ -10651,14 +10675,17 @@ def get_shift_summary():
             last_logout = s[1]
             break
 
-    shift_hours = 0
-    if first_login and last_logout:
-        shift_hours = round((last_logout - first_login).total_seconds() / 3600, 2)
-    elif first_login and not last_logout:
-        shift_hours = round((datetime.now() - first_login).total_seconds() / 3600, 2)
+    # FR-ATT-09, through the shared rule: elapsed window rather than a sum of
+    # sessions, with an open shift capped at the scheduled length +25% and flagged.
+    # This was `(now - first_login)` **uncapped**, while payroll finalisation capped
+    # the same figure — so a forgotten logout showed 30 hours here and the capped
+    # number on the payslip. Same class as FR-LEA-09's six rules for days.
+    hours, estimated, capped = shift_hours.shift_hours(
+        first_login, last_logout, cap_start, cap_end)
+    scheduled_span = shift_hours.scheduled_hours(cap_start, cap_end)
 
-    productive_hours = max(0, shift_hours - total_break_minutes / 60)
-    efficiency = round((productive_hours / shift_hours) * 100, 1) if shift_hours > 0 else 0
+    productive_hours = max(0, hours - total_break_minutes / 60)
+    efficiency = round((productive_hours / hours) * 100, 1) if hours > 0 else 0
 
     return jsonify({
         'date': target_date.isoformat(),
@@ -10666,7 +10693,19 @@ def get_shift_summary():
         'shift_end': shift_end_dt.strftime('%H:%M'),
         'first_login': first_login.strftime('%H:%M:%S') if first_login else None,
         'last_logout': last_logout.strftime('%H:%M:%S') if last_logout else None,
-        'shift_hours': shift_hours,
+        'shift_hours': hours,
+        # FR-ATT-09's three additions. `scheduled_hours` so a capped figure can be
+        # read against what the shift was meant to be, `estimated` because an open
+        # shift's end has not been observed yet, and `capped` because that is the
+        # condition indicating a logout was probably forgotten — a consumer can tell
+        # "still running" from "clamped down" without inferring one from the other.
+        'scheduled_hours': round(scheduled_span, 2),
+        'estimated': estimated,
+        'capped': capped,
+        # False means `scheduled_hours` above is the module's documented default rather
+        # than this employee's configured shift, which is the difference between a real
+        # figure and a fallback one.
+        'shift_configured': shift_configured,
         'total_session_hours': total_session_hours,
         'total_break_minutes': total_break_minutes,
         'productive_hours': round(productive_hours, 2),

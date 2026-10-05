@@ -358,10 +358,34 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'projection.'),
     'FR-ATT-08': ('M', 'R', 'IMPLEMENTED', ('/api/login-hours',),
                   'First login to last logout, scoped to a shift date.'),
-    'FR-ATT-09': ('H', 'C', 'PARTIAL', ('/api/user/shift-summary',),
-                  'last_logout - first_login, productive_hours and efficiency all ship. '
-                  'The 25% cap on an open shift and the estimated flag are missing, so '
-                  'a forgotten logout inflates the figure.'),
+    'FR-ATT-09': ('M', 'C', 'IMPLEMENTED', ('/api/user/shift-summary',),
+                  'shift_hours = last_logout - first_login (NOT the sum of sessions) '
+                  'when both exist, else now - first_login for an open shift, CAPPED at '
+                  'the scheduled shift length +25% and flagged estimated:true. The cap and '
+                  'the flag were both missing, and the miss was the second instance of '
+                  'the FR-LEA-09 defect class: _attendance_worked_hours already implemented '
+                  'the cap and /api/user/shift-summary did not, so an employee who forgot '
+                  'to log out saw a figure that grew without limit on their own dashboard '
+                  'while payroll was credited the capped one - a support call every time, '
+                  'and an employee whose screen disagrees with their payslip has no reason '
+                  'to trust either. shift_hours.py is now the single rule, called from both, '
+                  'and a test walks the AST of app.py so a third implementation cannot '
+                  'appear. The cap is on the OPEN-SHIFT branch only: the SRS attaches it '
+                  'there (to avoid a forgotten-logout skewing the figure) and a closed shift '
+                  'is real recorded data - capping it would under-credit genuine overtime, '
+                  'which is a payroll decision rather than a data-quality one. The payroll '
+                  'credit ceiling stays on top of the shared rule for the same reason. '
+                  'Reported: estimated (any open shift, since its end is by definition not '
+                  'yet observed - a superset of the SRS wording that serves its intent), '
+                  'capped (the 25% allowance actually bound, i.e. a logout was probably '
+                  'forgotten), scheduled_hours, and shift_configured. Those last two exist '
+                  'because an employee with NO configured shift resolves to midnight-to-'
+                  'midnight = a 24h scheduled span, so the +25% cap would be 30 hours and the '
+                  'skew this requirement prevents would arrive by another route; the module '
+                  "s documented 8h default applies instead and shift_configured says so. A "
+                  'night shift whose end is earlier than its start has its negative span '
+                  'rolled forward a day rather than clamped to zero, which would otherwise '
+                  'make every overnight shift look instantaneous and cap it at zero hours.'),
     'FR-ATT-10': ('—', '—', 'RETIRED', (), 'Folded into FR-ATT-09 by Appendix A.'),
     'FR-ATT-11': ('H', 'C', 'IMPLEMENTED', ('/api/user/calendar',),
                   'Sessions, breaks, day-expanded leaves, holidays and the finalised '

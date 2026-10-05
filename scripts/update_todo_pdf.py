@@ -51,6 +51,40 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "Asked to check whether the breaks module was complete: 9 of 17 FR-ATT rows were "
+     "IMPLEMENTED, 7 PARTIAL, 1 retired - so no, and the ToDo PDF listed all seven. Started with "
+     "FR-ATT-09 (High), which turned out to be the second instance of the FR-LEA-09 defect class. "
+     "The SRS asks for shift_hours = last_logout - first_login (NOT the sum of sessions) when both "
+     "exist, else now - first_login for an open shift, CAPPED at the scheduled shift length +25% "
+     "and flagged estimated: true. The cap and the flag were both missing - and the miss was that "
+     "_attendance_worked_hours already implemented the cap while /api/user/shift-summary did not. So "
+     "an employee who forgot to log out saw a figure that grew without limit on their own dashboard "
+     "while payroll was credited the capped one: a support call every time, and an employee whose "
+     "screen disagrees with their payslip has no reason to trust either. shift_hours.py is now the "
+     "single rule called from both, with a test walking the AST of app.py so a third implementation "
+     "cannot appear. The cap is on the OPEN-SHIFT branch only - the SRS attaches it there, and a "
+     "closed shift is real recorded data, so capping it would under-credit genuine overtime, which "
+     "is a payroll decision rather than a data-quality one; the payroll credit ceiling stays on top "
+     "for the same reason. Four judgement calls recorded in the matrix: estimated is reported for any "
+     "open shift (a superset of the SRS wording, serving its intent); capped says separately whether "
+     "the allowance actually bound; scheduled_hours and shift_configured are reported because an "
+     "employee with NO configured shift resolves to midnight-to-midnight = a 24h span, so the +25% "
+     "cap would be 30 hours and the skew this requirement prevents would arrive by another route - "
+     "the module's documented 8h default applies instead and shift_configured says so; and a night "
+     "shift whose end precedes its start has its negative span rolled forward a day rather than "
+     "clamped to zero, which would otherwise make every overnight shift look instantaneous and cap "
+     "it at zero hours - an employee on nights credited nothing. Two of my own bugs, both found by "
+     "tests written to be time-independent: a textual check for the old inline 'now - first_login' "
+     "matched this file's own COMMENT describing the defect it removed, so an AST check replaced it "
+     "(a source-text search in a codebase that documents its own bugs will always find them in the "
+     "prose); and a literal '== 10.0' assertion made the route test depend on the wall clock, since "
+     "the session was dated today and early in the morning the elapsed figure sat under the cap - "
+     "now it asserts the invariant the rule guarantees rather than a number. One unreproduced "
+     "single flake, recorded rather than hidden: test_defaults_are_true_and_a_notification_"
+     "is_delivered_by_default failed once in a full run and passed in 2 subsequent full runs and 3 "
+     "in isolation, so it is not evidence of a regression and was not chased further. Matrix 68 "
+     "IMPLEMENTED / 31 PARTIAL / 4 NOT_STARTED / 1 RETIRED. Unit 314 passed / 2 skipped, browser "
+     "23/23, v2.0 gates 113/113 GET + 59/59 write, probe run twice."),
     ("2026-10-02", "FR-USR-07: bulk block/unblock/archive/restore. High priority, retained from v1.0, "
      "and entirely unimplemented - the single routes took one employee at a time, so "
      "offboarding a department was one request per person and an administrator interrupted "
@@ -1205,8 +1239,8 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "310 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "310 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "314 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "314 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),

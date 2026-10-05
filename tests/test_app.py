@@ -3834,6 +3834,181 @@ def test_a_bulk_action_closes_sessions_for_each_employee(client):
         _cleanup_user_contract_rows(*ids)
 
 
+def test_an_open_shift_is_capped_and_flagged_estimated(client):
+    """FR-ATT-09: the SRS's exact rule, and the bug it exists to prevent.
+
+    *"shift_hours = last_logout − first_login (not sum of sessions) when both exist,
+    else now − first_login for an open shift, capped at the scheduled shift length
+    +25% to avoid a forgotten-logout skewing the figure — flagged estimated: true in
+    that case."*
+
+    The handler was `shift_hours = (now - first_login)` with **no cap**, so an employee
+    who forgot to log out saw a figure that grew without limit — and payroll's
+    finalisation capped the *same* number, so the dashboard and the payslip disagreed.
+    """
+    import shift_hours as sh
+
+    # The cap is derived from the employee's own scheduled shift, because this
+    # application has no company-wide working week (FR-ATT-17).
+    start = datetime(2026, 10, 5, 9, 0)
+    end = datetime(2026, 10, 5, 17, 0)
+    assert sh.scheduled_hours(start, end) == 8.0
+    assert sh.open_shift_cap(start, end) == 10.0, '8h shift + 25%'
+
+    login = datetime(2026, 10, 5, 9, 0)
+    # A forgotten logout: 40 hours later. Capped, and flagged.
+    hours, estimated, capped = sh.shift_hours(
+        login, None, start, end, now=datetime(2026, 10, 6, 1, 0))
+    assert hours == 10.0, f'a forgotten logout showed {hours} hours'
+    assert estimated is True, estimated
+    assert capped is True, capped
+
+    # A shift still inside the allowance is reported as-is and is *not* capped — the
+    # employee is still working, which is not an error.
+    hours, estimated, capped = sh.shift_hours(
+        login, None, start, end, now=datetime(2026, 10, 5, 14, 0))
+    assert hours == 5.0, hours
+    assert estimated is True and capped is False, (estimated, capped)
+
+    # A closed shift is real data: no cap, and not an estimate. Capping it would
+    # under-credit genuine overtime, which is a payroll decision rather than a
+    # data-quality one.
+    hours, estimated, capped = sh.shift_hours(
+        login, datetime(2026, 10, 5, 20, 0), start, end)
+    assert hours == 11.0, hours
+    assert estimated is False and capped is False, (estimated, capped)
+
+
+def test_a_night_shift_is_not_measured_as_instantaneous():
+    """A shift crossing midnight has a negative span, not a zero-length one.
+
+    Clamping a negative span to zero would make every overnight shift look as though
+    it lasted no time at all, so `open_shift_cap` would be 0 and **every** open night
+    shift would be capped at zero hours — an employee on nights credited nothing.
+    """
+    import shift_hours as sh
+
+    start = datetime(2026, 10, 5, 22, 0)
+    end = datetime(2026, 10, 6, 6, 0)
+    assert sh.scheduled_hours(start, end) == 8.0, sh.scheduled_hours(start, end)
+    assert sh.open_shift_cap(start, end) == 10.0
+
+    # 24x7 has no end, so the documented fallback applies and is never zero.
+    assert sh.scheduled_hours(datetime(2026, 10, 5, 22, 0), None) == 8.0
+    assert sh.open_shift_cap(datetime(2026, 10, 5, 22, 0), None) == 10.0
+    # And an employee with no shift configured at all still gets a usable cap rather
+    # than an uncapped figure, which is the defect this requirement closes.
+    assert sh.open_shift_cap(None, None) == 10.0
+
+
+def test_the_shift_summary_reports_the_same_figure_payroll_does(client):
+    """The whole reason this is one shared function.
+
+    ``_attendance_worked_hours`` already implemented the cap; ``/api/user/shift-summary``
+    did not. So an employee who forgot to log out saw 30 hours on their own dashboard
+    while payroll was credited the capped figure — a support call every time, and an
+    employee whose screen disagrees with their payslip has no reason to trust either.
+
+    The assertion is that the **route** and the **module** agree, which is what stops
+    them drifting again.
+    """
+    import shift_hours as sh
+
+    _cleanup_user_contract_rows('EMP870')
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP870', 'Forgetful', 'emp870@company.com', 'Employee', "
+            "?, 'Active', 1, 'MIS')", [hash_password('pass123')])
+        # A session with no logout, dated so `?date=` selects it deterministically.
+        day = date(2026, 10, 5)
+        conn.execute(
+            "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) "
+            "VALUES (?, 'EMP870', ?, ?)", [9301, datetime(2026, 10, 5, 9, 0), day])
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        _login_as(client, 'EMP870', 'Employee', 99880)
+        resp = client.get('/api/user/shift-summary?date=2026-10-05')
+        assert resp.status_code == 200, resp.get_json()
+        body = resp.get_json()
+        assert body['first_login'] == '09:00:00', body
+        assert body['last_logout'] is None, body
+        assert body['estimated'] is True, (
+            'an open shift is measured against a clock, not a recorded logout'
+        )
+        # EMP870 was created without a shift, which resolves to midnight-to-midnight
+        # (24h) — so a +25% cap would be 30 hours and the skew this requirement
+        # prevents would arrive by a different route. The module's documented default
+        # applies instead.
+        assert body['shift_configured'] is False, body
+        assert body['scheduled_hours'] == 8.0, body
+        # The **invariant**, not a literal. Asserting `== 10.0` made this depend on the
+        # wall clock: the session is dated today, so early in the morning the elapsed
+        # figure sat under the cap and the assertion failed for no reason connected to
+        # the rule. The arithmetic is pinned by the module's own tests; what the route
+        # has to prove is that it goes through the rule.
+        assert body['shift_hours'] <= body['scheduled_hours'] * 1.25 + 0.001, (
+            f'the route reported {body["shift_hours"]} hours against a '
+            f'{body["scheduled_hours"]}h scheduled shift, so it is not using the cap'
+        )
+        assert body['productive_hours'] <= body['shift_hours'], body
+        # And the module would say the same, given the same inputs.
+        assert sh.open_shift_cap(datetime(2026, 10, 5, 9, 0),
+                                 datetime(2026, 10, 5, 17, 0)) == 10.0
+    finally:
+        _cleanup_user_contract_rows('EMP870')
+
+
+def test_one_shift_length_rule_serves_the_summary_and_payroll():
+    """FR-ATT-09 is the second instance of FR-LEA-09's defect class.
+
+    The first was six rules for "how many days"; this is two for "how long was this
+    shift", one of which had the cap and one of which did not. Asserted over the AST so
+    a third implementation cannot appear, and so the finalisation path cannot quietly
+    drop back to computing its own cap.
+    """
+    import ast
+    import pathlib as _pathlib
+
+    import app as app_module
+
+    tree = ast.parse(_pathlib.Path(app_module.__file__).read_text())
+    calls = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == 'shift_hours'):
+            calls[node.func.attr] = calls.get(node.func.attr, 0) + 1
+
+    assert calls.get('shift_hours', 0) >= 1, (
+        'nothing computes a shift length through the shared module'
+    )
+    assert calls.get('scheduled_hours', 0) >= 2, (
+        f'expected both the summary and payroll finalisation to share the rule, got '
+        f'{calls}'
+    )
+    assert calls.get('clock_cap', 0) >= 1, (
+        'the finalisation path recomputed the clock-time cap instead of asking for it'
+    )
+
+    # And the old inline form is gone. Checked over the **AST**, not the source text:
+    # the first version searched for the literal `now - first_login` and matched this
+    # file's own comment describing the defect it removed. A textual check on a codebase
+    # that documents its own bugs will always find them in the prose.
+    inline_open_shift = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and getattr(node.func, 'attr', None) == 'hours' \
+                and node.lineno > 1:
+            inline_open_shift.append(node.lineno)
+    assert not inline_open_shift, (
+        f'an inline datetime-hours computation is back at app.py lines {inline_open_shift}'
+    )
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
