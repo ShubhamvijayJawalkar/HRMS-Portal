@@ -51,6 +51,44 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "FR-USR-07: bulk block/unblock/archive/restore. High priority, retained from v1.0, "
+     "and entirely unimplemented - the single routes took one employee at a time, so "
+     "offboarding a department was one request per person and an administrator interrupted "
+     "halfway had no way to tell which half. All three SRS clauses ship, and the DELEGATION "
+     "is the design rather than an implementation detail: every row calls "
+     "_set_user_access_status, the same function the single routes call, so the batch has no "
+     "behaviour of its own to get wrong. It cannot be more permissive about a 409, cannot "
+     "forget to close sessions, and cannot skip the audit row, because it has no "
+     "implementation of its own. Every refusal the single routes make - already archived, "
+     "archived users must be restored first, already blocked - is inherited per row with the "
+     "same wording, and a test asserts that inheritance directly by archiving twice and then "
+     "blocking an archived user. Self is a per-row FAILURE rather than a silent skip, carrying "
+     "the single routes exact 409 message: silently dropping the row would leave an "
+     "administrator who selected thirty people seeing '29 archived' and no reason the "
+     "thirtieth was different. Status codes state which outcome happened - 200 all, 207 mixed, "
+     "400 none - because a 200 that hid a failure or a 400 that hid twenty successes is the "
+     "reason the SRS asks for per-row results at all. The action vocabulary is data "
+     "(BULK_USER_ACTIONS) mapping each action to its status and allow_login value, because "
+     "those two decide whether sessions are closed, and a test proves a bulk block closes one "
+     "session per employee. Validation runs before anything is touched, ids are normalised and "
+     "blank-filtered up front so [''] gets the same answer as [], and the batch is bounded at "
+     "500 so one request cannot hold locks across the directory. The admin UI gains a selection "
+     "column and a bulk bar whose result renders the per-row list rather than a single done, "
+     "with select-all scoped to the current page and saying so in its title. No schema change "
+     "and no Alembic revision: the operations already existed and only the entry point was "
+     "missing. Debugging the probe flow for this one cost four wrong-step bugs, all mine, and "
+     "the reason is recorded because it is a class: an inverted assertion (if not "
+     "results[x].get('ok') is true precisely when the row correctly failed, so a WORKING "
+     "route was reported broken - an inverted probe assertion is worse than a missing one "
+     "because it looks like evidence); fixture ids with letters that the EMP\\d{3,} "
+     "directory contract rejected at the create step, so the flow returned that 400 and "
+     "pointed at the bulk route; probe fixtures cleaned up only on the happy path, so three "
+     "failing runs left three sets of archived employees behind; and every failing check "
+     "returning a bare 409, which made 'the guard fired' indistinguishable from 'the wrong "
+     "step ran'. run() now accepts a (status, detail) tuple and every check in this flow names "
+     "itself. Matrix 67 IMPLEMENTED / 32 PARTIAL / 4 NOT_STARTED / 1 RETIRED. Unit 310 passed "
+     "/ 2 skipped, browser 23/23, v2.0 gates 113/113 GET + 59/59 write, probe run twice with "
+     "zero leaked fixtures."),
     ("2026-10-02", "FR-LEA-07: HR/Admin can grant leave days by hand. High priority, and nothing "
      "implemented any of it - an administrator who needed to give someone three days had no route "
      "at all and would have gone to a database console. All five SRS clauses ship: add days to "
@@ -1167,13 +1205,13 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "305 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "305 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "310 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "310 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0011_leave_grants, identity/sequence rules, required tables, count deltas"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "113/113 GET + 58/58 write flows; run twice to confirm idempotency"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "113/113 GET + 59/59 write flows; run twice to confirm idempotency"),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
     ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),

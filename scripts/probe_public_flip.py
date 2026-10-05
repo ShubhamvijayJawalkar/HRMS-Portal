@@ -575,9 +575,14 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     def run(name, fn):
         try:
-            status = fn()
+            result = fn()
+            # A flow may return `(status, detail)` so a failing step says WHICH one
+            # failed. Returning a bare status meant every 4xx read as "the guard fired"
+            # and three separate wrong-step bugs here were indistinguishable from a
+            # working guard until the detail was surfaced.
+            status, detail = result if isinstance(result, tuple) else (result, f"status={result}")
             label = "OK" if 200 <= status < 300 else ("GUARDED" if 400 <= status < 500 else "FAIL")
-            out[name] = (label, f"status={status}")
+            out[name] = (label, detail)
         except Exception as exc:
             out[name] = ("FAIL", f"{type(exc).__name__}: {str(exc).splitlines()[0][:220]}")
 
@@ -1783,6 +1788,117 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             return 409
         return 200
     run("leaves(admin grant + reversal)", leave_grant)
+
+    def users_bulk():
+        """FR-USR-07: bulk archive with a partial failure, and the self-exclusion.
+
+        Three clauses of the SRS are asserted rather than assumed:
+
+        * **self excluded** — the acting admin is in the list and must come back as a
+          per-row 409, unchanged in the database. A bulk route that skipped the self
+          check would let an administrator archive themselves out of their own
+          session.
+        * **per-row result** — one unknown employee among the others must not take them
+          with it, so the mixed outcome is 207 and the unknown row is 404.
+        * **partial failure does not fail the batch** — which the two archives above
+          are the proof of: the unknown row is a failure and they still changed.
+
+        Two disposable employees are created here rather than reusing ids the seed
+        happens to have, and are removed in a `finally` — a fixture that only cleans up
+        on the happy path leaks on every failing run, which is exactly when you least
+        want extra residue to reason about.
+        """
+        stamp = f"{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+        # Digits only after EMP: the directory contract validates `emp_id` against
+        # `EMP\d{3,}`, so `EMPB..A` was refused by the create step and the flow
+        # returned that 400 — reading like the bulk route misbehaving when the create
+        # never happened.
+        victims = [f"EMP{stamp}7", f"EMP{stamp}8"]
+
+        def drop():
+            with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"),
+                                 autocommit=True) as pc:
+                pc.execute("DELETE FROM audit_log WHERE entity_id = ANY(%s)", (victims,))
+                pc.execute("DELETE FROM notifications WHERE emp_id = ANY(%s)", (victims,))
+                pc.execute("DELETE FROM user_sessions WHERE emp_id = ANY(%s)", (victims,))
+                pc.execute("DELETE FROM users WHERE emp_id = ANY(%s)", (victims,))
+
+        drop()
+        try:
+            for n, emp_id in enumerate(victims):
+                made = _post(cl_a, tok_a, "/api/users", {
+                    "emp_id": emp_id, "name": f"Bulk Probe {n}",
+                    "email": f"{emp_id.lower()}@company.com",
+                    "department": "MIS", "role": "Employee",
+                    "password": "probe-bulk-password-1",
+                })
+                if made.status_code not in (200, 201):
+                    return made.status_code, f"create {emp_id}: {made.get_json()}"
+
+            batch = ["EMP001", victims[0], "EMP999", victims[1]]
+            r = _post(cl_a, tok_a, "/api/users/bulk",
+                       {"action": "archive", "emp_ids": batch})
+            if r.status_code != 207:
+                return r.status_code, f"archive batch: {r.get_json()}"
+            body = r.get_json() or {}
+            results = {row["emp_id"]: row for row in (body.get("results") or [])}
+            if len(results) != len(batch):
+                return 409, f"a per-row result is missing: {body}"
+
+            # Self exclusion, using the *self* row rather than the aggregate: the
+            # batch reports 2 succeeded of 4 either way, and only the row says why.
+            if results["EMP001"].get("ok"):
+                return 409, "the acting admin was archived"
+            if results["EMP001"].get("status") != 409:
+                return 409, f"the self row is not a 409: {body}"
+
+            # An unknown employee must FAIL its row. This check read
+            # `if not ...get("ok")` first, which is true precisely when the row
+            # correctly failed — so the probe reported a working route as broken. An
+            # inverted assertion in a probe is worse than a missing one: it looks
+            # like evidence.
+            if results["EMP999"].get("ok"):
+                return 409, f"an unknown employee was archived: {body}"
+            if results["EMP999"].get("status") != 404:
+                return 409, f"the unknown row is not a 404: {body}"
+
+            # The two good rows still changed — this is the whole point of the
+            # clause, and it is what a naive all-or-nothing batch would fail.
+            for ok_id in victims:
+                if not results[ok_id].get("ok"):
+                    return 409, f"a partial failure took a good row with it: {body}"
+
+            with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"),
+                                 autocommit=True) as pc:
+                statuses = {
+                    row[0]: row[1] for row in pc.execute(
+                        "SELECT emp_id, status FROM users WHERE emp_id = ANY(%s)",
+                        (victims + ["EMP001", "EMP999"],)).fetchall()
+                }
+                ghost = pc.execute(
+                    "SELECT count(*) FROM users WHERE emp_id = 'EMP999'").fetchone()[0]
+                audited = pc.execute(
+                    "SELECT count(*) FROM audit_log WHERE action = 'archive' "
+                    "AND entity_id = ANY(%s)", (victims,)).fetchone()[0]
+
+            if any(statuses.get(v) != "Archived" for v in victims):
+                return 409, f"a victim is not Archived: {statuses}"
+            if statuses.get("EMP001") == "Archived":
+                return 409, "the acting admin really was archived"
+            if "EMP999" in statuses or ghost:
+                return 409, "a row that failed created the employee"
+            if audited < 2:
+                return 409, f"only {audited} audit row(s) for 2 changed employees"
+
+            back = _post(cl_a, tok_a, "/api/users/bulk",
+                       {"action": "restore", "emp_ids": victims})
+            if back.status_code != 200:
+                return back.status_code, f"restore batch: {back.get_json()}"
+            return 200, "self excluded, partial failure isolated, per-row audited"
+        finally:
+            drop()
+
+    run("users(bulk archive, self excluded)", users_bulk)
 
     return out
 

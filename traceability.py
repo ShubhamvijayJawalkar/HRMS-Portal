@@ -76,9 +76,34 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-USR-06a': ('H', 'N', 'IMPLEMENTED', ('/api/anonymisation/<int:request_id>/confirm',),
                    'Two-person state machine proposed -> confirmed -> applied; the '
                    'confirmer must be a different user, and only an archived account qualifies.'),
-    'FR-USR-07': ('H', 'R', 'NOT_STARTED', (),
-                  'No POST /api/users/bulk. The block/archive routes take a single '
-                  'employee; there is no batch endpoint with per-row results.'),
+    'FR-USR-07': ('H', 'R', 'IMPLEMENTED', ('/api/users/bulk',),
+                  'All three clauses, and the delegation is the design rather than an '
+                  'implementation detail. The SRS asks for Bulk POST /api/users/bulk '
+                  '{action, emp_ids[]}: SELF EXCLUDED; per-row result reported, and '
+                  'PARTIAL FAILURE DOES NOT FAIL THE BATCH. Every row delegates to '
+                  '_set_user_access_status, the same function the single block/unblock/'
+                  'archive/restore routes call, so the batch has no behaviour of its own '
+                  'to get wrong: it cannot be more permissive about a 409, cannot forget '
+                  'to close sessions, and cannot skip the audit row. Every refusal the '
+                  'single routes make - already archived, archived users must be restored '
+                  'first, already blocked - is inherited per row with the same wording. '
+                  'Self is a per-row FAILURE rather than a silent skip, with the single '
+                  'routes exact 409 message: silently dropping the row would leave an '
+                  'administrator who selected thirty people seeing 29 archived and no '
+                  'reason the thirtieth was different. Status codes state which outcome '
+                  'happened - 200 all succeeded, 207 mixed, 400 none - because a 200 that '
+                  'hid a failure or a 400 that hid twenty successes is the reason the SRS '
+                  'asks for per-row results. The action vocabulary is data (BULK_USER_'
+                  'ACTIONS) mapping each action to its status and allow_login value, '
+                  'because those two decide whether sessions are closed. Validation runs '
+                  'before anything is touched, ids are normalised and blank-filtered up '
+                  'front so [""] gets the same answer as [], and the batch is bounded at 500 '
+                  'so one request cannot hold locks across the directory. The admin UI '
+                  'has a selection column and a bulk bar whose result is rendered as the '
+                  'per-row list rather than a single done, with select-all scoped to the '
+                  'current page and saying so. No schema change and no Alembic revision: '
+                  'the operations already existed and only the batch entry point was '
+                  'missing.'),
     'FR-USR-08': ('L', 'R', 'PARTIAL', ('/api/users/<emp_id>',),
                   'Missing the meta endpoint, the async CSV export and the last-50 '
                   'sessions history. The list endpoint carries the pagination meta.'),

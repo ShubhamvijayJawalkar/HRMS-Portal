@@ -116,6 +116,26 @@
             </div>
         </div>
         <div class="card-body">
+            <!-- FR-USR-07 bulk bar. Hidden until something is ticked, so the common
+                 case of a single archive does not present four extra buttons. -->
+            <div id="bulkBar" class="alert alert-secondary d-none py-2">
+                <div class="d-flex align-items-center flex-wrap gap-2">
+                    <span class="small"><b id="bulkCount">0</b> selected</span>
+                    <button class="btn btn-outline-danger btn-sm" onclick="runBulk('archive', 'Archive')">
+                        <i class="bi bi-archive"></i> Archive
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" onclick="runBulk('block', 'Block')">
+                        <i class="bi bi-slash-circle"></i> Block
+                    </button>
+                    <button class="btn btn-outline-success btn-sm" onclick="runBulk('restore', 'Restore')">
+                        <i class="bi bi-arrow-counterclockwise"></i> Restore
+                    </button>
+                    <button class="btn btn-outline-success btn-sm" onclick="runBulk('unblock', 'Unblock')">
+                        <i class="bi bi-unlock"></i> Unblock
+                    </button>
+                </div>
+                <div id="bulkResult" class="mt-2 d-none"></div>
+            </div>
             <div class="filter-bar">
                 <div class="search-box">
                     <i class="bi bi-search"></i>
@@ -150,7 +170,7 @@
             </div>
             <div class="table-responsive">
                 <table class="table table-hover">
-                    <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Role</th><th>Shift</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead>
+                    <thead><tr><th><input type="checkbox" class="form-check-input" id="bulkAll" title="Select every row on this page" onchange="bulkToggleAll(this.checked)"></th><th>ID</th><th>Name</th><th>Email</th><th>Dept</th><th>Role</th><th>Shift</th><th>Status</th><th>Permissions</th><th>Actions</th></tr></thead>
                     <tbody id="usersTableBody"><tr><td colspan="10"><div class="empty-state"><i class="bi bi-arrow-repeat" style="animation:spin 1s linear infinite;"></i><p>Loading users...</p></div></td></tr></tbody>
                 </table>
             </div>
@@ -504,6 +524,7 @@ function loadUsers(page) {
                 : '';
             const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${grantAction}${mfaAction}${passwordAction}${unlockAction}${anonAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
+                <td><input type="checkbox" class="form-check-input bulk-pick" data-emp="${esc(u.emp_id)}" data-status="${esc(u.status)}" onchange="updateBulkBar()"></td>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
                 <td>${esc(u.email)}</td>
@@ -516,6 +537,9 @@ function loadUsers(page) {
             </tr>`;
         }).join('');
     }).catch(() => showMsg('Failed to load users', 'error'));
+    const all = document.getElementById('bulkAll');
+    if (all) all.checked = false;
+    updateBulkBar();
 }
 
 async function openEditModal(id) {
@@ -587,6 +611,66 @@ async function toggleStatus(id, status) {
     const res = await r.json();
     if (!r.ok) { showMsg(res.error || 'Failed', 'error'); return; }
     showMsg(res.message, 'success');
+    loadUsers(currentPage);
+}
+
+// FR-USR-07: bulk block / unblock / archive / restore. The SRS requires per-row
+// results and says a partial failure must not fail the batch, so the confirmation
+// names the count and the result is rendered as a per-row list rather than a single
+// "done" — an administrator who selected thirty rows needs to know which one was not
+// archived and why.
+// Select-all covers the **current page only**, and says so in its title. A bulk
+// action is dangerous enough that silently acting on employees the administrator
+// cannot see would be the worst version of this feature; paging and then selecting is
+// explicit.
+function bulkToggleAll(checked) {
+    document.querySelectorAll('.bulk-pick').forEach(box => { box.checked = checked; });
+    updateBulkBar();
+}
+
+function bulkSelection() {
+    return Array.from(document.querySelectorAll('.bulk-pick:checked'))
+        .map(box => box.dataset.emp);
+}
+
+function updateBulkBar() {
+    const picked = bulkSelection();
+    const bar = document.getElementById('bulkBar');
+    bar.classList.toggle('d-none', picked.length === 0);
+    document.getElementById('bulkCount').textContent = picked.length;
+}
+
+async function runBulk(action, verb) {
+    const picked = bulkSelection();
+    if (!picked.length) return;
+    if (!confirm(`${verb} ${picked.length} employee(s)?\n\n`
+        + 'Each employee is handled separately: if one cannot be changed, the others '
+        + 'still are, and the result lists every row.\n'
+        + 'Your own account is never included in an action against you.')) return;
+    const r = await fetch('/api/users/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, emp_ids: picked }),
+    });
+    const d = await r.json().catch(() => ({}));
+    const box = document.getElementById('bulkResult');
+    box.classList.remove('d-none');
+    if (!d.results) {
+        box.className = 'alert alert-danger';
+        box.textContent = d.error || 'Bulk request failed';
+        return;
+    }
+    const failed = (d.results || []).filter(x => !x.ok);
+    box.className = failed.length ? 'alert alert-warning' : 'alert alert-success';
+    let html = `<b>${verb}d ${d.succeeded} of ${d.requested}</b> selected employee(s).`;
+    if (failed.length) {
+        html += '<br><span class="small">Not changed:</span><ul class="small mb-0">'
+            + failed.map(x => `<li><code>${esc(x.emp_id)}</code> — ${esc(x.error || 'failed')}</li>`).join('')
+            + '</ul>';
+    }
+    box.innerHTML = html;
+    document.querySelectorAll('.bulk-pick:checked').forEach(b => { b.checked = false; });
+    updateBulkBar();
     loadUsers(currentPage);
 }
 

@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 66 | 63% |
+| `IMPLEMENTED` | 67 | 64% |
 | `PARTIAL` | 32 | 31% |
-| `NOT_STARTED` | 5 | 5% |
+| `NOT_STARTED` | 4 | 4% |
 | `RETIRED` | 1 | 1% |
 | **total** | **104** | |
 
-### IMPLEMENTED (66)
+### IMPLEMENTED (67)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -97,6 +97,7 @@ rather than quietly invalidating this document.
 | `FR-USR-05` | H | R | `/api/users/<emp_id>/archive`<br>`/api/users/<emp_id>/restore` | Status-based archive/restore, self-action 409, payroll and audit records retained. The legacy DELETE route is archive-compatible. |
 | `FR-USR-06` | H | C | `/api/users/<emp_id>/anonymise` | Purge replaced by anonymisation: a dry-run plan, a required salt, and an audit history scrubbed by value substitution. Trade-offs (emp_id kept, free text left) are recorded in docs/ANONYMISATION.md §8. Two deviations found by auditing this row against the requirement text. The SRS spells the replacement as name -> "Former Employee #id"; the code substitutes a salted HMAC pseudonym (ANON-<16 hex>), which is stable per employee without restating an identifier in every row. And the SRS names bank details among the identifiers to scrub - no bank or account column exists anywhere in the schema, so that clause is vacuous today; a test now fails if a personal-looking column is ever added without being taught to the eraser. |
 | `FR-USR-06a` | H | N | `/api/anonymisation/<int:request_id>/confirm` | Two-person state machine proposed -> confirmed -> applied; the confirmer must be a different user, and only an archived account qualifies. |
+| `FR-USR-07` | H | R | `/api/users/bulk` | All three clauses, and the delegation is the design rather than an implementation detail. The SRS asks for Bulk POST /api/users/bulk {action, emp_ids[]}: SELF EXCLUDED; per-row result reported, and PARTIAL FAILURE DOES NOT FAIL THE BATCH. Every row delegates to _set_user_access_status, the same function the single block/unblock/archive/restore routes call, so the batch has no behaviour of its own to get wrong: it cannot be more permissive about a 409, cannot forget to close sessions, and cannot skip the audit row. Every refusal the single routes make - already archived, archived users must be restored first, already blocked - is inherited per row with the same wording. Self is a per-row FAILURE rather than a silent skip, with the single routes exact 409 message: silently dropping the row would leave an administrator who selected thirty people seeing 29 archived and no reason the thirtieth was different. Status codes state which outcome happened - 200 all succeeded, 207 mixed, 400 none - because a 200 that hid a failure or a 400 that hid twenty successes is the reason the SRS asks for per-row results. The action vocabulary is data (BULK_USER_ACTIONS) mapping each action to its status and allow_login value, because those two decide whether sessions are closed. Validation runs before anything is touched, ids are normalised and blank-filtered up front so [""] gets the same answer as [], and the batch is bounded at 500 so one request cannot hold locks across the directory. The admin UI has a selection column and a bulk bar whose result is rendered as the per-row list rather than a single done, with select-all scoped to the current page and saying so. No schema change and no Alembic revision: the operations already existed and only the batch entry point was missing. |
 | `FR-USR-09` | H | C | `/api/users/<emp_id>/permissions` | Full replace of the override set, audited with a real before/after diff, anti-lockout guard, module mapped into policy.PERMISSION_MODULES. |
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. Create and delete are both audited, because policy.PII_FIELDS classifies dependents as PII - a third party with no statutory retention of their own - and a silent erase of one was the gap the audit pass found. The create also used a bare INSERT INTO dependents VALUES (...), now a named column list. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
@@ -138,7 +139,7 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (5)
+### NOT_STARTED (4)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -146,7 +147,6 @@ rather than quietly invalidating this document.
 | `FR-JOB-03` | S | R | — | No quarterly job opens the next performance review cycle. |
 | `FR-LEA-08a` | M | N | — | approval_delegations exists in the canonical schema with a no-overlap exclusion constraint, but no route reads or writes it. A manager going on leave has no way to delegate. |
 | `FR-REG-04` | M | N | — | No regularization Excel export. |
-| `FR-USR-07` | H | R | — | No POST /api/users/bulk. The block/archive routes take a single employee; there is no batch endpoint with per-row results. |
 
 ### RETIRED (1)
 

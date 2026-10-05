@@ -2471,3 +2471,60 @@ measures the same thing — which is also what keeps the probe idempotent.
 
 Unit **305 passed / 2 skipped**, browser **23/23**, v2.0 gates **113/113 GET + 58/58
 write**, probe run twice, preflight and CC-01 green at head `0011_leave_grants`.
+
+## FR-USR-07: bulk block / unblock / archive / restore
+High priority, retained from v1.0, and **entirely unimplemented**. The single routes
+took one employee at a time, so offboarding a department was one request per person —
+and an administrator interrupted halfway had no way to tell which half.
+
+All three SRS clauses ship, and **the delegation is the design** rather than an
+implementation detail:
+
+- **Every row calls `_set_user_access_status`** — the same function the single routes
+  call. The batch therefore has no behaviour of its own to get wrong: it cannot be more
+  permissive about a 409, cannot forget to close sessions, and cannot skip the audit
+  row. A second implementation of "block" is a second implementation to drift the first
+  time a guard is added to one of them. A test asserts the inheritance directly by
+  archiving twice and then blocking an archived user.
+- **Self is a per-row *failure*, not a silent skip**, carrying the single routes' exact
+  409 message. Silently dropping the row would leave an administrator who selected
+  thirty people seeing "29 archived" with no reason the thirtieth was different.
+- **Status codes state which outcome happened**: `200` all succeeded, `207` mixed, `400`
+  none. A 200 that hid a failure, or a 400 that hid twenty successes, is precisely why
+  the SRS asks for per-row results.
+- The action vocabulary is **data** (`BULK_USER_ACTIONS`) mapping each action to its
+  status and `allow_login` value, because those two decide whether sessions are closed.
+  A test proves a bulk block closes one session per employee.
+- Validation runs before anything is touched; ids are normalised and blank-filtered up
+  front so `['']` gets the same answer as `[]`; and the batch is bounded at 500 so one
+  request cannot hold locks across the directory.
+- The admin UI gains a selection column and a bulk bar whose result renders **the
+  per-row list** rather than a single "done", with select-all scoped to the current page
+  and saying so in its title. A bulk action is dangerous enough that silently acting on
+  employees the administrator cannot see would be the worst version of this feature.
+- **No schema change and no Alembic revision** — the operations already existed and only
+  the entry point was missing.
+
+## Four wrong-step bugs of mine, and the class behind them
+
+Debugging the probe flow for this one took four attempts. Recorded because the common
+thread is *a failure that looks like evidence*.
+
+1. **An inverted assertion.** `if not results["EMP999"].get("ok")` is true precisely
+   when the row **correctly failed** — so the probe reported a **working route as
+   broken**. An inverted assertion in a probe is worse than a missing one, because it
+   looks like a finding.
+2. **Fixture ids with letters.** `EMPB…A` is rejected by the `EMP\d{3,}` directory
+   contract at the *create* step, so the flow returned that 400 and pointed at the bulk
+   route. The kind of failure that sends you debugging the wrong layer.
+3. **Probe fixtures cleaned up only on the happy path.** A check that fails returns
+   early, so three debugging runs left three sets of archived employees behind. A
+   fixture that only cleans up on success leaks on every failing run — which is exactly
+   when you least want extra residue.
+4. **Every failing check returned a bare `409`.** "The guard fired" and "the wrong step
+   ran" were indistinguishable in the output. `run()` now accepts a `(status, detail)`
+   tuple and every check in this flow names itself, which is what finally made the first
+   two diagnosable instead of guessable.
+
+Unit **310 passed / 2 skipped**, browser **23/23**, v2.0 gates **113/113 GET + 59/59
+write**, probe run twice with zero leaked fixtures.

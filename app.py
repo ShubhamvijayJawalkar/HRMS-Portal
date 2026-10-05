@@ -11558,6 +11558,126 @@ def _set_user_access_status(emp_id, status, allow_login, action, actor_emp_id):
         raise
 
 
+#: FR-USR-07's `action` vocabulary, mapped to the single-employee operation each one
+#: performs. Kept as data rather than an if/elif so a new action cannot be added
+#: without stating the status and the `allow_login` value it implies — those two are
+#: what decide whether sessions are closed, and getting them wrong is the difference
+#: between blocking somebody and signing them out.
+BULK_USER_ACTIONS = {
+    'block': ('Blocked', 0, 'block'),
+    'unblock': ('Active', 1, 'unblock'),
+    'archive': ('Archived', 0, 'archive'),
+    'restore': ('Active', 1, 'restore'),
+}
+
+#: A batch is bounded so one request cannot hold locks across the whole directory or
+#: read as a single "why did that take so long".
+BULK_USER_LIMIT = 500
+
+
+@app.route('/api/v1/users/bulk', methods=['POST'])
+@app.route('/api/users/bulk', methods=['POST'])
+@admin_required
+def bulk_user_action():
+    """FR-USR-07 — bulk block / unblock / archive / restore.
+
+    The SRS: *"Bulk POST /api/users/bulk {action, emp_ids[]}: self excluded; per-row
+    result reported, partial failure does not fail the batch."* The single-employee
+    routes took one employee at a time, so closing a leaver's team out, or
+    offboarding a department when a project ended, was one request per person — and an
+    administrator interrupted halfway had no way to tell which half.
+
+    **Each row delegates to `_set_user_access_status`**, the same function the single
+    routes call. That is the whole discipline: the batch cannot decide to be more
+    permissive about a 409, cannot forget to close sessions, and cannot skip the audit
+    row, because it has no implementation of its own to get wrong. Every refusal the
+    single routes make — already archived, archived users must be restored first,
+    already blocked — is therefore identical here, per row, with the same message.
+
+    **Self is a per-row failure, not a silent skip.** The single routes refuse it with
+    a 409 and so does this, reported in `failed` like any other refusal. Silently
+    dropping the row would be worse: an administrator who selected thirty people
+    including themselves would see "29 archived" with no indication that the
+    thirtieth was skipped for a different reason than the others.
+
+    **Partial failure does not fail the batch**, and the status code says which
+    happened: `200` all succeeded, `207` mixed, `400` none. A 200 that hid a failure —
+    or a 400 that hid twenty successes — is the reason the SRS asks for per-row
+    results in the first place.
+    """
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action') or '').strip().lower()
+    if action not in BULK_USER_ACTIONS:
+        return jsonify({
+            'error': f'action must be one of: {", ".join(sorted(BULK_USER_ACTIONS))}',
+        }), 400
+
+    raw_ids = data.get('emp_ids')
+    if isinstance(raw_ids, str):
+        raw_ids = [part.strip() for part in raw_ids.replace(';', ',').split(',')]
+    if not raw_ids:
+        return jsonify({'error': 'emp_ids required: one or more employee IDs'}), 400
+    if len(raw_ids) > BULK_USER_LIMIT:
+        return jsonify({
+            'error': f'At most {BULK_USER_LIMIT} employees per bulk request',
+        }), 400
+
+    # Normalised and blank-filtered **before** any work, so `['']` gets the same
+    # "emp_ids required" answer as `[]` rather than falling through the loop and
+    # arriving at a different message with zero rows processed.
+    emp_ids = [str(value).strip().upper() for value in raw_ids if str(value).strip()]
+    if not emp_ids:
+        return jsonify({'error': 'emp_ids required: one or more employee IDs'}), 400
+
+    status, allow_login, op = BULK_USER_ACTIONS[action]
+    actor = session['emp_id']
+    results = []
+    for emp_id in emp_ids:
+        if emp_id == actor:
+            # Same refusal, same wording as `block_user`/`archive_user`, so a client
+            # that handles the single-route message handles this one too.
+            results.append({
+                'emp_id': emp_id, 'ok': False,
+                'error': f'Cannot {op} your own account', 'status': 409,
+            })
+            continue
+        try:
+            body, code = _set_user_access_status(emp_id, status, allow_login, op, actor)
+            payload = body.get_json() if hasattr(body, 'get_json') else {}
+            results.append({
+                'emp_id': emp_id,
+                'ok': code < 400,
+                'status': code,
+                'error': None if code < 400 else (payload or {}).get('error'),
+                'sessions_closed': (payload or {}).get('sessions_closed'),
+            })
+        except Exception:
+            # One row raising must not abandon the rest of the batch. Logged with the
+            # employee, because a row that failed for an unexpected reason is the one
+            # an administrator most needs to see.
+            logger.exception('bulk %s failed for %s', action, emp_id)
+            results.append({
+                'emp_id': emp_id, 'ok': False, 'status': 500,
+                'error': 'The action failed for this employee',
+            })
+
+    succeeded = [r for r in results if r['ok']]
+    failed = [r for r in results if not r['ok']]
+    body = {
+        'action': action,
+        'requested': len(results),
+        'succeeded': len(succeeded),
+        'failed': len(failed),
+        'results': results,
+    }
+    if not succeeded:
+        # Nothing changed. The per-row reasons are already in `results`.
+        return jsonify({**body, 'error': f'No employees were {op}d'}), 400
+    if failed:
+        return jsonify(body), 207
+    return jsonify(body), 200
+
+
 @app.route('/api/users/<emp_id>/block', methods=['POST'])
 @admin_required
 def block_user(emp_id):

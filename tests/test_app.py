@@ -3593,6 +3593,247 @@ def _notifications_for(emp_id, ntype):
         conn.close()
 
 
+def _bulk_user(emp_ids, role='Employee', suffix='bulk'):
+    _cleanup_user_contract_rows(*emp_ids)
+    conn = get_db()
+    try:
+        for n, emp_id in enumerate(emp_ids):
+            conn.execute(
+                "INSERT INTO users (emp_id, name, email, role, password, status, "
+                "allow_login, department) VALUES (?, ?, ?, ?, ?, 'Active', 1, 'MIS')",
+                [emp_id, f'{suffix.title()} {n}', f'{emp_id.lower()}@company.com',
+                 role, hash_password('bulk-pass-123')])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_bulk_action_reports_every_row_and_a_partial_failure_does_not_fail_the_batch(client):
+    """FR-USR-07, High priority, entirely unimplemented.
+
+    The SRS: "Bulk POST /api/users/bulk {action, emp_ids[]}: self excluded; per-row
+    result reported, partial failure does not fail the batch." The single routes took
+    one employee at a time, so offboarding a department was one request per person and
+    an administrator interrupted halfway had no way to tell which half.
+    """
+    ids = ['EMP860', 'EMP861', 'EMP862']
+    _bulk_user(ids)
+    try:
+        _set_admin_session(client, 99960)
+        resp = client.post('/api/users/bulk', json={
+            'action': 'archive',
+            'emp_ids': [ids[0], 'EMP999', ids[1], ids[2]],
+        })
+        # 207, not 200: three succeeded and one did not. A 200 that hid the failure is
+        # exactly what "per-row result reported" exists to prevent.
+        assert resp.status_code == 207, (resp.status_code, resp.get_json())
+        body = resp.get_json()
+        assert body['action'] == 'archive', body
+        assert body['requested'] == 4, body
+        assert body['succeeded'] == 3, body
+        assert body['failed'] == 1, body
+
+        by_id = {r['emp_id']: r for r in body['results']}
+        assert by_id[ids[0]]['ok'] is True, by_id
+        assert by_id['EMP999']['ok'] is False, by_id
+        assert by_id['EMP999']['error'] == 'User not found', by_id
+        assert by_id['EMP999']['status'] == 404, by_id
+
+        # The three really were archived, and the unknown one was not created.
+        conn = get_db()
+        try:
+            statuses = {
+                r[0]: r[1] for r in conn.execute(
+                    "SELECT emp_id, status FROM users WHERE emp_id IN (?, ?, ?)", ids)
+            }
+            ghost = conn.execute(
+                "SELECT count(*) FROM users WHERE emp_id = 'EMP999'").fetchone()[0]
+        finally:
+            conn.close()
+        assert set(statuses.values()) == {'Archived'}, statuses
+        assert ghost == 0
+
+        # And each row was audited individually, by the delegated single-route path.
+        conn = get_db()
+        try:
+            audited = {
+                str(r[0]) for r in conn.execute(
+                    "SELECT entity_id FROM audit_log WHERE action = 'archive' "
+                    "AND entity_id IN (?, ?, ?)", ids)
+            }
+        finally:
+            conn.close()
+        assert audited == {str(i) for i in ids}, (
+            f'expected one audit row per archived employee, found {audited}'
+        )
+    finally:
+        _cleanup_user_contract_rows(*ids)
+
+
+def test_a_bulk_action_refuses_to_include_yourself(client):
+    """The SRS says "self excluded" — and the single routes refuse it with a 409.
+
+    Reported as a per-row **failure**, not silently skipped. An administrator who
+    selected thirty people including themselves and saw "29 archived" with no
+    indication the thirtieth was skipped would reasonably conclude the thirtieth was
+    archived too.
+    """
+    ids = ['EMP863', 'EMP864']
+    _bulk_user(ids)
+    try:
+        _set_admin_session(client, 99961)
+        resp = client.post('/api/users/bulk', json={
+            'action': 'archive',
+            'emp_ids': ['EMP001', ids[0], ids[1]],
+        })
+        assert resp.status_code == 207, (resp.status_code, resp.get_json())
+        body = resp.get_json()
+        assert body['succeeded'] == 2 and body['failed'] == 1, body
+        self_row = [r for r in body['results'] if r['emp_id'] == 'EMP001'][0]
+        assert self_row['ok'] is False, self_row
+        assert self_row['status'] == 409, self_row
+        # The wording matches `archive_user` exactly, so a client handling the
+        # single-route message handles this one without a special case.
+        assert self_row['error'] == 'Cannot archive your own account', self_row
+
+        conn = get_db()
+        try:
+            still = conn.execute(
+                "SELECT status FROM users WHERE emp_id = 'EMP001'").fetchone()[0]
+        finally:
+            conn.close()
+        assert still != 'Archived', 'the batch archived the acting administrator'
+    finally:
+        _cleanup_user_contract_rows(*ids)
+
+
+def test_a_bulk_action_inherits_every_refusal_the_single_routes_make(client):
+    """The batch has no implementation of its own, so it cannot be more permissive.
+
+    This is the discipline: each row delegates to `_set_user_access_status`, the same
+    function the single routes call. Without that, a batch would be a second
+    implementation of block/archive with its own idea of what is allowed — and the
+    two would drift the first time a guard was added to one of them.
+    """
+    ids = ['EMP865', 'EMP866']
+    _bulk_user(ids)
+    try:
+        _set_admin_session(client, 99962)
+        # Archive, then try to archive again: the second is a 409 per row, same as the
+        # single route.
+        first = client.post('/api/users/bulk', json={
+            'action': 'archive', 'emp_ids': ids,
+        })
+        assert first.status_code == 200, first.get_json()
+        second = client.post('/api/users/bulk', json={
+            'action': 'archive', 'emp_ids': ids,
+        })
+        assert second.status_code == 400, (
+            f'expected 400 when every row fails, got {second.status_code}'
+        )
+        for row in second.get_json()['results']:
+            assert row['ok'] is False, row
+            assert row['status'] == 409, row
+            assert 'already archived' in row['error'].lower(), row
+
+        # "Archived users must be restored before changing access" — the guard the
+        # single route applies, inherited per row.
+        blocked = client.post('/api/users/bulk', json={
+            'action': 'block', 'emp_ids': ids,
+        })
+        assert blocked.status_code == 400, blocked.get_json()
+        for row in blocked.get_json()['results']:
+            assert 'must be restored' in row['error'], row
+
+        # And restore brings them back, closing the loop.
+        back = client.post('/api/users/bulk', json={
+            'action': 'restore', 'emp_ids': ids,
+        })
+        assert back.status_code == 200, back.get_json()
+        conn = get_db()
+        try:
+            statuses = {
+                r[0]: r[1] for r in conn.execute(
+                    "SELECT emp_id, status FROM users WHERE emp_id IN (?, ?)", ids)
+            }
+        finally:
+            conn.close()
+        assert set(statuses.values()) == {'Active'}, statuses
+    finally:
+        _cleanup_user_contract_rows(*ids)
+
+
+def test_a_bulk_action_validates_before_it_touches_anybody(client):
+    """A malformed batch changes nothing — validation runs first, not per row."""
+    ids = ['EMP867']
+    _bulk_user(ids)
+    try:
+        _set_admin_session(client, 99963)
+        before = client.get(f'/api/users/{ids[0]}').get_json()['status']
+
+        for bad, because in (
+            ({'action': 'demolish', 'emp_ids': ids}, 'action must be one of'),
+            ({'action': 'archive'}, 'emp_ids required'),
+            ({'action': 'archive', 'emp_ids': []}, 'emp_ids required'),
+            ({'action': 'archive', 'emp_ids': ['']}, 'emp_ids required'),
+            ({'action': 'archive', 'emp_ids': [ids[0]] * 501}, 'At most 500'),
+        ):
+            resp = client.post('/api/users/bulk', json=bad)
+            assert resp.status_code == 400, (bad, resp.status_code, resp.get_json())
+            assert because in resp.get_json()['error'], (bad, resp.get_json())
+
+        assert client.get(f'/api/users/{ids[0]}').get_json()['status'] == before, (
+            'a rejected bulk request changed an employee status'
+        )
+    finally:
+        _cleanup_user_contract_rows(*ids)
+
+
+def test_a_bulk_action_closes_sessions_for_each_employee(client):
+    """Blocking or archiving must end that employee's sessions, in a batch too.
+
+    The `allow_login` value is what decides this, and it is chosen from the action
+    table rather than per row — which is exactly the kind of thing a second
+    implementation of "block" would get wrong for one of its branches.
+    """
+    ids = ['EMP868', 'EMP869']
+    _bulk_user(ids)
+    conn = get_db()
+    try:
+        for n, emp_id in enumerate(ids):
+            conn.execute(
+                "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) "
+                "VALUES (?, ?, ?, ?)",
+                [9100 + n, emp_id, datetime.now(), datetime.now().date()])
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        _set_admin_session(client, 99964)
+        resp = client.post('/api/users/bulk', json={'action': 'block', 'emp_ids': ids})
+        assert resp.status_code == 200, resp.get_json()
+        for row in resp.get_json()['results']:
+            assert row['sessions_closed'] == 1, row
+
+        conn = get_db()
+        try:
+            open_sessions = conn.execute(
+                "SELECT count(*) FROM user_sessions WHERE logout_time IS NULL "
+                "AND emp_id IN (?, ?)", ids).fetchone()[0]
+            login = {
+                r[0]: r[1] for r in conn.execute(
+                    "SELECT emp_id, allow_login FROM users WHERE emp_id IN (?, ?)", ids)
+            }
+        finally:
+            conn.close()
+        assert open_sessions == 0, (
+            f'{open_sessions} session(s) survived a bulk block'
+        )
+        assert set(login.values()) == {0}, login
+    finally:
+        _cleanup_user_contract_rows(*ids)
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
