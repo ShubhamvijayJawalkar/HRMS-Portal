@@ -1730,6 +1730,60 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return 200
     run("attendance(orphan break auto-closed)", orphan_break_sweep)
 
+    def leave_grant():
+        """FR-LEA-07: grant days to a balance and read the grant row back.
+
+        The assertion that matters on the canonical schema is that the grant
+        **persists and re-materialises**: `leave_balance.total_days` is derived and
+        `ensure_balances` overwrites it on every read, so an implementation that wrote
+        the grant straight into that column would pass the first check and be erased
+        by the second. Reading the balance back *after* a fresh read is therefore the
+        test, and `ended_reason`-style column vocabulary is not needed here because the
+        identity key on `leave_grants.grant_id` is what a bare-`VALUES` insert would
+        have got wrong.
+        """
+        before = _leave_casual(cl_a, tok_a)
+        r = _post(cl_a, tok_a, "/api/leave-grants", {
+            "emp_ids": ["EMP001"], "leave_type": "Casual", "days": 2,
+            "reason": "public write probe",
+        })
+        if r.status_code not in (200, 201, 207):
+            return r.status_code
+        results = (r.get_json() or {}).get("results") or []
+        if not results:
+            return 409
+        after = _leave_casual(cl_a, tok_a)
+        if after["total_days"] != before["total_days"] + 2:
+            return 409  # the grant was erased by the balance read, or never landed
+
+        with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"),
+                             autocommit=True) as pc:
+            row = pc.execute(
+                "SELECT days, grant_year, granted_by, reason FROM leave_grants "
+                "WHERE emp_id = %s ORDER BY grant_id DESC LIMIT 1",
+                ("EMP001",),
+            ).fetchone()
+            audited = pc.execute(
+                "SELECT count(*) FROM audit_log WHERE action = 'LEAVE_GRANT'"
+            ).fetchone()[0]
+        if not row or row[0] != 2 or row[2] != "EMP001":
+            return 409  # the canonical row was not written as expected
+        if not audited:
+            return 409  # the SRS requires the grant to be fully audited
+        # And reverse it, so the probe leaves the balance as it found it and a second
+        # run measures the same thing this one did.
+        undo = _post(cl_a, tok_a, "/api/leave-grants", {
+            "emp_ids": ["EMP001"], "leave_type": "Casual", "days": -2,
+            "reason": "public write probe: reversing",
+        })
+        if undo.status_code not in (200, 201, 207):
+            return undo.status_code
+        restored = _leave_casual(cl_a, tok_a)
+        if restored["total_days"] != before["total_days"]:
+            return 409
+        return 200
+    run("leaves(admin grant + reversal)", leave_grant)
+
     return out
 
 

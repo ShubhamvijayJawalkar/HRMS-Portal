@@ -3278,6 +3278,321 @@ def _next_weekday_on_or_after(day: date) -> date:
     return day
 
 
+def _grant_days_in_balance(emp_id, leave_type='Casual', year=None):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT total_days, used_days, reserved FROM leave_balance '
+            'WHERE emp_id = ? AND leave_type = ? AND year = ?',
+            [emp_id, leave_type, year or date.today().year],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {
+        'total_days': int(row[0] or 0),
+        'used_days': int(row[1] or 0),
+        'reserved': int(row[2] or 0),
+        'remaining': int(row[0] or 0) - int(row[1] or 0) - int(row[2] or 0),
+    }
+
+
+def test_an_admin_can_grant_leave_days_and_the_audit_row_carries_before_and_after(client):
+    """FR-LEA-07, High priority, entirely unimplemented.
+
+    The SRS: "Grants: HR/Admin can add days to one or more employees' balances for a
+    type/month/year; fully audited as LEAVE_GRANT with before/after totals." An
+    administrator who needed to give someone three days — a long-service award, a
+    settlement — had no route at all and would have gone to a database console.
+    """
+    _set_admin_session(client, 99880)
+    _create_policy_user(client, 'EMP991', role='Employee')
+    try:
+        _login_as(client, 'EMP991', 'Employee', 99870)
+        before = _casual_balance(client)
+        assert before['total_days'] == 12, before
+
+        _login_as(client, 'EMP001', 'Admin', 99881)
+        resp = client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP991'],
+            'leave_type': 'Casual',
+            'days': 3,
+            'year': date.today().year,
+            'reason': 'Long-service award, agreed in review',
+        })
+        assert resp.status_code == 201, resp.get_json()
+        body = resp.get_json()
+        assert body['granted'] == 1 and body['failed'] == 0, body
+        assert body['total_days'] == 3, body
+
+        outcome = body['results'][0]
+        # Before/after totals are what the SRS asks for, and they are read from the
+        # balance rather than computed as `before + days` — a grant can push an
+        # employee past the carry-forward cap, in which case the arithmetic sum states
+        # a ceiling they do not have, in the record an admin reads to decide whether to
+        # grant again.
+        assert outcome['before']['total_days'] == 12, outcome
+        assert outcome['after']['total_days'] == 15, outcome
+        assert outcome['after']['remaining'] == 15, outcome
+
+        # And the employee is told, because the adjustment is the reason their number
+        # differs from the policy.
+        notes = _notifications_for('EMP991', 'LEAVE_GRANT')
+        assert notes, 'the employee was not told their balance was adjusted'
+        assert '15' in notes[0], notes
+
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT actor, before, after FROM audit_log WHERE action = 'LEAVE_GRANT'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert rows, 'the grant was not audited'
+        assert rows[0][0] == 'EMP001', rows[0]
+        assert '12' in str(rows[0][1]) and '15' in str(rows[0][2]), rows[0]
+    finally:
+        _cleanup_leave_rows('EMP991')
+        _cleanup_user_contract_rows('EMP991')
+
+
+def test_a_grant_survives_the_next_balance_read(client):
+    """The trap the whole design exists to avoid.
+
+    `leave_balance.total_days` is DERIVED — `ensure_balances` recomputes it from the
+    policy on every read and overwrites it. A grant written straight into that column
+    would be silently erased the next time anybody opened the balance: the
+    administrator's adjustment surviving only until the next page load, with no audit
+    row able to explain where it went. So a grant is a row, and the entitlement adds
+    the year's grants up.
+    """
+    _set_admin_session(client, 99882)
+    _create_policy_user(client, 'EMP992', role='Employee')
+    try:
+        _login_as(client, 'EMP001', 'Admin', 99883)
+        assert client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP992'], 'leave_type': 'Casual', 'days': 4,
+            'reason': 'Settlement agreed in negotiation',
+        }).status_code == 201
+
+        # Now force several reads, which is what overwrites a naive implementation.
+        for _ in range(3):
+            _login_as(client, 'EMP992', 'Employee', 99884)
+            seen = client.get('/api/leave-balance').get_json()
+            emp = [b for b in seen if b['leave_type'] == 'Casual'][0]
+            assert emp['total_days'] == 16, (
+                f'the grant was erased by a balance read: {emp}'
+            )
+            # And the source explains the number, so a ceiling that does not match the
+            # policy is traceable rather than mysterious.
+            assert 'grants' in emp['source'], emp
+    finally:
+        _cleanup_leave_rows('EMP992')
+        _cleanup_user_contract_rows('EMP992')
+
+
+def test_a_grant_batch_isolates_one_bad_employee_from_the_rest(client):
+    """The SRS says "one or more employees", and a batch has to survive a typo.
+
+    All-or-nothing would mean one mistyped ID in a list of fifty costs the
+    administrator the whole afternoon and the other forty-nine their adjustment.
+    """
+    _set_admin_session(client, 99885)
+    _create_policy_user(client, 'EMP993', role='Employee')
+    _create_policy_user(client, 'EMP994', role='Employee')
+    try:
+        _login_as(client, 'EMP001', 'Admin', 99886)
+        resp = client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP993', 'EMP999', 'EMP994'],
+            'leave_type': 'Casual', 'days': 2, 'reason': 'Night-shift award',
+        })
+        # Partial success is reported as partial, not flattened into a 200 or a 400.
+        assert resp.status_code == 207, (resp.status_code, resp.get_json())
+        body = resp.get_json()
+        assert body['granted'] == 2, body
+        assert body['failed'] == 1, body
+        assert body['failures'][0]['emp_id'] == 'EMP999', body
+
+        for emp_id in ('EMP993', 'EMP994'):
+            conn = get_db()
+            try:
+                n = conn.execute(
+                    'SELECT count(*) FROM leave_grants WHERE emp_id = ?', [emp_id],
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            assert n == 1, f'{emp_id} did not get their grant'
+
+        # And one audit row per successful employee, not one summary row: a summary
+        # records one fact about two people, which is the shape FR-AUD-01's
+        # before/after columns exist to avoid.
+        #
+        # Scoped to **this batch's** grant ids. The first version queried every
+        # `LEAVE_GRANT` row in the table and asserted two, which is only true if it is
+        # the only grant test that ran — so it passed in isolation and failed in a full
+        # run. The scoping is by the returned ids, which is also the stronger
+        # assertion: these two grants, these two rows.
+        batch_ids = {str(r['grant_id']) for r in body['results']}
+        conn = get_db()
+        try:
+            audited = {
+                str(r[0]) for r in conn.execute(
+                    "SELECT entity_id FROM audit_log WHERE action = 'LEAVE_GRANT' "
+                    "AND entity_id IN (?, ?)",
+                    sorted(batch_ids),
+                ).fetchall()
+            }
+        finally:
+            conn.close()
+        assert audited == batch_ids, (
+            f'expected one LEAVE_GRANT audit row per granted employee {sorted(batch_ids)}, '
+            f'found {sorted(audited)}'
+        )
+    finally:
+        for emp_id in ('EMP993', 'EMP994'):
+            _cleanup_leave_rows(emp_id)
+            _cleanup_user_contract_rows(emp_id)
+
+
+def test_a_grant_is_validated_before_any_balance_is_touched(client):
+    """FR-AUD-01's half: a rejected grant must have no side effect.
+
+    `reason` is required, not optional. "HR/Admin added 3 days" is not a fact an
+    auditor can use, and a leave grant is the one adjustment most likely to be
+    disputed months later by the person whose balance it changed.
+    """
+    import leave_grants as grant_module
+
+    _set_admin_session(client, 99887)
+    _create_policy_user(client, 'EMP995', role='Employee')
+    try:
+        _login_as(client, 'EMP001', 'Admin', 99888)
+        before = _grant_days_in_balance('EMP995')
+        for bad, because in (
+            ({'emp_ids': ['EMP995'], 'leave_type': 'Casual', 'days': 2},
+             'reason is required'),
+            ({'emp_ids': [], 'leave_type': 'Casual', 'days': 2, 'reason': 'x'},
+             'emp_ids required'),
+            ({'emp_ids': ['EMP995'], 'leave_type': 'Nonsense', 'days': 2, 'reason': 'x'},
+             'leave_type must be one of'),
+            ({'emp_ids': ['EMP995'], 'leave_type': 'Casual', 'days': 0, 'reason': 'x'},
+             'must not be zero'),
+            ({'emp_ids': ['EMP995'], 'leave_type': 'Casual', 'days': 'lots', 'reason': 'x'},
+             'whole number'),
+            ({'emp_ids': ['EMP995'], 'leave_type': 'Casual', 'days': 2, 'reason': 'x',
+              'month': 13}, 'month must be'),
+        ):
+            resp = client.post('/api/leave-grants', json=bad)
+            assert resp.status_code == 400, (bad, resp.status_code, resp.get_json())
+            assert because in resp.get_json()['error'], (bad, resp.get_json())
+            assert _grant_days_in_balance('EMP995') == before, (
+                f'a rejected grant changed the balance: {bad}'
+            )
+
+        # A grant to an employee who cannot sign in is refused with the reason, rather
+        # than producing a number nobody will ever spend.
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE users SET status = 'Archived' WHERE emp_id = 'EMP995'")
+            conn.commit()
+        finally:
+            conn.close()
+        resp = client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP995'], 'leave_type': 'Casual', 'days': 2, 'reason': 'x',
+        })
+        assert resp.status_code == 400, resp.get_json()
+        assert 'Archived' in resp.get_json()['failures'][0]['error'], resp.get_json()
+
+        # And the validator itself is unit-testable without a database.
+        spec = grant_module.validate({
+            'emp_ids': 'emp996, EMP997', 'leave_type': 'Casual',
+            'days': '3', 'reason': 'ok', 'month': '6',
+        })
+        assert spec['emp_ids'] == ['EMP996', 'EMP997'], spec
+        assert spec['days'] == 3 and spec['month'] == 6, spec
+    finally:
+        _cleanup_leave_rows('EMP995')
+        _cleanup_user_contract_rows('EMP995')
+
+
+def test_a_grant_can_be_reversed_by_granting_a_negative(client):
+    """A "grant" endpoint that cannot subtract forces a code change to undo a typo.
+
+    The SRS says "add days", and this route deliberately does more than that: a
+    mis-keyed grant is corrected through the same audited route, which keeps the
+    correction in the same ledger as the mistake instead of leaving the first entry
+    looking like the last word.
+    """
+    _set_admin_session(client, 99889)
+    _create_policy_user(client, 'EMP998', role='Employee')
+    try:
+        _login_as(client, 'EMP001', 'Admin', 99890)
+        assert client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP998'], 'leave_type': 'Casual', 'days': 5,
+            'reason': 'Typo: meant 1 day',
+        }).status_code == 201
+        assert _grant_days_in_balance('EMP998')['total_days'] == 17
+
+        resp = client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP998'], 'leave_type': 'Casual', 'days': -4,
+            'reason': 'Reversing the previous grant, which was keyed wrong',
+        })
+        assert resp.status_code == 201, resp.get_json()
+        after = _grant_days_in_balance('EMP998')
+        assert after['total_days'] == 13, after
+
+        conn = get_db()
+        try:
+            history = conn.execute(
+                'SELECT days, reason FROM leave_grants WHERE emp_id = ? '
+                'ORDER BY grant_id', ['EMP998'],
+            ).fetchall()
+        finally:
+            conn.close()
+        # Both rows are kept. A grant history that hid a reversal would answer "who
+        # changed my balance?" with the wrong story.
+        assert len(history) == 2, history
+        assert history[1][0] == -4, history
+    finally:
+        _cleanup_leave_rows('EMP998')
+        _cleanup_user_contract_rows('EMP998')
+
+
+def test_the_grant_history_answers_why_a_balance_differs_from_the_policy(client):
+    """An unexplained ceiling is the failure this project keeps chasing back."""
+    _set_admin_session(client, 99891)
+    _create_policy_user(client, 'EMP989', role='Employee')
+    try:
+        _login_as(client, 'EMP001', 'Admin', 99892)
+        assert client.post('/api/leave-grants', json={
+            'emp_ids': ['EMP989'], 'leave_type': 'Annual', 'days': 7,
+            'year': date.today().year, 'reason': 'Retrospective entitlement',
+        }).status_code == 201
+
+        history = client.get('/api/leave-grants?emp_id=EMP989').get_json()
+        assert history['emp_id'] == 'EMP989', history
+        assert len(history['grants']) == 1, history
+        assert history['grants'][0]['days'] == 7, history
+        assert history['grants'][0]['reason'] == 'Retrospective entitlement', history
+        assert history['grants'][0]['granted_by'] == 'EMP001', history
+    finally:
+        _cleanup_leave_rows('EMP989')
+        _cleanup_user_contract_rows('EMP989')
+
+
+def _notifications_for(emp_id, ntype):
+    conn = get_db()
+    try:
+        return [r[0] for r in conn.execute(
+            'SELECT message FROM notifications WHERE emp_id = ? AND type = ? '
+            'ORDER BY notification_id DESC', [emp_id, ntype],
+        ).fetchall()]
+    finally:
+        conn.close()
+
+
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating

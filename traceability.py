@@ -420,9 +420,38 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-LEA-06': ('H', 'C', 'IMPLEMENTED', ('/api/leave-balance',),
                   'total/used/reserved/remaining derived per type per year, with the '
                   'source reported so a number can be traced to a policy or a default.'),
-    'FR-LEA-07': ('H', 'C', 'NOT_STARTED', (),
-                  'No manual grant route and no LEAVE_GRANT audit action. An admin '
-                  'cannot add days to an employee; only the policy and the accrual job can.'),
+    'FR-LEA-07': ('H', 'C', 'IMPLEMENTED', ('/api/leave-grants',),
+                  'All five clauses. HR/Admin can add days to ONE OR MORE employees'
+                  'balances for a type/month/year; every grant is audited as LEAVE_GRANT '
+                  'with before/after totals; the employee is notified; and a GET returns '
+                  'the grant history, so a balance that differs from the policy is '
+                  'explainable rather than mysterious. The gate is '
+                  'hr_or_admin_required, because the requirement names both and '
+                  '@admin_required would have excluded HR - the same gate-versus-'
+                  'requirement mismatch this codebase has now found in four places. THE '
+                  'DESIGN DECISION: a grant is NOT written to '
+                  'leave_balance.total_days. That column is DERIVED - ensure_balances '
+                  'recomputes it from the policy on every read and overwrites it - so a '
+                  'grant written there would be silently erased the next time anybody '
+                  'opened the balance, surviving only until the next page load with no '
+                  'audit row able to explain where it went. The grant is a ROW '
+                  '(leave_grants, Alembic 0011) and entitlement_days adds the years grants '
+                  'to the policy figure; the entitlement was split into a wrapper plus '
+                  '_policy_entitlement_days precisely because the policy function has '
+                  'four early returns and adding the grant to each is how a future branch '
+                  'would silently forget it. entitlement gains a +grants source suffix so '
+                  'a number that came from an administrator is self-describing. '
+                  'Before/after totals are READ FROM THE BALANCE, not computed as '
+                  'before + days: a grant can push an employee past the carry-forward '
+                  'cap, so the arithmetic sum states a ceiling they do not have, in the '
+                  'record an administrator reads to decide whether to grant again. A '
+                  'grant may be NEGATIVE because the same route is how a mis-keyed one is '
+                  'corrected and the correction stays in the same ledger as the mistake. '
+                  'Each employee in a batch commits and audits independently and partial '
+                  'success answers 207: one mistyped id in a list of fifty would '
+                  'otherwise cost the other forty-nine their adjustment. reason is '
+                  'required. An archived or blocked employee is refused with the reason, '
+                  'because a grant produces a number nobody can spend.'),
     'FR-LEA-08': ('H', 'C', 'IMPLEMENTED', ('/api/users/<emp_id>/leave-policy', '/api/accrual/run',),
                   'Effective-dated per employee, entitlement derived and accrued month '
                   'by month from the rate, capped by the carry-forward cap, the ledger '

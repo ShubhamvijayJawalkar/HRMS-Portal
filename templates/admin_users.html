@@ -469,6 +469,12 @@ function loadUsers(page) {
             const permAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-secondary btn-sm" onclick="openPermissions('${u.emp_id}')" title="Permissions"><i class="bi bi-shield-lock"></i></button>`;
             const piiAction = u.emp_id === myEmpId || !canRevealPii ? '' : `<button class="btn btn-outline-warning btn-sm" onclick="revealPii('${u.emp_id}','${esc(u.name)}')" title="Personal data (audited)"><i class="bi bi-eye"></i></button>`;
             const policyAction = u.status === 'Archived' ? '' : `<button class="btn btn-outline-info btn-sm" onclick="openLeavePolicy('${u.emp_id}')" title="Leave policy"><i class="bi bi-calendar2-week"></i></button>`;
+            // FR-LEA-07. Offered only on an Active row, like the password action: a
+            // grant to a blocked or archived employee produces a number nobody can
+            // spend, and the route refuses it with a 409 naming that.
+            const grantAction = u.status === 'Active'
+                ? `<button class="btn btn-outline-success btn-sm" onclick="openGrantModal('${u.emp_id}','${esc(u.name)}')" title="Grant leave days — add days to this balance by hand"><i class="bi bi-plus-circle"></i></button>`
+                : '';
             const anonAction = (u.status !== 'Archived' || !canAnonymise) ? '' : `<button class="btn btn-outline-danger btn-sm" onclick="openAnonymise('${u.emp_id}','${esc(u.name)}')" title="Anonymise (irreversible, two-person)"><i class="bi bi-shield-exclamation"></i></button>`;
             // FR-AUTH-11 recovery. Shown for active/onboarding accounts only,
             // because a blocked or archived account cannot sign in to be locked
@@ -496,7 +502,7 @@ function loadUsers(page) {
             const passwordAction = u.status === 'Active'
                 ? `<button class="btn btn-outline-warning btn-sm" onclick="openPasswordModal('${u.emp_id}','${esc(u.name)}')" title="Set a new password — the recovery path when email is unavailable"><i class="bi bi-key"></i></button>`
                 : '';
-            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${mfaAction}${passwordAction}${unlockAction}${anonAction}${accessAction}${archiveAction}</div>`;
+            const actions = `<div class="action-btns"><button class="btn btn-info btn-sm" onclick="openEditModal('${u.emp_id}')" title="Edit"><i class="bi bi-pencil"></i></button>${permAction}${piiAction}${policyAction}${grantAction}${mfaAction}${passwordAction}${unlockAction}${anonAction}${accessAction}${archiveAction}</div>`;
             return `<tr>
                 <td><strong>${esc(u.emp_id)}</strong></td>
                 <td>${esc(u.name)}</td>
@@ -635,6 +641,66 @@ async function revealPii(id, name) {
     new bootstrap.Modal(document.getElementById('piiModal')).show();
 }
 let lpEmpId = null;
+
+// FR-LEA-07: an administrator adds days to a balance by hand. The reason field is
+// required server-side and the confirm restates it, because a leave grant is the one
+// adjustment most likely to be disputed months later by the person whose balance it
+// moved — "HR/Admin added 3 days" is not a fact an auditor can use.
+async function openGrantModal(id, name) {
+    document.getElementById('grEmpId').value = id;
+    document.getElementById('grEmpLabel').textContent = `${name} (${id})`;
+    document.getElementById('grType').value = 'Casual';
+    document.getElementById('grDays').value = '';
+    document.getElementById('grReason').value = '';
+    document.getElementById('grResult').classList.add('d-none');
+    const modal = new bootstrap.Modal(document.getElementById('grantModal'));
+    modal.show();
+}
+
+async function submitGrant() {
+    const empId = document.getElementById('grEmpId').value;
+    const days = parseInt(document.getElementById('grDays').value, 10);
+    const payload = {
+        emp_ids: [empId],
+        leave_type: document.getElementById('grType').value,
+        days: Number.isNaN(days) ? undefined : days,
+        reason: document.getElementById('grReason').value.trim(),
+        year: new Date().getFullYear(),
+    };
+    if (!payload.reason) {
+        const box = document.getElementById('grResult');
+        box.classList.remove('d-none');
+        box.className = 'alert alert-danger';
+        box.textContent = 'A reason is required — this is an audited adjustment.';
+        return;
+    }
+    const r = await fetch('/api/leave-grants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    });
+    const d = await r.json().catch(() => ({}));
+    const box = document.getElementById('grResult');
+    box.classList.remove('d-none');
+    if (!r.ok) {
+        box.className = 'alert alert-danger';
+        box.textContent = d.error
+            || (d.failures && d.failures.length ? d.failures[0].error : 'Grant failed');
+        return;
+    }
+    const o = (d.results || [])[0] || {};
+    box.className = 'alert alert-success';
+    // Both figures are shown because the "after" is read from the balance rather than
+    // computed as before+days: a grant can push someone past the carry-forward cap, so
+    // the arithmetic sum is not always the ceiling they end up with.
+    box.innerHTML = `<b>${esc(o.emp_id)}</b>: ${o.before ? o.before.total_days : '?'}`
+        + ` &rarr; <b>${o.after ? o.after.total_days : '?'}</b> total `
+        + `(${o.after ? o.after.remaining : '?'} remaining)<br>`
+        + `<span class="text-muted">Source: ${esc(o.source || '')}</span>`;
+    document.getElementById('grDays').value = '';
+    document.getElementById('grReason').value = '';
+    loadUsers();
+}
 
 async function openLeavePolicy(id) {
     const r = await fetch(`/api/users/${id}/leave-policy`);
@@ -874,6 +940,59 @@ async function submitAdminPassword() {
     loadUsers();
 }
 </script>
+
+<!-- FR-LEA-07 manual leave grant. The before/after figures are named in the body
+     because the "after" is read from the balance rather than computed as before+days:
+     a grant can push an employee past the carry-forward cap, so the arithmetic sum is
+     not always the ceiling they end up with. -->
+<div class="modal fade" id="grantModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Grant leave days to <span id="grEmpLabel"></span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-info py-2">
+                    An adjustment to this year's balance, on top of what the leave
+                    policy entitles them to. It is recorded in the grant history and in
+                    the audit log with before/after totals, and the employee is notified.
+                    <strong>A negative value reverses an earlier grant</strong> through
+                    this same route, so the correction lives in the same ledger as the
+                    mistake.
+                </div>
+                <input type="hidden" id="grEmpId">
+                <div class="mb-3">
+                    <label class="form-label">Leave type *</label>
+                    <select id="grType" class="form-select">
+                        <option>Casual</option>
+                        <option>Sick</option>
+                        <option>Annual</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Days *</label>
+                    <input type="number" id="grDays" class="form-control" step="1"
+                           placeholder="e.g. 3, or -3 to reverse">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Reason *</label>
+                    <input type="text" id="grReason" class="form-control"
+                           maxlength="500" placeholder="Why is this being adjusted?">
+                    <div class="form-text">
+                        Required and stored with the grant. "HR/Admin added 3 days" is not
+                        a fact anyone can audit months later.
+                    </div>
+                </div>
+                <div id="grResult" class="d-none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-success" onclick="submitGrant()">Grant days</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <!-- Admin-set password. Present because /api/forgot-password delivers its link
      only by email, so on a deployment with no SMTP server this is the *only* way a

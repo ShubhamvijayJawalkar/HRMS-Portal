@@ -52,6 +52,7 @@ import holiday_calendar  # noqa: E402  # holiday calendar maintenance (FR-HOL-01
 import holidays_optin  # noqa: E402  # optional-holiday opt-ins (FR-HOL-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
+import leave_grants  # noqa: E402  # manual leave grants (FR-LEA-07)
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import notifications  # noqa: E402  # per-category notification preferences (FR-NOT-03)
 import orphan_breaks  # noqa: E402  # auto-close of breaks left Active (FR-AUTH-14/FR-JOB-02)
@@ -785,6 +786,26 @@ def init_db():
             used_days INTEGER DEFAULT 0,
             reserved INTEGER DEFAULT 0,
             year INTEGER NOT NULL,
+            FOREIGN KEY (emp_id) REFERENCES users(emp_id)
+        )
+    ''')
+    # FR-LEA-07: manual leave grants. A separate ledger rather than a write to
+    # `leave_balance.total_days`, because that column is DERIVED and `ensure_balances`
+    # overwrites it on every read — a grant written straight there would be silently
+    # erased the next time anybody looked at the balance. `grant_month`/`grant_year`
+    # carry the SRS's "for a type/month/year" even though only the year feeds the
+    # entitlement, so the record says which period an administrator adjusted.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS leave_grants (
+            grant_id INTEGER PRIMARY KEY,
+            emp_id VARCHAR NOT NULL,
+            leave_type VARCHAR NOT NULL,
+            days INTEGER NOT NULL,
+            grant_month INTEGER,
+            grant_year INTEGER NOT NULL,
+            granted_by VARCHAR,
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
@@ -9635,6 +9656,102 @@ def leaves_api():
         'calendar_days': (ed - sd).days + 1,
         'session': session_kind,
     }), 201
+
+
+@app.route('/api/v1/leave-grants', methods=['POST', 'GET'])
+@app.route('/api/leave-grants', methods=['POST', 'GET'])
+@hr_or_admin_required
+def leave_grants_api():
+    """FR-LEA-07 — HR/Admin grants days to one or more employees' balances.
+
+    The SRS: *"Grants: HR/Admin can add days to one or more employees' balances for a
+    type/month/year; fully audited as LEAVE_GRANT with before/after totals."* All five
+    clauses are implemented here, and the gate is HR **or** Admin because the
+    requirement names both and `@admin_required` would have excluded HR — the same
+    gate-versus-requirement mismatch this codebase has now found in four places.
+
+    **Each employee is committed and audited independently**, so one unknown id in a
+    list of fifty does not fail the other forty-nine. A batch that is all-or-nothing
+    would mean a single typo costs an administrator the whole afternoon.
+    """
+    if request.method == 'GET':
+        emp_id = request.args.get('emp_id') or session['emp_id']
+        conn = get_db()
+        try:
+            # A grant history is reason a ceiling moved. An administrator looking at a
+            # number that does not match the policy needs this, and an employee
+            # questioning a grant needs it too.
+            return jsonify({
+                'emp_id': emp_id,
+                'grants': leave_grants.grants_for(conn, emp_id),
+            }), 200
+        finally:
+            conn.close()
+
+    data = request.get_json(silent=True) or {}
+    try:
+        spec = leave_grants.validate(data)
+    except leave_grants.GrantError as exc:
+        return jsonify({'error': exc.message}), exc.status
+
+    actor = session['emp_id']
+    results, failures = [], []
+    # One connection per employee: the ledger write, the re-materialisation and the
+    # audit row belong together, and an employee whose grant failed must not roll back
+    # the forty-nine that succeeded.
+    for emp_id in spec['emp_ids']:
+        conn = get_db()
+        try:
+            outcome = leave_grants.apply_grant(conn, actor, {**spec, 'emp_id': emp_id})
+            conn.commit()
+        except leave_grants.GrantError as exc:
+            conn.rollback()
+            failures.append({'emp_id': exc.emp_id or emp_id, 'error': exc.message})
+            continue
+        except Exception:
+            conn.rollback()
+            logger.exception('leave grant failed for %s', emp_id)
+            failures.append({'emp_id': emp_id, 'error': 'grant failed'})
+            continue
+        finally:
+            conn.close()
+
+        results.append(outcome)
+        # Audit **per employee**, inside the success path, so the row and the ledger
+        # write belong to the same outcome. A summary row written once at the end would
+        # record one fact about forty-nine people, which is the shape FR-AUD-01's
+        # before/after columns exist to avoid.
+        audit_log(
+            actor, 'LEAVE_GRANT',
+            f"Granted {outcome['days']} day(s) {outcome['leave_type']} "
+            f"({outcome['year']}) to {outcome['emp_id']}: {outcome['reason']}",
+            entity='leave_grants', entity_id=str(outcome['grant_id']),
+            before=outcome['before'], after=outcome['after'],
+        )
+        add_notification(
+            outcome['emp_id'], 'LEAVE_GRANT',
+            f"An administrator adjusted your {outcome['leave_type']} leave balance "
+            f"for {outcome['year']} by {outcome['days']} day(s). Your remaining "
+            f"balance is now {outcome['after']['remaining']} day(s). "
+            f"Reason: {outcome['reason']}",
+            '/leaves',
+            category=notifications.category_for('LEAVE_GRANT'),
+        )
+
+    body = {
+        'granted': len(results),
+        'failed': len(failures),
+        'results': results,
+        'failures': failures,
+        'total_days': sum(r['days'] for r in results),
+    }
+    if not results:
+        # Nothing was granted. The specific reason is already in `failures`; this only
+        # says the batch as a whole achieved nothing.
+        return jsonify({**body, 'error': 'No grants were applied'}), 400
+    # Partial success is a real outcome and is reported as one — 207 — rather than a
+    # 200 that hides the failures or a 400 that hides the successes.
+    return jsonify(body), (207 if failures else 201)
 
 
 @app.route('/api/v1/leaves/export', methods=['GET'])

@@ -145,6 +145,11 @@ _PREFIX_RULES = (
 # fall through to FALLBACK, and they are the ones the app really sends.
 _EXACT = {
     'LEAVE_APPLIED': 'Leaves',
+    # FR-LEA-07: an administrator adjusted this employee's balance by hand. They have to
+    # be told — the adjustment is the reason their number differs from the policy, and
+    # an unexplained ceiling is exactly the thing this project keeps having to chase
+    # back to its source.
+    'LEAVE_GRANT': 'Leaves',
     'LEAVE_APPROVED': 'Leaves',
     'LEAVE_REJECTED': 'Leaves',
     'LEAVE_CANCELLED': 'Leaves',
@@ -341,6 +346,7 @@ def wants_email(effective: dict, category: str) -> bool:
 KNOWN_TYPES = (
     # app.py
     'LEAVE_APPLIED', 'LEAVE_APPROVED', 'LEAVE_REJECTED', 'LEAVE_CANCELLED',
+    'LEAVE_GRANT',
     'TICKET_ASSIGNED', 'TICKET_UPDATED',
     'GOAL_RATED', 'REVIEW_SUBMITTED',
     'HOLIDAY_OPTIN_REQUESTED',

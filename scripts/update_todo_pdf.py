@@ -51,6 +51,41 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-02", "FR-LEA-07: HR/Admin can grant leave days by hand. High priority, and nothing "
+     "implemented any of it - an administrator who needed to give someone three days had no route "
+     "at all and would have gone to a database console. All five SRS clauses ship: add days to "
+     "one or more employees for a type/month/year, audited as LEAVE_GRANT with before/after "
+     "totals, the employee notified, and a GET returning the grant history. THE DESIGN DECISION "
+     "carries the slice: a grant is NOT written to leave_balance.total_days. That column is "
+     "DERIVED - ensure_balances recomputes it from the policy on every read and overwrites it - so "
+     "a grant written there would be silently erased the next time anybody opened the balance, "
+     "surviving only until the next page load with no audit row able to explain where it went. The "
+     "grant is a ROW in leave_grants (Alembic 0011) and entitlement_days adds the year's grants to "
+     "the policy figure. The entitlement was split into a wrapper plus "
+     "_policy_entitlement_days for a specific reason: the policy function has four early returns, "
+     "and adding the grant to each one is exactly how a future branch would silently forget it. A "
+     "test forces three balance reads in a row, because the erasure this design prevents only "
+     "appears on the SECOND read. entitlement gains a +grants source suffix so a number that came "
+     "from an administrator is self-describing rather than mysterious. Before/after totals are READ "
+     "FROM THE BALANCE rather than computed as before+days, because a grant can push an employee "
+     "past the carry-forward cap - in which case the arithmetic sum states a ceiling they do not "
+     "have, in the very record an administrator reads to decide whether to grant again. A grant "
+     "may be NEGATIVE, since the same route is how a mis-keyed one is corrected and the correction "
+     "stays in the same ledger as the mistake rather than leaving the first entry looking like the "
+     "last word. Each employee in a batch commits and audits independently and partial success "
+     "answers 207: one mistyped id in a list of fifty would otherwise cost the other forty-nine "
+     "their adjustment. reason is required, because HR/Admin added 3 days is not a fact an auditor "
+     "can use. An archived or blocked employee is refused with the reason - a grant produces a "
+     "number nobody can spend. The gate is hr_or_admin_required because the requirement names both "
+     "HR and Admin; @admin_required would have excluded HR, which is the same "
+     "gate-versus-requirement mismatch this codebase has now found in four places. Two bugs of my "
+     "own again: six test functions omitted their client parameter, so client resolved to the "
+     "module-level fixture DEFINITION and every one failed with an AttributeError on .post; and the "
+     "batch audit assertion queried every LEAVE_GRANT row in the table and expected two, which is "
+     "only true if it is the only grant test that ran - so it passed in isolation and failed in a "
+     "full run. It is now scoped to the returned grant ids, which is also the stronger assertion. "
+     "Matrix 66 IMPLEMENTED / 32 PARTIAL / 5 NOT_STARTED / 1 RETIRED. Unit 305 passed / 2 skipped, "
+     "browser 23/23, v2.0 gates 113/113 GET + 58/58 write, probe run twice for idempotency."),
     ("2026-10-02", "FR-LEA-09 (and FR-LEA-02): one working-day function, called from one place. The "
      "SRS states the defect and the fix together - the working-day/holiday-deduction function used "
      "for leave days, the payroll LOP calculation and the reports 'working days' figure IS the same "
@@ -1132,13 +1167,13 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "299 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "299 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "305 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "305 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0010_leave_days_stored, identity/sequence rules, required tables, count deltas"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "111/111 GET + 57/57 write flows; run twice to confirm idempotency"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0011_leave_grants, identity/sequence rules, required tables, count deltas"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "113/113 GET + 58/58 write flows; run twice to confirm idempotency"),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
     ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),

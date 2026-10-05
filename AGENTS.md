@@ -2410,3 +2410,64 @@ reading of the SRS and it is not backwards-compatible.
 Unit **299 passed / 2 skipped**, browser **23/23**, v2.0 gates **111/111 GET + 57/57
 write**, probe run twice for idempotency, preflight and CC-01 green at head
 `0010_leave_days_stored`.
+
+## FR-LEA-07: HR/Admin can grant leave days by hand
+High priority, and **nothing** implemented any of it. An administrator who needed to
+give someone three days — a long-service award, a settlement agreed in negotiation, a
+policy applied to the wrong person — had no route at all and would have gone to a
+database console.
+
+All five SRS clauses ship: add days to **one or more** employees for a
+type/month/year, audited as `LEAVE_GRANT` with **before/after totals**, the employee
+notified, and a `GET` returning the grant history.
+
+- **The design decision carries the slice: a grant is NOT written to
+  `leave_balance.total_days`.** That column is *derived* — `ensure_balances`
+  recomputes it from the policy on every read and overwrites it. A grant written there
+  would be silently erased the next time anybody opened the balance: the
+  administrator's adjustment surviving only until the next page load, with no audit row
+  able to explain where it went. So the grant is a **row** (`leave_grants`, Alembic
+  `0011`) and `entitlement_days` adds the year's grants to the policy figure.
+- **The entitlement was split into a wrapper plus `_policy_entitlement_days`** for a
+  specific reason: the policy function has **four early returns**, and adding the grant
+  to each one is exactly how a future branch would silently forget it.
+- **A test forces three balance reads in a row**, because the erasure this design
+  prevents only appears on the **second** read. A single read would pass a naive
+  implementation.
+- `entitlement` gains a `+grants` source suffix, so a number that came from an
+  administrator is self-describing rather than mysterious.
+- **Before/after totals are read from the balance, not computed as `before + days`.**
+  A grant can push an employee past the carry-forward cap, in which case the
+  arithmetic sum states a ceiling they do not have — in the very record an
+  administrator reads to decide whether to grant again.
+- **A grant may be negative**, because the same route is how a mis-keyed one is
+  corrected, and the correction then lives in the same ledger as the mistake instead of
+  leaving the first entry looking like the last word.
+- **Each employee in a batch commits and audits independently**, and partial success
+  answers **207**. One mistyped id in a list of fifty would otherwise cost the other
+  forty-nine their adjustment.
+- `reason` is **required**. "HR/Admin added 3 days" is not a fact an auditor can use,
+  and a leave grant is the one adjustment most likely to be disputed months later.
+- An archived or blocked employee is **refused with the reason**: a grant produces a
+  number nobody can spend.
+- The gate is `hr_or_admin_required`, because the requirement names **both** HR and
+  Admin. `@admin_required` would have excluded HR — the same gate-versus-requirement
+  mismatch this codebase has now found in four places.
+
+## Two bugs of my own again
+
+- **Six test functions omitted their `client` parameter**, so `client` resolved to the
+  module-level fixture *definition* and every one failed with `AttributeError` on
+  `.post`. Second time this session; the symptom is recognisable now.
+- **The batch audit assertion queried every `LEAVE_GRANT` row in the table** and
+  expected two, which is only true if it is the only grant test that ran — so it
+  **passed in isolation and failed in a full run**, the seventh instance of
+  test-order interference. Now scoped to the returned grant ids, which is also the
+  stronger assertion: these two grants, these two rows.
+
+A probe flow `leaves(admin grant + reversal)` proves it on the canonical schema and
+**reads the balance back after a fresh read**, then reverses the grant so a second run
+measures the same thing — which is also what keeps the probe idempotent.
+
+Unit **305 passed / 2 skipped**, browser **23/23**, v2.0 gates **113/113 GET + 58/58
+write**, probe run twice, preflight and CC-01 green at head `0011_leave_grants`.

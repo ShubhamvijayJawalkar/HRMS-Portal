@@ -31,11 +31,14 @@ no policy assignment resolves to the same numbers they have today.
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 
 # Entitlement used when the employee has no effective policy assignment. These
 # are the values the v1.0 boot seed wrote, kept verbatim so deriving changes
 # nothing until a policy is actually assigned.
+logger = logging.getLogger(__name__)
+
 DEFAULT_ENTITLEMENTS = {
     'Casual': 12,
     'Sick': 10,
@@ -118,18 +121,56 @@ def effective_assignment(conn, emp_id, as_of=None) -> dict | None:
     }
 
 
-def entitlement_days(conn, emp_id, leave_type, as_of=None, year=None) -> tuple[int, str]:
-    """Days entitled for ``leave_type`` in ``year``: ``(days, source)``.
+def granted_days(conn, emp_id, leave_type, year=None) -> int:
+    """Manual grants recorded for ``emp_id``/``leave_type`` in ``year`` (FR-LEA-07).
 
-    ``source`` is ``'accrual'`` when an effective assignment earns the days month
-    by month, ``'default'`` when the published matrix decided the number, and
-    ``'unlimited'`` for a type with no entitlement (which the apply path reads
-    exactly as before).
-
-    ``year`` matters: a balance row is per year, and for a year the policy does
-    not reach, the published default is the honest answer — a policy that starts
-    in 2026 did not change what somebody was entitled to in 2025.
+    A separate ledger rather than a write to ``leave_balance.total_days``, because
+    that column is **derived** and ``ensure_balances`` overwrites it on every read.
+    A grant written straight into it would therefore be silently erased the next time
+    anybody looked at the balance — an administrator's manual adjustment surviving
+    only until the next page load. So the grant is a row, and the entitlement adds
+    it up.
     """
+    year = year or date.today().year
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(days), 0) FROM leave_grants "
+            "WHERE emp_id = ? AND leave_type = ? AND grant_year = ?",
+            [emp_id, leave_type, year],
+        ).fetchone()
+    except Exception as exc:
+        # A pre-migration database without the table must not break every balance
+        # read; zero grants is the right answer, and it is logged because a silent
+        # fallback here would make an adjustment vanish without trace.
+        logger.warning('leave_grants lookup failed for %s: %s', emp_id, exc)
+        return 0
+    return int(row[0] or 0)
+
+
+def entitlement_days(conn, emp_id, leave_type, as_of=None, year=None) -> tuple[int, str]:
+    """Days entitled for ``leave_type`` in ``year``, **including** manual grants.
+
+    The policy calculation lives in :func:`_policy_entitlement_days`; this wrapper
+    adds FR-LEA-07's manual grants. Splitting it this way is deliberate — the policy
+    function has four early returns, and adding the grant to each one is how a future
+    branch would silently forget it. A manual grant that is not in the entitlement
+    does not exist.
+
+    ``source`` gains a ``+grants`` suffix when any grant applies, so
+    ``GET /api/leave-balance`` can explain a number that came from an administrator
+    rather than from the policy. An unexplained ceiling is the failure this project
+    keeps having to undo.
+    """
+    days, source = _policy_entitlement_days(conn, emp_id, leave_type, as_of, year)
+    granted = granted_days(conn, emp_id, leave_type, year)
+    if granted:
+        days += granted
+        source = f'{source}+grants'
+    return days, source
+
+
+def _policy_entitlement_days(conn, emp_id, leave_type, as_of=None, year=None) -> tuple[int, str]:
+    """What the employee's leave policy alone entitles them to. See :func:`entitlement_days`."""
     fallback = DEFAULT_ENTITLEMENTS.get(leave_type)
     if fallback is None:
         return 0, 'unlimited'
