@@ -170,9 +170,13 @@ def test_admin_create_user(page):
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
     page.goto(BASE_URL + '/admin/users')
-    page.wait_for_timeout(1000)
+    # The create button appears only once the directory JS has loaded; clicking
+    # before it exists is a no-op, and the fixed-sleep version of this step
+    # failed one full run on a slow CDN while passing in isolation. The button
+    # appearing is the signal.
+    page.locator('.create-user-btn').wait_for(state='visible', timeout=15000)
     page.click('.create-user-btn')
-    page.wait_for_timeout(500)
+    page.locator('#empId').wait_for(state='visible', timeout=10000)
     page.fill('#empId', 'EMP901')
     page.fill('#name', 'Test User')
     page.fill('#email', 'test901@company.com')
@@ -181,7 +185,9 @@ def test_admin_create_user(page):
     with page.expect_response(lambda r: r.url.endswith('/api/users') and r.request.method == 'POST') as resp:
         page.click('#createUserModal .btn-primary')
     assert resp.value.ok, f'Create user failed: {resp.value.status}'
-    page.wait_for_timeout(1500)
+    # The directory re-renders from the post-create reload; wait for the row the
+    # same way, rather than a fixed sleep that fails on a slow machine.
+    page.locator('#usersTableBody', has_text='EMP901').wait_for(state='visible', timeout=15000)
     body = page.text_content('#usersTableBody')
     assert 'EMP901' in body, f'EMP901 not found in {body}'
 
@@ -457,18 +463,21 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
 def test_breaks_tab_shows_on_user_dashboard(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
+    page.locator('#breaktab').wait_for(state='visible', timeout=15000)
     page.click('#breaktab')
-    page.wait_for_timeout(2000)
     btns = page.locator('.break-type-btn')
+    # The buttons appear once the tab has rendered; wait for the first one
+    # rather than a fixed sleep over the tab switch.
+    btns.first.wait_for(state='visible', timeout=15000)
     assert btns.count() >= 1
 
 def test_can_start_and_end_break(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
+    page.locator('#breaktab').wait_for(state='visible', timeout=15000)
     page.click('#breaktab')
-    page.wait_for_timeout(2000)
     first_btn = page.locator('.break-type-btn').first
-    assert first_btn.is_visible(), 'No break type buttons visible'
+    first_btn.wait_for(state='visible', timeout=15000)
     first_btn.click()
     active = page.locator('#activeBreakInfo')
     end_btn = active.locator('.endBreakBtn')
@@ -488,6 +497,13 @@ def test_login_hours_display(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
     total = page.locator('#totalLoginHours')
+    # The widget is rendered by dashboard JS from the session-summary fetch; a
+    # fixed sleep before reading it failed a full run on a slow page. The text
+    # appearing is the signal.
+    page.wait_for_function(
+        "document.getElementById('totalLoginHours') && "
+        "document.getElementById('totalLoginHours').textContent.trim() !== ''",
+        timeout=15000)
     # The widget renders "0h" / "7.5h" (toFixed(1)+'h'); parse the numeric part.
     txt = (total.text_content() or '').replace('h', '').strip()
     val = float(txt)
@@ -496,13 +512,25 @@ def test_login_hours_display(page):
 def test_end_break_self_heal(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
+    # The break tab appears only once the dashboard JS has loaded; a fixed sleep
+    # before this click failed one full run on a slow page while passing in
+    # isolation. The tab appearing is the signal.
+    page.locator('#breaktab').wait_for(state='visible', timeout=15000)
     page.click('#breaktab')
-    page.wait_for_timeout(2000)
+    # Same for the tab content: the click can land while the tab is still
+    # switching and `#activeBreakInfo` does not exist yet.
+    page.locator('#activeBreakInfo').wait_for(state='visible', timeout=15000)
     page.evaluate('localStorage.removeItem("activeBreakId")')
     page.evaluate('endBreak()')
-    page.wait_for_timeout(3000)
-    active = page.locator('#activeBreakInfo')
-    txt = active.text_content()
+    # endBreak() re-renders after the server round-trip; the text appearing is
+    # the signal, not a clock. (An expression body: `wait_for_function` wraps
+    # the string, so a `return` statement is a SyntaxError.)
+    page.wait_for_function(
+        "document.getElementById('activeBreakInfo') && "
+        "(document.getElementById('activeBreakInfo').textContent.includes('No active break')"
+        " || document.getElementById('activeBreakInfo').textContent.includes('Break'))",
+        timeout=15000)
+    txt = page.text_content('#activeBreakInfo')
     assert 'No active break' in txt or 'Break' in txt
 
 def test_break_daily_limit_enforced(page):

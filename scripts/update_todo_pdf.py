@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import re
 import subprocess
 
 from reportlab.lib import colors
@@ -51,6 +52,92 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-08", "FR-LEA-08a at last: the approval-delegation slice, the last NOT_STARTED "
+     "row in the leaves module. The table existed in the canonical schema with a "
+     "no-overlap exclusion and no route anywhere. `delegations.py` owns one rule in two "
+     "shapes - `can_approve_for` for a single request, `approvable_employees` for the "
+     "pending_my_approval lists - because two implementations of 'who may decide' would "
+     "drift the first time a third approval path appears. The rule: a delegation is "
+     "active when today falls in its date range, an overlap is refused by the app and by "
+     "the GiST exclusion on the canonical schema, creating one requires actually holding "
+     "authority (the delegator must manage somebody or be an admin), self-delegation is a "
+     "409, an employee cannot file one in someone else's name (403 - the CC-10 half that "
+     "lives in this feature), and only the delegator or an admin may revoke, so a "
+     "delegation left behind by someone who has since left can still be cleared. All six "
+     "approve/reject routes (leaves, regularization, breaks) now share one "
+     "_approval_denial and fire `approval_note` - 'approved by delegate for manager X', "
+     "the SRS's own wording - only when the delegation is what authorised the decision, "
+     "with the notification landing in the new `Approvals` category. The gate fix is the "
+     "fifth instance of the same class: `reporting_line_required` now also admits an "
+     "active delegate who manages nobody, because the delegate case exists precisely for "
+     "a plain employee standing in for their manager. Two matrix rows were corrected with "
+     "it: FR-LEA-04's note asserted 'not the applicant' while nothing actually refused "
+     "the wrong approver - `can_approve_for` now refuses actor == target first, whatever "
+     "their role - and FR-ATT-06's open gap, 'Delegated approvers still not consulted', "
+     "is what this slice closes. FR-REG-01's manager view includes delegated reports "
+     "because the pending_my_approval filter is one shared clause across both lists; the "
+     "regularization approve/reject gate widening from admin-only to "
+     "reporting_line_required is recorded as deliberate, since a manager view an only "
+     "-admin can decide is a dead end. Matrix 74 IMPLEMENTED / 33 PARTIAL / 5 "
+     "NOT_STARTED / 1 RETIRED. Unit 328 passed / 2 skipped, browser 23/23, v2.0 gates "
+     "probe 115/115 GET + 60/60 write (run twice for idempotency), CC-01 and the "
+     "read-only preflight green at head 0012_approval_delegations_compat."),
+    ("2026-10-07", "Asked to key the to-do list to the SRS and the DSR (Detailed Software "
+     "Requirement) and make it usable as a development reference with allocated serial "
+     "numbers. The request exposed that the document was keyed to neither. Three findings, "
+     "in the order they mattered. FIRST: the ID set the matrix was tested against was a "
+     "hand-copied literal in tests/test_app.py, extracted with a plain-text regex over the "
+     "whole PDF - and plain-text extraction renders the nine payroll ids as `FR-PAY -01` "
+     "(the PDF's justification inserts a space before the hyphen), so FR-PAY-01..09 were "
+     "not tracked at all: nine requirements of which four are High or Medium priority had "
+     "never appeared on a to-do list. SECOND: the matrix's own priority/delta columns had "
+     "no source to be checked against, and had drifted on 43 of 104 rows - seven where the "
+     "SRS says High and the matrix said Medium (so the list's 'High priority first' "
+     "ordering left them out of the High group), seventeen the other way round. THIRD, and "
+     "the reason the document could not be used as a reference: it answered 'what did we "
+     "do', never 'what does the SRS actually ask for'. So the DSR is now a layer of its "
+     "own - `srs_spec.py`, generated from \u00a75 by scripts/extract_srs_spec.py, holding each "
+     "requirement's id, its own sentence, the Pri and \u0394 columns, its provenance and a "
+     "permanent serial. The extractor parses the PDF in LAYOUT mode rather than plain "
+     "text, because the table is a four-column geometry and a row begins at column 0 - "
+     "which recovers the nine FR-PAY ids that keyword matching could not. 113 rows come "
+     "out (112 from \u00a75 plus FR-ANL-04, which is printed only in Appendix A and is "
+     "serialised last so it cannot renumber anything). Serials are allocated in SRS "
+     "document order, not matrix order, which is the property that makes `SR-041` citable "
+     "in a commit and still meaningful next month: closing a requirement never renumbers "
+     "the ones after it. The matrix now covers all 113 (70 IMPLEMENTED / 36 PARTIAL / 6 "
+     "NOT_STARTED / 1 RETIRED), its priority/delta drift is corrected from \u00a75 and held "
+     "there by a test, and `test_srs_spec_matches_the_srs_pdf` re-extracts the PDF and "
+     "fails if the committed copy disagrees - a committed extraction that no longer "
+     "matches the spec reads as authority and is worse than no extraction. Getting the "
+     "statements *right* took one more fix, and it was not a parser bug: layout mode "
+     "renders a gap as round(gap / space_width) per font, and the SRS's bold face - "
+     "which sets the first line of most §5 statements - declares a space of 838 units "
+     "while the document actually emits word gaps of 248-394, so every gap rounded to "
+     "zero and 37 statements read `Approvaldelegation.`, `Theworking-day/`, "
+     "`Dailyattendance`. The word space is measurable from the document itself (the "
+     "most frequent TJ adjustment, since word gaps repeat and letter kerns do not), so "
+     "the extractor measures it per face and corrects space_width only where the "
+     "declared value would round the document's own gap to zero - that condition *is* "
+     "the defect, so of the SRS's five faces only the bold one is touched. 37 of 113 "
+     "statements changed and not one gained a double space. The `AppendixA` repair was "
+     "deleted rather than left as a no-op: a repair that hides the defect the extractor "
+     "no longer has is how a regression stays invisible. The list "
+     "itself gained a DEVELOPMENT REFERENCE section: one row per open requirement "
+     "carrying serial, SRS id, priority, module, routes, the named gap and a hand-written "
+     "NEXT STEP, which is what separates a reference from a status report. The next steps "
+     "are deliberately not derived - the gap extractor can say what is missing, only "
+     "somebody who has read the handler knows which file to open first - and "
+     "`_NEXT_STEPS` is held against the open set by a test, so a requirement that turns "
+     "PARTIAL fails the build until someone decides what to do about it, the same ratchet "
+     "the unaudited-handler list uses. Two extraction bugs were fixed while writing it: "
+     "the sentence split consumed the period, so gaps came out as run-on prose (\"...are "
+     "literals in the handler Changing them needs a code change and redeploy\"), and "
+     "promoting a note's `; ` to `. ` left the following clause lower-case. Reportlab's "
+     "paraparser also eats `<int:aid>` as an XML tag, so the escaping moved into "
+     "`_escape_markup` and now covers every dynamic string in the section rather than "
+     "just the routes - the module names have carried a bare `&` the whole time. "
+     "Matrix 70/36/6/1, srs_spec 113 rows, unit suite green."),
     ("2026-10-02", "Asked to check whether the breaks module was complete: 9 of 17 FR-ATT rows were "
      "IMPLEMENTED, 7 PARTIAL, 1 retired - so no, and the ToDo PDF listed all seven. Started with "
      "FR-ATT-09 (High), which turned out to be the second instance of the FR-LEA-09 defect class. "
@@ -1010,6 +1097,7 @@ _MODULE_NAMES = {
     'ATT': 'Attendance & breaks',
     'REG': 'Regularization',
     'LEA': 'Leave',
+    'PAY': 'Payroll',
     'HOL': 'Holidays',
     'NOT': 'Notifications',
     'AST': 'Assets',
@@ -1031,23 +1119,34 @@ _PRIORITY_LABEL = {'H': 'HIGH', 'M': 'Medium', 'L': 'Low', 'S': 'Stretch', '—'
 
 
 def _srs_rows():
-    """``traceability.rows()`` with the module and a short gap extracted.
+    """``traceability.rows()`` with the module, the SRS serial and a short gap.
 
     Imported lazily and defensively: a to-do document that refuses to build because
     the matrix moved would be worse than one that says so.
+
+    ``serial``/``statement`` come from ``srs_spec.py``, the DSR layer generated from
+    §5 of the SRS. Both modules are read together because the document's claim is
+    that one requirement can be cited three ways — ``SR-014``, ``FR-DOC-02``, or the
+    requirement's own sentence — and all three must resolve to the same row.
     """
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     try:
+        import srs_spec
         import traceability
     except Exception as exc:  # pragma: no cover - only on a broken checkout
-        return None, f'traceability.py could not be imported ({exc.__class__.__name__})'
+        return None, f'srs_spec/traceability could not be imported ({exc.__class__.__name__})'
 
     out = []
     for rid, priority, delta, status, routes, note in traceability.rows():
         module = rid.split('-')[1]
+        spec = srs_spec.BY_ID.get(rid)
         out.append({
             'id': rid,
+            # The stable serial comes from §5 document order, not from the matrix,
+            # so closing a requirement never renumbers the ones after it.
+            'serial': spec.serial if spec else '?',
+            'statement': spec.statement if spec else '',
             'module': module,
             'module_name': _MODULE_NAMES.get(module, module),
             'priority': priority,
@@ -1130,8 +1229,8 @@ def _find_gap_sentence(sentences):
     return len(sentences) - 1
 
 
-def _escape_routes(routes) -> str:
-    """Route patterns, escaped for reportlab's paraparser.
+def _escape_markup(text: str) -> str:
+    """Escape text for reportlab's paraparser.
 
     A pattern like ``/api/break-approvals/<int:aid>/approve`` is a well-formed-looking
     XML tag to reportlab, so the converter vanishes and the row renders
@@ -1140,9 +1239,16 @@ def _escape_routes(routes) -> str:
 
     Extracted as a function rather than inlined so a test can assert the real thing
     instead of re-implementing the same three ``replace`` calls and passing itself.
+    It escapes every string the generated sections print — routes *and* the
+    next-step text, which contains the same ``<int:...>`` patterns.
     """
-    text = ', '.join(routes) if routes else 'no route yet'
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _escape_routes(routes) -> str:
+    """Route patterns, escaped for the PDF (see `_escape_markup`)."""
+    text = ', '.join(routes) if routes else 'no route yet'
+    return _escape_markup(text)
 
 
 def _gap_of(note: str) -> str:
@@ -1178,7 +1284,16 @@ def _gap_of(note: str) -> str:
         # A very short gap clause on its own reads as a fragment; take the sentence
         # that completes it.
         parts = parts + [sentences[start + 1]]
-    gap = ' '.join(' '.join(parts).split())
+    # Joined with '. ' rather than ' ': the split above consumed the period, so
+    # joining with a space produced run-on text — FR-ANL-04 came out as "…literals
+    # in the handler Changing them needs a code change and redeploy." A gap is read
+    # as prose in a table cell, and a sentence boundary that vanishes is what makes
+    # prose read like a typo. Each part's own whitespace is normalised first, since
+    # `.join` here is over *sentences*, not words. The capitalisation below is the
+    # other half of the same repair: `note.replace('; ', '. ')` promotes a semicolon
+    # to a full stop, so the clause after it starts lower-case.
+    gap = '. '.join(' '.join(part.split()) for part in parts)
+    gap = re.sub(r'(?<=\. )[a-z]', lambda m: m.group(0).upper(), gap)
     # A gap that opens mid-sentence reads as a fragment of something else — but a
     # sentence carrying a *strong* phrase is self-contained even when the previous
     # clause ended in a semicolon, so it is capitalised and used alone. FR-AUD-01's is
@@ -1189,8 +1304,14 @@ def _gap_of(note: str) -> str:
         if any(s in gap.lower() for s in _STRONG_GAP_SIGNALS):
             gap = gap[0].upper() + gap[1:]
         elif start > 0:
-            whole = ' '.join(' '.join([sentences[start - 1], gap]).split())
+            whole = '. '.join([sentences[start - 1], gap])
             gap = whole if len(whole) <= 340 else gap
+    if gap and gap[-1] not in '.!?:' and not gap.endswith('...'):
+        # The sentence split consumed the terminator, so a gap taken from the middle
+        # of a note ends without one — "…both pass it" next to its neighbour's
+        # "…redeploy." reads as an unfinished thought in a document whose job is to
+        # be quoted from.
+        gap += '.'
     if len(gap) > 340:
         # Truncate at a word boundary and mark it. Cutting mid-word produces text
         # that reads like a different claim, which is the specific failure this
@@ -1223,28 +1344,143 @@ def _srs_modules(rows):
     return out
 
 
+#: The suggested next step for every open requirement, keyed by SRS id.
+#:
+#: Deliberately **hand-written** rather than derived. The gap extractor can say what
+#: is missing; only a person who has read the handler knows which file to open first,
+#: and a next step that restates the gap is a second column of the same information.
+#: A derived fallback exists in `_srs_open` so the document still builds, but
+#: `test_every_open_requirement_has_a_next_step` asserts this dict covers exactly the
+#: open set — so a requirement that becomes PARTIAL fails the build until someone
+#: decides what to do about it, which is the same ratchet the audit-coverage list
+#: uses for unaudited handlers.
+#:
+#: Entries are written as an action with an object ("add X to Y"), not as an
+#: aspiration ("improve X"), because a reference document that says "improve" is a
+#: status report wearing a different heading.
+_NEXT_STEPS = {
+    # ── High ────────────────────────────────────────────────────────────
+    'FR-ATT-05': 'Add the partial unique index that stops two concurrent opens for one '
+                 'employee to `init_db` as well as the v2.0 schema, then assert a second '
+                 'simultaneous start is refused.',
+    'FR-PAY-07': 'Decide whether object storage is in scope for this deployment. If it is, '
+                 'serve the payslip from a bucket with a signed URL; if it is not, record '
+                 'the deviation in traceability.py so the row stops claiming a sentence '
+                 'that does not apply.',
+    'FR-USR-10': 'Return the upload path the SRS names in the import response and raise the '
+                 'per-row error cap from 20 to 50.',
+    # ── Medium ─────────────────────────────────────────────────────────
+    'FR-ANL-01': 'Add a scheduled job that materialises the dashboard aggregates into a '
+                 'table and read from it, keeping the live query as the warm-up fallback.',
+    'FR-ATT-01': 'Add an admin-gated CRUD route for break types (and a location on the type) '
+                 'so the limits are editable rather than edited in the database.',
+    'FR-ATT-02': 'Wrap the auto-end plus insert in one transaction and add the partial unique '
+                 'index to `init_db`, so the compatibility schema enforces the rule the v2.0 '
+                 'one already does.',
+    'FR-ATT-15': 'Cache the break summary in Redis for 15 s with a background refresh instead '
+                 'of recomputing it on every panel poll.',
+    'FR-AUD-01': 'Route `audit_log()` through the outbox (CC-09) so the row commits with the '
+                 'business write it describes.',
+    'FR-AUTH-04': 'Store the session creation time and expire at 24 h absolute in addition to '
+                 'the 8 h idle timeout, and test the two independently.',
+    'FR-DOC-02': 'Make the magic-byte check (already present at upload) the authoritative '
+                 'type decision rather than the extension, add a per-category size cap, and '
+                 'swap the EICAR marker for a real scanner if one is available.',
+    'FR-DOC-03': 'Same storage decision as FR-PAY-07: presigned URL, or a recorded deviation.',
+    'FR-EXP-01': 'Add admin CRUD for expense categories; today the create route validates '
+                 'against a set nobody can change.',
+    'FR-EXP-02': 'Validate receipts at upload through the document pipeline — extension, magic '
+                 'bytes and per-category size.',
+    'FR-LEA-03': 'Run large exports through the import-job pattern: return 202 with a job id '
+                 'and let the worker write the file.',
+    'FR-ONB-04': 'Inherits FR-DOC-02 — once the document pipeline sniffs content, add a '
+                 'pre-boarding test that a renamed binary is refused at step 1.',
+    'FR-PAY-01': 'Grant HR read access to the payroll and salary routes (read-only, module '
+                 '`payroll`) and land FR-PAY-03 so there is a rates surface to read.',
+    'FR-PAY-02': 'Add a preview endpoint that calls the same calculation function as run '
+                 'creation — the "one function, not two" rule of Appendix A-07.',
+    'FR-PAY-03': 'Create a `payroll_rates` table (effective-dated, versioned), move the seven '
+                 'literals out of `calc_payroll_item`, and add an admin screen for them.',
+    'FR-PAY-04': 'Write `tds` from configured slabs, `lop_amount` from the FR-LEA-09 '
+                 'working-day figure and `reimbursements` from approved claims, then assert '
+                 'all three in a payroll test.',
+    'FR-PAY-05': 'Add a partial unique index on (month, year) where status <> '
+                 "'Cancelled', and move run creation to a background job with progress to poll.",
+    'FR-REG-02': 'Reject a reason-only regularization request with a 400 unless a corrected '
+                 'time is supplied.',
+    'FR-REG-04': 'Add `/api/regularization/export` returning .xlsx, reusing the leave-export '
+                 'writer.',
+    'FR-RPT-01': 'Make every admin/HR report path read the same department parameter, and add '
+                 'a test that the filter is applied in all of them.',
+    'FR-RPT-02': 'Queue large exports as jobs and return 202 with a job id, as for FR-LEA-03.',
+    'FR-TKT-01': 'Move the per-priority SLA targets into configuration and add subcategories '
+                 'with an admin picker.',
+    'FR-TKT-02': 'Scope the list to a matching department for non-admin viewers and notify '
+                 'Super Admin when a ticket is created.',
+    'FR-USR-02': 'Seed `leave_policy_assignments` from grade and location at user creation '
+                 'instead of every new employee resolving to the default matrix.',
+    'FR-USR-13': 'Declare an explicit field allow-list for `/api/profile` and validate against '
+                 'it, so the boundary is data rather than implied by the handler.',
+    'FR-USR-14': 'Rotate the session id on password change and revoke the old one, so a '
+                 'stolen cookie dies with the old password.',
+    # ── Low ─────────────────────────────────────────────────────────────
+    'FR-ATT-07': 'Add a single per-type attendance summary endpoint and switch the client off '
+                 'the two-call assembly.',
+    'FR-AUTH-13': 'Require a recent re-authentication for a credential read and write the '
+                 'audit row the SRS names.',
+    'FR-USR-08': 'Add the metadata endpoint and the async CSV export, and render the last 50 '
+                 'sessions on the admin user detail.',
+    'FR-USR-12': 'Inherits FR-DOC-02 — add a test that an oversized or non-image upload is '
+                 'refused here as well.',
+    # ── Stretch ─────────────────────────────────────────────────────────
+    'FR-ANL-02': 'Land FR-ANL-04 first, then store each computed score alongside the weights '
+                 'that produced it.',
+    'FR-ANL-04': 'Move the four weights into a configuration table read by the scorer, and '
+                 'stamp the score with the weights used.',
+    'FR-JOB-03': 'Create the `review_cycles` row the job opens and register the quarterly '
+                 'scheduler job next to the monthly accrual one.',
+    'FR-NOT-03': 'Configure an SMTP provider and verify it with `scripts/check_smtp.py`; the '
+                 'outbox handler already consults the preference, so nothing else changes.',
+    'FR-PAY-09': 'Create `review_cycles`, group `performance_reviews` by cycle in the '
+                 'progress query, and let FR-JOB-03 open the next one.',
+}
+
+
 def _srs_open(rows):
     """Every requirement not fully implemented, highest SRS priority first.
 
     Sorted by the SRS's own priority rather than by module, because the point of a
     to-do list is what to do next — and a High-priority gap in Documents matters more
     than a Low-priority gap in Analytics regardless of alphabetical order.
+
+    Each row also carries its **serial** and its **next step**. The serial makes the
+    row citable (`SR-041` does not move when another requirement closes), and the
+    next step is what turns the section from a status report into a development
+    reference: the gap says what is missing, the next step says which file or route
+    to start from. `_NEXT_STEPS` is keyed by id and
+    `test_every_open_requirement_has_a_next_step` fails if the two sets diverge, so
+    a requirement newly opened cannot land on the list with no way to act on it.
     """
     open_rows = [r for r in rows if r['status'] in ('PARTIAL', 'NOT_STARTED')]
     open_rows.sort(key=lambda r: (_PRIORITY_ORDER.get(r['priority'], 9), r['id']))
     for row in open_rows:
         row['gap'] = _gap_of(row['note'])
+        row['next_step'] = _NEXT_STEPS.get(
+            row['id'],
+            'Decide the scope of this requirement, then split it into a route and a test.',
+        )
     return open_rows
 
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "314 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "314 passed, 1 skipped"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "319 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "319 passed, 1 skipped"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready: head 0011_leave_grants, identity/sequence rules, required tables, count deltas"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready at head 0011_leave_grants. 0012_approval_delegations_compat exists for the in-flight FR-LEA-08a slice and bumps --expected-head when it lands"),
+    ("SRS extraction (scripts/extract_srs_spec.py --check)", "HRMS_SRS_v2.0.pdf", "113 requirements, no duplicates, srs_spec.py byte-identical to the PDF"),
     ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "113/113 GET + 59/59 write flows; run twice to confirm idempotency"),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
@@ -1292,9 +1528,13 @@ def build_pdf(path: str) -> None:
     story = []
     story.append(Paragraph("HRMS v2.0 - SRS Requirement Status and TO DO List", h1))
     story.append(Paragraph(
-        "Living document. Requirement verdicts are GENERATED from traceability.py, which "
-        "four tests keep aligned with the SRS and the live routes - so this section cannot "
-        "disagree with the code. The phase history further down records what was done.",
+        "Living document, keyed to the SRS. Every requirement appears three ways and all "
+        "three resolve to the same row: a permanent serial (<b>SR-001..SR-113</b>) "
+        "allocated in &#167;5 document order, the SRS's own id (<b>FR-DOC-02</b>), and the "
+        "requirement's sentence, which is extracted into <b>srs_spec.py</b> - the DSR "
+        "layer. Verdicts come from traceability.py, which four tests keep aligned with "
+        "the SRS and the live routes, so this section cannot disagree with the code. The "
+        "phase history further down records what was done.",
         small,
     ))
     story.append(Spacer(1, 6))
@@ -1309,14 +1549,27 @@ def build_pdf(path: str) -> None:
         totals = {'IMPLEMENTED': 0, 'PARTIAL': 0, 'NOT_STARTED': 0, 'RETIRED': 0}
         for row in srs_rows:
             totals[row['status']] = totals.get(row['status'], 0) + 1
+        # Derived once and used by both the headline and the working list further
+        # down, so the counts printed on page 1 are the counts of the rows that
+        # follow it. (They were computed twice before, and two derivations of one
+        # figure is how a document ends up disagreeing with itself.)
+        open_rows = _srs_open(srs_rows)
+        by_priority = {p: sum(1 for r in open_rows if r['priority'] == p)
+                       for p in ('H', 'M', 'L', 'S')}
         headline = [
-            ["Requirements in SRS", f"{len(srs_rows)}"],
+            ["Requirements in the SRS (§5 + Appendix A)", f"{len(srs_rows)}"],
             ["IMPLEMENTED (code enforces it and a test covers it)",
              f"{totals['IMPLEMENTED']}"],
             ["PARTIAL (shipped, with a named gap)", f"{totals['PARTIAL']}"],
             ["NOT_STARTED", f"{totals['NOT_STARTED']}"],
             ["RETIRED (superseded by v2.0)", f"{totals['RETIRED']}"],
             ["Fully implemented", f"{totals['IMPLEMENTED'] / len(srs_rows):.0%}"],
+            # The SRS's own priority of the work that is left. This is the number
+            # the "High first" ordering below is justified by, so it belongs where
+            # the other counts are rather than only in the prose.
+            ["Open, by SRS priority",
+             f"High {by_priority['H']} · Medium {by_priority['M']} · "
+             f"Low {by_priority['L']} · Stretch {by_priority['S']}"],
             ["Current branch", _current_branch()],
         ]
         h_table = Table(
@@ -1369,15 +1622,20 @@ def build_pdf(path: str) -> None:
         ]))
         story.append(m_table)
 
-        # ── The actual Monday list, keyed to the SRS's own priorities ──
-        open_rows = _srs_open(srs_rows)
+        # ── The development reference: every open row, keyed by serial ──
         high = [r for r in open_rows if r['priority'] == 'H']
         story.append(PageBreak())
-        story.append(Paragraph("Open requirements, by SRS priority", h2))
+        story.append(Paragraph("Development reference: open requirements", h2))
         story.append(Paragraph(
             f"{len(open_rows)} requirements are PARTIAL or NOT_STARTED; {len(high)} of them "
-            f"are SRS <b>High</b> priority. This is the working list - each row's second line "
-            f"is the named gap from traceability.py, not a restatement of the title.",
+            f"are SRS <b>High</b> priority. Each row is keyed by its SRS serial "
+            f"(<b>SR-001..SR-{len(srs_rows):03d}</b>), allocated in §5 document order and "
+            f"permanent — closing a requirement never renumbers the ones after it, so a "
+            f"commit, a test or a conversation can cite <b>SR-041</b> and still mean the "
+            f"same row next month. Per row: serial, requirement id, the SRS's own "
+            f"priority, the module, the routes, the <b>named gap</b> from traceability.py "
+            f"(not a restatement of the title), and the <b>next step</b> to open the file "
+            f"with.",
             small,
         ))
         story.append(Spacer(1, 6))
@@ -1393,12 +1651,21 @@ def build_pdf(path: str) -> None:
                           'Low': '#475569', 'Stretch': '#475569'}.get(pri, '#475569')
             badge = ('NOT STARTED' if row['status'] == 'NOT_STARTED' else 'PARTIAL')
             routes = _escape_routes(row['routes'])
+            # Every dynamic string is escaped, not just the routes: the next steps
+            # contain `status <> 'Cancelled'` and `<int:...>` patterns, and the
+            # module names contain a bare `&`.
+            module_name = _escape_markup(row['module_name'])
+            gap = _escape_markup(row['gap'])
+            next_step = _escape_markup(row['next_step'])
             t = Table([[Paragraph(
-                f"<b>{row['id']}</b>  <font size=6 color='{pri_colour}'><b>{pri}</b></font> "
+                f"<b>{row['serial']}</b>  <b>{row['id']}</b>  "
+                f"<font size=6 color='{pri_colour}'><b>{pri}</b></font> "
                 f"<font size=6 color='#ffffff' bgcolor='{VERDICT_BADGE_COLOURS[badge]}'> "
                 f"{badge} </font><br/>"
-                f"<font size=6 color='#94a3b8'>{row['module_name']} &#183; {routes}</font>"
-                f"<br/>{row['gap']}", small)]], colWidths=[6.5 * inch])
+                f"<font size=6 color='#94a3b8'>{module_name} &#183; {routes}</font>"
+                f"<br/>{gap}"
+                f"<br/><font size=6 color='#334155'><b>Next:</b> {next_step}</font>",
+                small)]], colWidths=[6.5 * inch])
             t.setStyle(TableStyle([
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#e2e8f0")),
                 ("BACKGROUND", (0, 0), (0, 0), colors.HexColor("#f8fafc")),

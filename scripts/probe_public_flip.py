@@ -613,10 +613,15 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     run("regularization(submit)", regularization)
 
     def leave_apply():
+        # FR-LEA-09 counts working days, so fixed offsets off an unanchored
+        # `today` land on a weekend roughly every other run (today +30/+31 is
+        # a Saturday and Sunday when today is a Thursday) and the range is
+        # refused with a 400. Anchor to the next Monday instead, like the
+        # attendance flows: +2/+3 are always working days.
         return _post(cl, tok, "/api/leaves",
                      {"leave_type": "Casual",
-                      "start_date": (today + timedelta(days=30)).isoformat(),
-                      "end_date": (today + timedelta(days=31)).isoformat(),
+                      "start_date": (attendance_date + timedelta(days=2)).isoformat(),
+                      "end_date": (attendance_date + timedelta(days=3)).isoformat(),
                       "reason": "public write probe"}).status_code
     run("leaves(apply)", leave_apply)
 
@@ -1899,6 +1904,148 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             drop()
 
     run("users(bulk archive, self excluded)", users_bulk)
+
+    # ── FR-LEA-08a / FR-LEA-04: delegated approval, one rule in two shapes ────
+    # A manager hands their approval authority to a plain employee; the delegate
+    # then sees the report's pending request in `pending_my_approval` and approves
+    # it; and the audit names the manager — the SRS's own words ("approved by
+    # delegate for manager X"). Also asserted: self-delegation is a 409, and an
+    # employee cannot file a delegation in someone else's name (403), because the
+    # per-*employee* guard is the half of CC-10 that lives in this feature.
+    def delegated_approval():
+        stamp = f"{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+        mgr = f"EMP{stamp}1"   # Team Leader managing `rep`
+        rep = f"EMP{stamp}2"   # the report
+        dlg = f"EMP{stamp}3"   # plain-employee delegate (manages nobody)
+        audit_ids: list[str] = []
+
+        def drop():
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                # audit_log.emp_id references users(emp_id), so the rows naming
+                # the three probe employees must go before the users row does.
+                pc.execute("DELETE FROM audit_log WHERE emp_id = ANY(%s)",
+                           ([mgr, rep, dlg],))
+                for table in ("user_sessions", "notifications"):
+                    pc.execute(f"DELETE FROM {table} WHERE emp_id = ANY(%s)",
+                               ([mgr, rep, dlg],))
+                pc.execute("DELETE FROM leave_balance WHERE emp_id = ANY(%s)",
+                           ([mgr, rep, dlg],))
+                pc.execute("DELETE FROM leave_requests WHERE emp_id = ANY(%s)",
+                           ([rep, dlg],))
+                _delete_any(pc, "DELETE FROM audit_log WHERE entity_id = ANY(%s)",
+                            audit_ids)
+                pc.execute("DELETE FROM approval_delegations WHERE delegator_id = ANY(%s) "
+                           "OR delegate_id = ANY(%s)", ([mgr, dlg], [mgr, dlg]))
+                pc.execute("DELETE FROM users WHERE emp_id = ANY(%s)", ([mgr, rep, dlg],))
+
+        drop()
+        try:
+            for emp, name, role in ((mgr, "Delegation Mgr", "Team Leader"),
+                                    (rep, "Delegation Rep", "Employee"),
+                                    (dlg, "Delegation Dlg", "Employee")):
+                made = _post(cl_a, tok_a, "/api/users", {
+                    "emp_id": emp, "name": name,
+                    "email": f"{emp.lower()}@company.com",
+                    "department": "MIS", "role": role,
+                    "password": PROBE_PASSWORD,
+                })
+                if made.status_code not in (200, 201):
+                    return made.status_code, f"create {emp}: {made.get_json()}"
+            # The reporting line is the manager relationship; the user API has no
+            # field for it, so it is wired directly, the same way the seed does.
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                pc.execute("UPDATE users SET manager_emp_id = %s WHERE emp_id = %s",
+                           [mgr, rep])
+            # Sign in the three fresh accounts. None of the roles is in
+            # mfa.MANDATORY_ROLES, so each login is the one-step path.
+            clients = {}
+            for emp in (mgr, rep, dlg):
+                lcl = app_mod.test_client()
+                tok = lcl.get("/api/csrf-token").get_json()["csrf_token"]
+                r = lcl.post("/login", json={"emp_id": emp, "password": PROBE_PASSWORD},
+                             headers={"X-CSRF-Token": tok})
+                if r.status_code != 200:
+                    return r.status_code, f"login {emp}: {r.get_json()}"
+                clients[emp] = (lcl, tok)
+            cm, tm = clients[mgr]
+            cr, tr = clients[rep]
+            cd, td = clients[dlg]
+
+            # Self-delegation is refused (409)…
+            self_d = _post(cm, tm, "/api/delegations", {
+                "delegate_id": mgr,
+                "starts_on": today.isoformat(),
+                "ends_on": (today + timedelta(days=1)).isoformat(),
+            })
+            if self_d.status_code != 409:
+                return 409, f"self-delegation: {self_d.get_json()}"
+
+            # …and an employee cannot file one in someone else's name (403).
+            other = _post(cd, td, "/api/delegations", {
+                "delegator_id": mgr, "delegate_id": rep,
+                "starts_on": today.isoformat(),
+                "ends_on": (today + timedelta(days=1)).isoformat(),
+            })
+            if other.status_code != 403:
+                return 409, f"delegating for another manager: {other.get_json()}"
+
+            made = _post(cm, tm, "/api/delegations", {
+                "delegate_id": dlg,
+                "starts_on": (today - timedelta(days=1)).isoformat(),
+                "ends_on": (today + timedelta(days=10)).isoformat(),
+                "reason": "public write probe",
+            })
+            if made.status_code != 201:
+                return made.status_code, f"delegate create: {made.get_json()}"
+            did = (made.get_json() or {}).get("delegation_id")
+            if not did:
+                return 409
+            audit_ids.append(str(did))
+
+            # A pending leave for the report lands in the *delegate's* queue, not
+            # just the manager's — "Delegates appear in pending_my_approval views".
+            start = (attendance_date + timedelta(days=2)).isoformat()
+            end = (attendance_date + timedelta(days=3)).isoformat()
+            applied = _post(cr, tr, "/api/leaves", {
+                "leave_type": "Casual", "start_date": start, "end_date": end,
+                "reason": "public write probe",
+            })
+            if applied.status_code != 201:
+                return applied.status_code, f"report applies: {applied.get_json()}"
+            lid = (applied.get_json() or {}).get("leave_id")
+            if not lid:
+                return 409
+            audit_ids.append(str(lid))
+
+            queue = cd.get("/api/leaves?pending_my_approval=1")
+            if queue.status_code != 200:
+                return queue.status_code
+            if lid not in [r.get("leave_id") for r in queue.get_json()]:
+                return 409, f"delegate queue misses the report: {queue.get_json()}"
+
+            decided = _post(cd, td, f"/api/leaves/{lid}/approve", {})
+            if decided.status_code != 200:
+                return decided.status_code, f"delegate approves: {decided.get_json()}"
+
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                leaf = pc.execute(
+                    "SELECT status FROM leave_requests WHERE leave_id = %s",
+                    [lid]).fetchone()
+                aud = pc.execute(
+                    "SELECT details FROM audit_log WHERE action = 'LEAVE_APPROVE' "
+                    "AND entity_id = %s ORDER BY log_id DESC LIMIT 1",
+                    [str(lid)]).fetchone()
+            if leaf != ("Approved",):
+                return 409, f"leave status: {leaf}"
+            if not aud or f"for manager {mgr}" not in (aud[0] or ""):
+                return 409, f"audit does not name the manager: {aud}"
+
+            return 200, ("self 409, per-other 403, delegate saw + approved, "
+                         "audit names the manager")
+        finally:
+            drop()
+
+    run("approval-delegations(delegate approves)", delegated_approval)
 
     return out
 

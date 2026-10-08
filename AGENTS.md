@@ -2597,3 +2597,89 @@ twice.
 **Breaks remaining after this slice:** FR-ATT-06 (High, needs FR-LEA-08a), FR-ATT-05
 (High, concurrency index), FR-ATT-01 (M, break-type CRUD), FR-ATT-02 (M, one
 transaction on the compat schema), FR-ATT-15 (M, cache), FR-ATT-07 (L, one projection).
+
+## FR-LEA-08a approval delegation: the table existed, the keystone did not
+- **The gap had the exact shape the traceability pass exists to catch.**
+  `approval_delegations` has been in the canonical schema since the baseline — identity
+  PK, `no_overlapping_delegation` GiST exclusion on
+  `daterange(starts_on, ends_on) &&` per delegator — and **no route ever read or wrote
+  it**. The constraint documented an intent nothing implemented. Worse, FR-LEA-04,
+  FR-ATT-06, FR-ATT-07 and FR-REG-01 each name "delegate" as the thing they are
+  missing, so fixing them separately would have meant four slightly different answers
+  to the same question. `delegations.py` **is** that answer.
+- **One rule in two shapes.** `can_approve_for(actor, target)` decides one request;
+  `approvable_employees(actor)` feeds the `pending_my_approval` lists. Two
+  implementations of "who may decide" would drift the first time a third approval path
+  appears, so the leave and regularization **lists** and **all six** approve/reject
+  routes (leaves, regularization, breaks) answer from the same pair — the shared
+  `_pending_my_approval_clause` builds the lists and the shared `_approval_denial`
+  refuses the actions. A delegate inherits the delegator's authority, not more:
+  `can_approve_for` returns the answer their manager would have got, not an admin's.
+- **The date rule is the security property.** A delegation is active when **today**
+  falls in `(starts_on, ends_on)`. Testing the date the request was *raised* instead
+  would let a delegate approve something raised before they were delegated to and
+  something raised after they stopped, which is precisely the window the delegation
+  exists to close; backdated approval is an admin action, because an admin needs no
+  delegation. Overlap is checked in the application **and** by the canonical
+  exclusion — the compat schema cannot express a GiST/exclusion index (the same
+  portability limit as the partial-index work), so the same predicate runs in `create`
+  on every backend.
+- **Authority is required to delegate.** The delegator must actually manage somebody,
+  or be an admin (an employee with no reports has nothing to hand over; an admin may
+  also file on behalf of a manager who is away). Self-delegation is a **409**, an
+  employee filing in someone else's name is a **403** (the CC-10 half of this feature),
+  and only the delegator or an admin may **revoke** — which means an admin can withdraw
+  a delegation the delegator cannot reach, e.g. because they are on leave themselves.
+  `pending_my_approval` is API-level only: it is a filter parameter, not a UI tab.
+- **The audit says who actually decided.** `approval_note` returns the SRS's own
+  wording — `"approved by delegate for manager X"` — and fires **only when the
+  delegation is what authorised the decision**, not when a manager approves in person.
+  The delegate is notified (new `APPROVAL_DELEGATED` type, category **`Approvals`**,
+  the same class the SRS flow names), so an employee knows who signed and can contest
+  it.
+- **The gate fix is the fifth instance of the same class.** `reporting_line_required`
+  now also admits an **active delegate who manages nobody** — the delegate case exists
+  precisely for a plain employee standing in for their manager, and the old gate
+  (asks "does the actor manage *somebody*") barricaded exactly that case. This is the
+  same bug that made Finance unable to mark a claim Paid (FR-EXP-03), a reporting
+  manager unable to rate goals (FR-PERF-01) and a Team Leader unable to approve their
+  own report's break (FR-ATT-06) — a requirement naming a role the decorator excludes.
+- **Three matrix rows corrected with it, not just flipped.** FR-LEA-04's note claimed
+  "the applicant cannot be their own approver" while nothing actually refused a wrong
+  approver — `can_approve_for` now refuses `actor == target` first, whatever their
+  role. FR-ATT-06's open gap, "Delegated approvers still not consulted", is what this
+  slice closes. FR-REG-01's manager view includes delegated reports because both lists
+  share the clause. And the **regularization approve/reject gate widening** from
+  `@admin_required` to `reporting_line_required` is recorded as deliberate: FR-REG-01
+  hands the manager the view and FR-REG-03 previously handed the decision to an admin,
+  which is a dead-end for the exact person the requirement says decides.
+- **Migration `0012_approval_delegations_compat`** adds the compatibility copy of the
+  table (`init_db` creates it; the canonical table is untouched and preflight's
+  expected head is bumped). No `reason` column exists on the canonical shape, so create
+  validates a reason but echoes only what the schema stores.
+- **Probe hardening, both in the slice's own class.** `leaves(apply)` dated its request
+  at fixed `today+30/+31`, which are a Saturday and a Sunday when today is a Thursday —
+  FR-LEA-09 refuses a range with no working days with a 400, so the flow failed on
+  roughly every second run date (the `+40 % 7 = 5` class again). It now anchors to the
+  next-Monday `attendance_date` +2/+3, which are always working days. And the new flow's
+  cleanup deletes `audit_log` rows referencing the probe employees **before** the users
+  row, because `audit_log.emp_id` is a foreign key to `users` — the first version died
+  on the `finally` with a ForeignKeyViolation and left the probe users behind.
+- **Browser suite: three failing runs, five tests, one class.** Two full runs each
+  failed a different test (`test_admin_create_user`, then `test_end_break_self_heal`
+  and `test_login_hours_display`); all passed in isolation, and every failure was a
+  fixed sleep before a JS-rendered element. Hardened the sleep-vs-signal pattern in
+  **five** tests (`test_admin_create_user`, `test_breaks_tab_shows_on_user_dashboard`,
+  `test_can_start_and_end_break`, `test_end_break_self_heal`,
+  `test_login_hours_display`): the element appearing is the signal. One of my own fixes
+  was then caught by the suite — `wait_for_function` **must take an expression body**,
+  a `return` statement inside it is a SyntaxError ("Illegal return statement"), so the
+  poller that replaced a sleep broke in the exact way the sleep never did. The suite
+  re-ran 23/23.
+- Matrix moves FR-LEA-08a (and FR-ATT-06, FR-REG-01, FR-LEA-01, FR-LEA-04) to
+  `IMPLEMENTED` (**74 IMPLEMENTED / 33 PARTIAL / 5 NOT_STARTED / 1 RETIRED**). The
+  ToDo PDF's `_NEXT_STEPS` lost four now-finished entries — the test that forces the
+  key set to equal the open set caught them. Unit **328 passed / 2 skipped**, browser
+  **23/23**, and the probe (with the new `approval-delegations(delegate approves)`
+  flow) is **115/115 GET + 60/60 write**, run twice for idempotency, with CC-01 and
+  the read-only preflight green at head `0012_approval_delegations_compat`.

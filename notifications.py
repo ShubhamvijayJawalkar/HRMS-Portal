@@ -28,7 +28,7 @@ that the control is meaningless. The taxonomy is therefore fixed *here* and the
 derivation is the only place a notification type is turned into a category.
 
 **A recorded deviation.** The SRS names six categories and the app emits events
-outside them, so the set is the six plus four documented extras:
+outside them, so the set is the six plus five documented extras:
 
 * ``Performance`` — goal ratings and submitted reviews (FR-PERF). Nothing in the
   SRS covers them, but forcing a goal rating into ``General`` would lump it with
@@ -47,9 +47,16 @@ outside them, so the set is the six plus four documented extras:
   (FR-ATT). The SRS taxonomy has no attendance category, and a break decision is
   not "General" in any useful sense: "show me only the things about my breaks" is
   a real question an employee asks, and it is unanswerable inside the catch-all.
+* ``Approvals`` — approval authority handed to you (FR-LEA-08a). A delegate has to
+  know they are now approver for another manager, and the notice covers leave,
+  regularization and break approvals alike, so no single one of the six describes
+  it. ``General`` was the tempting answer and is not one: it is `FALLBACK`, a row
+  mapping to it is indistinguishable from having no rule, and a switch labelled
+  "Leaves" muting the notice that somebody's approval duty moved to you is exactly
+  the BREAK-into-Leaves mistake this module exists to prevent.
 
 Forcing those into one of the six would be worse than naming them, and the extra
-four are reported alongside the six everywhere the taxonomy is exposed, so the
+five are reported alongside the six everywhere the taxonomy is exposed, so the
 deviation is visible rather than buried.
 
 **``Tickets-SLA`` is kept even though nothing produces it yet.** FR-TKT-01
@@ -60,7 +67,7 @@ taxonomy bug of exactly the kind this module exists to remove. Instead
 can say so rather than leaving an admin to wonder.
 
 **The default is true, and the absence of a row means true.** Storing a row per
-employee per category would mean 7 rows created for every employee on first login
+employee per category would mean 8 rows created for every employee on first login
 and a table that has to be backfilled when a category is added. A missing row is
 the default, which is also what "default true" asks for, and it makes adding a
 category a no-op for existing employees.
@@ -68,9 +75,9 @@ category a no-op for existing employees.
 
 from __future__ import annotations
 
-# The SRS's six, in its order, then the two documented extras.
+# The SRS's six, in its order, then the documented extras.
 SRS_CATEGORIES = ('Onboarding', 'Leaves', 'Expenses', 'Tickets', 'Payroll', 'Tickets-SLA')
-EXTRA_CATEGORIES = ('Performance', 'Holiday', 'Security', 'Attendance')
+EXTRA_CATEGORIES = ('Performance', 'Holiday', 'Security', 'Attendance', 'Approvals')
 CATEGORIES = SRS_CATEGORIES + EXTRA_CATEGORIES
 
 # The catch-all for an event with no better home. It is deliberately *not*
@@ -150,6 +157,19 @@ _EXACT = {
     # an unexplained ceiling is exactly the thing this project keeps having to chase
     # back to its source.
     'LEAVE_GRANT': 'Leaves',
+    # FR-LEA-08a: somebody else's approval authority has been handed to this employee
+    # for a date range. They must be told, or they have no idea why requests for
+    # another team have started appearing in their approval list.
+    #
+    # The first version of this row said `'General'`, which is `FALLBACK` — a rule
+    # mapping to the catch-all is indistinguishable from having no rule at all, and
+    # the emitted-types test failed on it immediately, which is what that test is for.
+    # `Leaves` would be the easy landing and the wrong one: a delegation covers leave,
+    # regularization *and* break approvals, and routing it under a switch labelled
+    # "Leaves" is the same mistake as the old `BREAK -> Leave` mapping — an employee
+    # muting leave mail would silently mute the notice telling them they are now
+    # somebody's approver. So the group is named: `Approvals`.
+    'APPROVAL_DELEGATED': 'Approvals',
     'LEAVE_APPROVED': 'Leaves',
     'LEAVE_REJECTED': 'Leaves',
     'LEAVE_CANCELLED': 'Leaves',
@@ -347,6 +367,7 @@ KNOWN_TYPES = (
     # app.py
     'LEAVE_APPLIED', 'LEAVE_APPROVED', 'LEAVE_REJECTED', 'LEAVE_CANCELLED',
     'LEAVE_GRANT',
+    'APPROVAL_DELEGATED',
     'TICKET_ASSIGNED', 'TICKET_UPDATED',
     'GOAL_RATED', 'REVIEW_SUBMITTED',
     'HOLIDAY_OPTIN_REQUESTED',

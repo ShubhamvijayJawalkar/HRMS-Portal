@@ -4,3 +4,8 @@
 pytest>=8.0
 playwright>=1.40
 ruff>=0.6
+
+# Reads HRMS_SRS_v2.0.pdf so srs_spec.py (the DSR layer) can be regenerated and
+# verified against the spec by the test suite. Without it the extraction test
+# skips, so the PDF and the module can drift apart unnoticed.
+pypdf>=6.0

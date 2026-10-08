@@ -10,6 +10,26 @@ from io import BytesIO
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# ── The SRS requirement ids, in SRS document order, with their stable serials ──
+# SR-001..SR-113, generated from HRMS_SRS_v2.0.pdf by `scripts/extract_srs_spec.py`
+# into `srs_spec.py` and verified against the PDF by
+# `test_srs_spec_matches_the_srs_pdf`, so a hand-copied list cannot drift away from
+# the spec the way the old literal set did. The id set the matrix is checked against
+# is `srs_spec.ORDER` — see `test_traceability_covers_every_srs_requirement`.
+#
+# The old list was a hand-copied literal extracted with a plain-text regex over the
+# whole document, and it had two faults worth recording: it read `FR-PAY -01` (a
+# space the PDF's justification inserts inside the id) as something that was not an
+# id, so all nine payroll requirements were absent from the matrix; and it had no
+# order, so nothing could say "the fourth requirement in the spec". Both are fixed
+# here — the order is why a serial number can be cited in a commit message and still
+# mean the same thing next month.
+#
+# It is an import, not a name, deliberately: ruff's E402 allows an import after
+# `sys.path.insert` but not an *assignment*, so binding a constant here would flag
+# the `import db_backend` forty lines below. The tests call `srs_spec.ORDER` directly.
+import srs_spec
+
 # ── PostgreSQL only ──────────────────────────────────────────────────────
 # This suite used to run against either DuckDB (a fresh ~50 MB file per session,
 # named from a timestamp) or PostgreSQL. DuckDB was removed at the Phase-6
@@ -1059,6 +1079,592 @@ def test_reviewing_a_break_twice_is_a_conflict_not_a_second_success(client):
             )
         finally:
             conn.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# FR-LEA-08a approval delegation, plus the two approval-gate fixes that ride
+# in the same slice: FR-LEA-04 (leave approve/reject) and FR-ATT-06 (break
+# approval). All four approval paths now answer the same three questions —
+# "not the applicant", "manager (or active delegate) or HR/Admin", "one
+# conditional winner" — from `_approval_denial` in `app.py`.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _delegate_fixture_users():
+    """EMP977 (Team Leader) manages EMP978; EMP985 is the plain-employee delegate.
+
+    EMP985 deliberately reports to EMP001, not to EMP977: the delegate's
+    `pending_my_approval` list must contain the *delegator's* reports, and if the
+    delegate were also a report of the delegator that list would be ambiguous.
+    Fixture ids were verified free before use; the cleanup deletes
+    `approval_delegations` explicitly because the table keys on
+    `delegator_id`/`delegate_id`, so `_cleanup_user_contract_rows` (which
+    discovers tables by an `emp_id` column) cannot see it.
+    """
+    _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM approval_delegations WHERE delegator_id IN "
+            "('EMP977','EMP978','EMP985') OR delegate_id IN ('EMP977','EMP978','EMP985')"
+        )
+        for emp_id, role, manager in (
+            ('EMP977', 'Team Leader', 'EMP001'),
+            ('EMP978', 'Employee', 'EMP977'),
+            ('EMP985', 'Employee', 'EMP001'),
+        ):
+            conn.execute(
+                'INSERT INTO users (emp_id, name, email, password, role, status, '
+                "allow_login, department, manager_emp_id) VALUES (?, ?, ?, ?, ?, "
+                "'Active', 1, 'MIS', ?)",
+                [emp_id, f'Delegate {emp_id}', f'{emp_id.lower()}@company.com',
+                 hash_password('correct-horse-battery'), role, manager],
+            )
+    finally:
+        conn.close()
+
+
+def _pending_leave_for(client, emp_id, session_id, reason='delegation slice test'):
+    """A Pending leave for `emp_id` through the real apply path; returns
+    ``(leave_id, days_requested)``. Use only for fresh fixture employees — the
+    caller owns the cleanup of the request, its audit row and its reservation."""
+    _login_as(client, emp_id, 'Employee', session_id)
+    day = _working_day(20)
+    resp = client.post('/api/leaves', json={
+        'leave_type': 'Casual', 'start_date': day.isoformat(),
+        'end_date': day.isoformat(), 'reason': reason,
+    })
+    assert resp.status_code == 201, resp.get_json()
+    body = resp.get_json()
+    return body['leave_id'], body['days_requested']
+
+
+def _clean_delegation_test(leave_ids=(), regularization_ids=(), break_ids=()):
+    """The explicit half of the fixture cleanup: rows keyed by ids the discovery
+    helpers cannot see, or that belong to a shared seed employee."""
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM approval_delegations WHERE delegator_id IN "
+            "('EMP977','EMP978','EMP985','EMP986') OR delegate_id IN "
+            "('EMP977','EMP978','EMP985','EMP986')"
+        )
+        for lid in leave_ids:
+            conn.execute(
+                'DELETE FROM audit_log WHERE entity = ? AND entity_id = CAST(? AS VARCHAR)',
+                ['leave_requests', str(lid)],
+            )
+            conn.execute('DELETE FROM leave_requests WHERE leave_id = ?', [lid])
+        for rid in regularization_ids:
+            conn.execute(
+                'DELETE FROM audit_log WHERE entity = ? AND entity_id = CAST(? AS VARCHAR)',
+                ['regularization_requests', str(rid)],
+            )
+            conn.execute('DELETE FROM regularization_requests WHERE request_id = ?', [rid])
+        for aid in break_ids:
+            conn.execute(
+                'DELETE FROM audit_log WHERE entity = ? AND entity_id = CAST(? AS VARCHAR)',
+                ['break_approvals', str(aid)],
+            )
+            conn.execute('DELETE FROM break_approvals WHERE approval_id = ?', [aid])
+    finally:
+        conn.close()
+
+
+def test_approval_delegation_crud_and_validation(client):
+    """FR-LEA-08a: the route did not exist at all.
+
+    `approval_delegations` has been in the canonical schema since the baseline
+    (identity PK, `no_overlapping_delegation` exclusion) and no route read or
+    wrote it — the "schema without routes" shape the traceability pass exists to
+    catch. Create/list/revoke, the overlap rule, the both-employees check and the
+    authority checks are asserted here; the *use* of a delegation is the tests
+    that follow.
+    """
+    _delegate_fixture_users()
+    delegation_id = None
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99701)
+        start = date.today() - timedelta(days=1)
+        end = date.today() + timedelta(days=6)
+        created = client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': start.isoformat(),
+            'ends_on': end.isoformat(),
+            'reason': 'on leave',
+        })
+        assert created.status_code == 201, created.get_json()
+        body = created.get_json()
+        delegation_id = body['delegation_id']
+        assert body['delegator_id'] == 'EMP977' and body['delegate_id'] == 'EMP985'
+        assert body['active'] is True, 'a delegation covering today is not active'
+
+        # GET returns both directions and the (same) list the approval queues use.
+        listing = client.get('/api/delegations')
+        assert listing.status_code == 200
+        payload = listing.get_json()
+        assert [d['delegation_id'] for d in payload['delegated_by_me']] == [delegation_id]
+        assert payload['delegated_to_me'] == []
+        assert payload['act_for'] == ['EMP978'], payload['act_for']
+
+        # A second overlapping delegation for the same period is refused — by the
+        # application on the compatibility schema and by the exclusion constraint
+        # on the canonical one (see the module docstring).
+        overlap = client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': start.isoformat(),
+            'ends_on': end.isoformat(),
+        })
+        assert overlap.status_code == 409, overlap.get_json()
+
+        # A non-admin cannot delegate someone else's authority.
+        _login_as(client, 'EMP978', 'Employee', 99702)
+        third_party = client.post('/api/delegations', json={
+            'delegator_id': 'EMP977', 'delegate_id': 'EMP985',
+            'starts_on': start.isoformat(), 'ends_on': end.isoformat(),
+        })
+        assert third_party.status_code == 403, third_party.get_json()
+
+        # An employee with no reports cannot delegate their own authority — there
+        # is nothing to hand over, and the row would look like coverage.
+        nobody = client.post('/api/delegations', json={
+            'delegate_id': 'EMP977',
+            'starts_on': start.isoformat(), 'ends_on': end.isoformat(),
+        })
+        assert nobody.status_code == 409, nobody.get_json()
+        assert 'manage nobody' in nobody.get_json()['error'], nobody.get_json()
+
+        # A bystander cannot revoke; the delegator can; a deletion cannot repeat.
+        _login_as(client, 'EMP985', 'Employee', 99703)
+        assert client.delete(f'/api/delegations/{delegation_id}').status_code == 403
+        _login_as(client, 'EMP977', 'Team Leader', 99704)
+        revoked = client.delete(f'/api/delegations/{delegation_id}')
+        assert revoked.status_code == 200, revoked.get_json()
+        assert client.delete(f'/api/delegations/{delegation_id}').status_code == 404
+
+        # The admin override: create and revoke for a manager who cannot be asked
+        # (they are the ones on leave).
+        _set_admin_session(client, 99705)
+        as_admin = client.post('/api/delegations', json={
+            'delegator_id': 'EMP977', 'delegate_id': 'EMP985',
+            'starts_on': start.isoformat(), 'ends_on': end.isoformat(),
+        })
+        assert as_admin.status_code == 201, as_admin.get_json()
+        admin_aid = as_admin.get_json()['delegation_id']
+        assert client.delete(f'/api/delegations/{admin_aid}').status_code == 200
+        assert client.get('/api/delegations').get_json()['delegated_by_me'] == []
+    finally:
+        _clean_delegation_test()
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_delegation_rejects_self_inactive_unknown_and_reversed_ranges(client):
+    """The rows a delegation cannot be: someone's own authority, an inactive
+    employee, a ghost employee, or a period that runs backwards."""
+    _delegate_fixture_users()
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99711)
+        start = date.today().isoformat()
+        end = (date.today() + timedelta(days=5)).isoformat()
+
+        self_del = client.post('/api/delegations', json={
+            'delegate_id': 'EMP977', 'starts_on': start, 'ends_on': end})
+        assert self_del.status_code == 409, self_del.get_json()
+
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET status = 'Blocked' WHERE emp_id = 'EMP985'")
+        finally:
+            conn.close()
+        inactive = client.post('/api/delegations', json={
+            'delegate_id': 'EMP985', 'starts_on': start, 'ends_on': end})
+        assert inactive.status_code == 409, inactive.get_json()
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET status = 'Active' WHERE emp_id = 'EMP985'")
+        finally:
+            conn.close()
+
+        ghost = client.post('/api/delegations', json={
+            'delegate_id': 'EMP999', 'starts_on': start, 'ends_on': end})
+        assert ghost.status_code == 404, ghost.get_json()
+
+        backwards = client.post('/api/delegations', json={
+            'delegate_id': 'EMP978', 'starts_on': end, 'ends_on': start})
+        assert backwards.status_code == 400, backwards.get_json()
+    finally:
+        _clean_delegation_test()
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_no_approval_route_allows_self_approval(client):
+    """FR-LEA-04's "not the applicant" was enforced nowhere.
+
+    Before this slice an HR administrator could sign off their own application.
+    `_approval_denial` answers **409** for the applicant on every route that
+    consults it, and it is exercised through all three pairs here by the person
+    who *is* an approver — EMP985 the active delegate — trying to decide their
+    own request: leave, regularization and break.
+    """
+    _delegate_fixture_users()
+    leave_id = regularization_id = break_aid = None
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99721)
+        assert client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': date.today().isoformat(),
+            'ends_on': (date.today() + timedelta(days=10)).isoformat(),
+        }).status_code == 201
+
+        leave_id, _ = _pending_leave_for(client, 'EMP985', 99722)
+        _login_as(client, 'EMP985', 'Employee', 99723)
+        mine_approve = client.post(f'/api/leaves/{leave_id}/approve')
+        assert mine_approve.status_code == 409, mine_approve.get_json()
+        assert 'cannot decide your own request' in mine_approve.get_json()['error']
+        assert client.post(f'/api/leaves/{leave_id}/reject').status_code == 409
+
+        _login_as(client, 'EMP985', 'Employee', 99724)
+        made = client.post('/api/regularization', json={
+            'date': _working_day(21).isoformat(), 'reason': 'self approval test'})
+        assert made.status_code == 201, made.get_json()
+        regularization_id = made.get_json()['id']
+        assert client.post(f'/api/regularization/{regularization_id}/approve').status_code == 409
+        assert client.post(f'/api/regularization/{regularization_id}/reject').status_code == 409
+
+        break_aid = _queue_lunch_approval('EMP985')
+        assert client.post(f'/api/break-approvals/{break_aid}/approve').status_code == 409
+        assert client.post(f'/api/break-approvals/{break_aid}/reject').status_code == 409
+    finally:
+        _clean_delegation_test(
+            leave_ids=(leave_id,) if leave_id else (),
+            regularization_ids=(regularization_id,) if regularization_id else (),
+            break_ids=(break_aid,) if break_aid else (),
+        )
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_a_manager_cannot_decide_outside_their_reporting_line(client):
+    """The coarse gate admits *any* manager; the per-employee check is what stops
+    them acting on someone else's line.
+
+    EMP977 manages EMP978; EMP986 reports to EMP001. Before `_approval_denial`
+    existed, EMP977's approve of EMP986's request returned 200 — the "gate
+    admits a manager somewhere" reading that FR-LEA-04 and FR-ATT-06 both
+    explicitly reject ("the employee's manager ... or HR/Admin").
+    """
+    _delegate_fixture_users()
+    _cleanup_user_contract_rows('EMP986')
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, password, role, status, '
+            "allow_login, department, manager_emp_id) VALUES ('EMP986', 'Elsewhere', "
+            "'emp986@company.com', ?, 'Employee', 'Active', 1, 'MIS', 'EMP001')",
+            [hash_password('correct-horse-battery')],
+        )
+    finally:
+        conn.close()
+    leave_id = None
+    try:
+        leave_id, _ = _pending_leave_for(client, 'EMP986', 99731)
+        _login_as(client, 'EMP977', 'Team Leader', 99732)
+        denied = client.post(f'/api/leaves/{leave_id}/approve')
+        assert denied.status_code == 403, denied.get_json()
+        assert 'EMP986' in str(denied.get_json())
+    finally:
+        _clean_delegation_test(leave_ids=(leave_id,) if leave_id else ())
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985', 'EMP986')
+
+
+def test_a_delegate_can_approve_a_report_and_the_audit_names_the_manager(client):
+    """FR-LEA-08a's whole point, end to end.
+
+    EMP977 (on leave) hands their authority to EMP985, and EMP985 — a plain
+    employee with no reports, which is precisely the case a `manages someone`
+    gate would have refused — appears in the approval queue and approves
+    EMP978's leave. The ledger moves exactly the reserved days, and the audit
+    row says the decision was "approved by delegate for manager EMP977", which
+    is the exact sentence the SRS asks for.
+    """
+    _delegate_fixture_users()
+    leave_id = None
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99741)
+        assert client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': date.today().isoformat(),
+            'ends_on': (date.today() + timedelta(days=10)).isoformat(),
+            'reason': 'on leave',
+        }).status_code == 201
+
+        leave_id, days = _pending_leave_for(client, 'EMP978', 99742)
+
+        # The manager's own queue shows their report's request...
+        _login_as(client, 'EMP977', 'Team Leader', 99743)
+        mgr_queue = client.get('/api/leaves?pending_my_approval=1').get_json()
+        assert [r['emp_id'] for r in mgr_queue] == ['EMP978'], mgr_queue
+
+        # ...and so does the delegate's — the filter and the approve route are
+        # the same `approvable_employees` answer (FR-LEA-01's "delegated-manager
+        # visibility", API-level).
+        _login_as(client, 'EMP985', 'Employee', 99744)
+        queue = client.get('/api/leaves?pending_my_approval=1')
+        assert queue.status_code == 200
+        rows = queue.get_json()
+        assert [r['emp_id'] for r in rows] == ['EMP978'], rows
+        assert rows[0]['leave_id'] == leave_id
+
+        approved = client.post(f'/api/leaves/{leave_id}/approve')
+        assert approved.status_code == 200, approved.get_json()
+
+        conn = get_db()
+        try:
+            audit_note = conn.execute(
+                "SELECT details FROM audit_log WHERE action = 'LEAVE_APPROVE' "
+                'AND entity_id = CAST(? AS VARCHAR) ORDER BY log_id DESC LIMIT 1',
+                [str(leave_id)],
+            ).fetchone()
+            actor = conn.execute(
+                'SELECT approved_by FROM leave_requests WHERE leave_id = ?', [leave_id]
+            ).fetchone()
+            used = conn.execute(
+                'SELECT used_days FROM leave_balance WHERE emp_id = ? AND leave_type = ?',
+                ['EMP978', 'Casual'],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert audit_note and 'approved by delegate for manager EMP977' in audit_note[0], audit_note
+        assert actor[0] == 'EMP985'
+        assert used and used[0] == days, (
+            f'approval did not move the reserved {days} day(s) into used_days: {used}'
+        )
+
+        # The manager's own pending list no longer shows the decided request.
+        _login_as(client, 'EMP977', 'Team Leader', 99745)
+        after = client.get('/api/leaves?pending_my_approval=1').get_json()
+        assert all(r['emp_id'] != 'EMP978' for r in after), after
+    finally:
+        _clean_delegation_test(leave_ids=(leave_id,) if leave_id else ())
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_regularization_uses_the_same_delegation_and_actor_rule(client):
+    """FR-REG-01's "manager view includes delegated reports (FR-LEA-08a)" and
+    FR-REG-03's actor rule. A delegate deciding a regularization request is the
+    same story as the leave slice — the one rule in two shapes, `_approval_denial`
+    and `_pending_my_approval_clause` — and the status/month/year filters
+    FR-REG-01 claims now exist where the route read no query arguments at all.
+    """
+    _delegate_fixture_users()
+    rid = None
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99751)
+        assert client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': date.today().isoformat(),
+            'ends_on': (date.today() + timedelta(days=10)).isoformat(),
+        }).status_code == 201
+
+        _login_as(client, 'EMP978', 'Employee', 99752)
+        made = client.post('/api/regularization', json={
+            'date': _working_day(21).isoformat(), 'reason': 'delegation test'})
+        assert made.status_code == 201, made.get_json()
+        rid = made.get_json()['id']
+
+        _login_as(client, 'EMP985', 'Employee', 99753)
+        queue = client.get('/api/regularization?pending_my_approval=1')
+        assert queue.status_code == 200
+        assert [r['emp_id'] for r in queue.get_json()] == ['EMP978'], queue.get_json()
+
+        # The filters FR-REG-01 names all parse and apply.
+        filtered = client.get(f'/api/regularization?status=Pending&month={date.today().month}'
+                              f'&year={date.today().year}&pending_my_approval=1')
+        assert filtered.status_code == 200
+        assert [r['id'] for r in filtered.get_json()] == [rid]
+
+        approved = client.post(f'/api/regularization/{rid}/approve')
+        assert approved.status_code == 200, approved.get_json()
+        again = client.post(f'/api/regularization/{rid}/approve')
+        assert again.status_code == 409, again.get_json()
+
+        conn = get_db()
+        try:
+            note = conn.execute(
+                "SELECT details FROM audit_log WHERE action = 'REGULARIZATION_APPROVE' "
+                'AND entity_id = CAST(? AS VARCHAR) ORDER BY log_id DESC LIMIT 1',
+                [str(rid)],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert note and 'approved by delegate for manager EMP977' in note[0], note
+    finally:
+        _clean_delegation_test(regularization_ids=(rid,) if rid else ())
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_a_delegate_can_decide_a_break_request(client):
+    """FR-ATT-06: "actor is the employee's manager (including an active
+    delegate, FR-LEA-08a) or has role HR/Admin". The delegate half is the part
+    this slice added; the audit note travels into the break approval row too.
+    """
+    _delegate_fixture_users()
+    aid = None
+    try:
+        _login_as(client, 'EMP977', 'Team Leader', 99761)
+        assert client.post('/api/delegations', json={
+            'delegate_id': 'EMP985',
+            'starts_on': date.today().isoformat(),
+            'ends_on': (date.today() + timedelta(days=10)).isoformat(),
+        }).status_code == 201
+
+        aid = _queue_lunch_approval('EMP978')
+        _login_as(client, 'EMP985', 'Employee', 99762)
+        decided = client.post(f'/api/break-approvals/{aid}/approve')
+        assert decided.status_code == 200, decided.get_json()
+
+        conn = get_db()
+        try:
+            note = conn.execute(
+                "SELECT details FROM audit_log WHERE action = 'BREAK_APPROVAL_APPROVED' "
+                'AND entity_id = CAST(? AS VARCHAR) ORDER BY log_id DESC LIMIT 1',
+                [str(aid)],
+            ).fetchone()
+        finally:
+            conn.close()
+        assert note and 'approved by delegate for manager EMP977' in note[0], note
+    finally:
+        _clean_delegation_test(break_ids=(aid,) if aid else ())
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_pending_my_approval_leaks_nothing_and_excludes_the_actor(client):
+    """The filter must not leak, and must exclude the caller even for an admin.
+
+    A plain employee with no reports and no delegation gets an empty queue, not
+    the company's pending backlog. An administrator gets every pending request
+    **but their own** — `can_approve_for` refuses the applicant whatever their
+    role, and the queue must not promise what the approve route will refuse.
+    """
+    _delegate_fixture_users()
+    emp978_leave = emp001_leave = rid = None
+    try:
+        # EMP978: nobody to approve for → empty, not everything.
+        _login_as(client, 'EMP978', 'Employee', 99771)
+        empty_leaves = client.get('/api/leaves?pending_my_approval=1')
+        assert empty_leaves.status_code == 200 and empty_leaves.get_json() == []
+        empty_regular = client.get('/api/regularization?pending_my_approval=1')
+        assert empty_regular.get_json() == []
+
+        # A pending regularization and a pending leave exist for EMP978.
+        _login_as(client, 'EMP978', 'Employee', 99772)
+        made = client.post('/api/regularization', json={
+            'date': _working_day(22).isoformat(), 'reason': 'admin queue test'})
+        assert made.status_code == 201, made.get_json()
+        rid = made.get_json()['id']
+        emp978_leave, _ = _pending_leave_for(client, 'EMP978', 99773)
+
+        # EMP001's *own* pending leave must not appear in EMP001's queue.
+        _login_as(client, 'EMP001', 'Admin', 99774)
+        emp001_leave, _ = _pending_leave_for(client, 'EMP001', 99775)
+
+        _set_admin_session(client, 99776)
+        leaves = client.get('/api/leaves?pending_my_approval=1').get_json()
+        emp_ids = {r['emp_id'] for r in leaves}
+        assert 'EMP978' in emp_ids and 'EMP001' not in emp_ids, emp_ids
+        regular = client.get('/api/regularization?pending_my_approval=1').get_json()
+        assert any(r['id'] == rid for r in regular), regular
+        assert all(r['emp_id'] != 'EMP001' for r in regular)
+    finally:
+        conn = get_db()
+        try:
+            if emp001_leave:
+                conn.execute(
+                    "DELETE FROM leave_requests WHERE emp_id = 'EMP001' AND leave_id = ?",
+                    [emp001_leave],
+                )
+                conn.execute(
+                    'DELETE FROM audit_log WHERE entity = ? AND entity_id = CAST(? AS VARCHAR)',
+                    ['leave_requests', str(emp001_leave)],
+                )
+                # EMP001 is a seed employee: restore the reservation the apply
+                # made so the shared balance is exactly as the suite found it.
+                conn.execute(
+                    'UPDATE leave_balance SET reserved = 0 WHERE emp_id = ? '
+                    'AND leave_type = ? AND year = ?',
+                    ['EMP001', 'Casual', datetime.now().year],
+                )
+        finally:
+            conn.close()
+        _clean_delegation_test(
+            leave_ids=(emp978_leave,) if emp978_leave else (),
+            regularization_ids=(rid,) if rid else (),
+        )
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
+
+
+def test_delegation_module_rules_are_one_rule_in_two_shapes(client):
+    """`can_approve_for` and `approvable_employees` are the same question.
+
+    The approve route and the list filter must not disagree about who is an
+    approver, `approval_note` fires only when the delegation is what authorised
+    the decision (never for an HR/admin who needed no delegation), and `revoke`
+    really does have the admin half its docstring always promised.
+    """
+    import delegations
+
+    _delegate_fixture_users()
+    try:
+        conn = get_db()
+        try:
+            delegations.create(
+                conn, 'EMP977', 'EMP985',
+                date.today() - timedelta(days=1), date.today() + timedelta(days=10),
+            )
+        finally:
+            conn.close()
+
+        conn = get_db()
+        try:
+            # The delegate may act for the delegator's report — and for nobody
+            # else, including themselves.
+            assert delegations.can_approve_for(conn, 'EMP985', 'EMP978') is True
+            assert delegations.can_approve_for(conn, 'EMP985', 'EMP985') is False
+            assert delegations.can_approve_for(conn, 'EMP985', 'EMP002') is False
+            # The manager themselves, HR/Admin by role, and the HR department.
+            assert delegations.can_approve_for(conn, 'EMP977', 'EMP978') is True
+            assert delegations.can_approve_for(conn, 'EMP001', 'EMP002') is True
+            assert delegations.can_approve_for(conn, 'EMP977', 'EMP986') is False
+            # `None` = every employee but self; `[]` = nobody.
+            assert delegations.approvable_employees(conn, 'EMP001') is None
+            assert delegations.approvable_employees(conn, 'EMP978') == []
+            assert delegations.approvable_employees(conn, 'EMP985') == ['EMP978']
+            assert delegations.approvable_employees(conn, 'EMP977') == ['EMP978']
+            # The audit wording, scoped to the delegation that authorised it.
+            assert delegations.approval_note(
+                conn, 'EMP985', 'EMP978') == 'approved by delegate for manager EMP977'
+            assert delegations.approval_note(conn, 'EMP985', 'EMP002') is None
+            assert delegations.approval_note(conn, 'EMP001', 'EMP978') is None
+            assert delegations.approval_note(conn, 'EMP977', 'EMP978') is None
+            assert delegations.role_authorises(conn, 'EMP985') is False
+        finally:
+            conn.close()
+
+        conn = get_db()
+        try:
+            # Revoke the delegation created above for the `can_approve_for`
+            # assertions: only the delegator, or an admin, may withdraw it.
+            rows = delegations.for_delegator(conn, 'EMP977')
+            assert len(rows) == 1, rows
+            did = rows[0]['delegation_id']
+            with pytest.raises(delegations.DelegationError):
+                delegations.revoke(conn, did, 'EMP978')
+            delegations.revoke(conn, did, 'EMP978', is_admin=True)
+            assert delegations.for_delegator(conn, 'EMP977') == []
+        finally:
+            conn.close()
+    finally:
+        _clean_delegation_test()
+        _cleanup_user_contract_rows('EMP977', 'EMP978', 'EMP985')
 
 
 def test_admin_break_dispose_requires_and_records_a_reason(client):
@@ -2949,10 +3555,14 @@ def test_the_todo_pdf_srs_section_is_generated_from_the_matrix():
     to. The SRS section is therefore read out of `traceability.py`, so it cannot
     disagree with the code — and this test is what makes *that* claim checkable.
     """
+    import srs_spec
+
     pdf = _todo_pdf_module()
     rows, error = pdf._srs_rows()
     assert error is None, error
-    assert len(rows) == 104, f'expected every SRS requirement, got {len(rows)}'
+    assert len(rows) == len(srs_spec.REQUIREMENTS), (
+        f'expected every SRS requirement ({len(srs_spec.REQUIREMENTS)}), '
+        f'got {len(rows)}')
 
     import traceability
 
@@ -3025,6 +3635,86 @@ def test_route_patterns_survive_the_pdf_markup():
     assert pdf._escape_routes(('/a?x=1&y=2',)) == '/a?x=1&amp;y=2'
     # And the absent case reads as a statement rather than as nothing.
     assert pdf._escape_routes(()) == 'no route yet'
+
+
+def test_every_srs_row_carries_its_serial_and_module_name():
+    """Every row in the document can be cited three ways, and all three agree.
+
+    A row that renders `?` in the serial column is a row the reader cannot reference,
+    and a module that falls through `_MODULE_NAMES` to its bare code prints `PAY` where
+    its neighbours print `Leave` — which is how the payroll section came to be absent
+    in the first place. Both are silent: `.get(module, module)` never raises.
+    """
+    import srs_spec
+
+    pdf = _todo_pdf_module()
+    rows, error = pdf._srs_rows()
+    assert error is None, error
+
+    for row in rows:
+        assert row['serial'] != '?', f'{row["id"]} resolved to no serial'
+        assert row['serial'] == srs_spec.serial(row['id']), (
+            f'{row["id"]}: document says {row["serial"]}, srs_spec says '
+            f'{srs_spec.serial(row["id"])}')
+        assert row['statement'], f'{row["id"]} has no requirement statement in the DSR'
+        assert row['module'] in pdf._MODULE_NAMES, (
+            f'no display name for module {row["module"]!r} (from {row["id"]}); '
+            f'add it to _MODULE_NAMES so the document does not print the bare code')
+
+    serials = [row['serial'] for row in rows]
+    assert len(set(serials)) == len(serials), 'a serial was issued twice'
+
+
+def test_every_open_requirement_has_a_next_step():
+    """The development reference must be actionable for *every* row it lists.
+
+    The gap says what is missing; the next step says which file to open. A row with
+    neither is a status report, which is exactly what this document was restructured to
+    stop being. The derived fallback in `_srs_open` means the PDF still builds, so this
+    test is the only thing that makes the hand-written set a ratchet: a requirement
+    newly turned PARTIAL fails here until somebody who has read the handler writes the
+    step. `_NEXT_STEPS` keys must therefore equal the open set in both directions —
+    a stale entry would be a step for finished work, which is the same defect from the
+    other side.
+    """
+    pdf = _todo_pdf_module()
+    rows, error = pdf._srs_rows()
+    assert error is None, error
+    open_rows = pdf._srs_open(rows)
+    assert open_rows, 'nothing is open, so this test proves nothing'
+
+    open_ids = {row['id'] for row in open_rows}
+    assert set(pdf._NEXT_STEPS) == open_ids, (
+        f'open requirements with no next step: {sorted(open_ids - set(pdf._NEXT_STEPS))}; '
+        f'steps for requirements that are no longer open: '
+        f'{sorted(set(pdf._NEXT_STEPS) - open_ids)}')
+
+    for row in open_rows:
+        step = row['next_step']
+        assert step and step[0].isupper(), (
+            f'{row["id"]} next step is not a sentence: {step[:70]!r}')
+        # An action with an object, not an aspiration. "Improve the thing" would pass
+        # a length check while telling the reader nothing about where to start.
+        assert len(step) > 40, f'{row["id"]} next step is too short to act on: {step!r}'
+        assert step != row['gap'], f'{row["id"]} next step just restates the gap'
+        assert not step.lower().startswith('decide the scope'), (
+            f'{row["id"]} fell through to the derived fallback: {step!r}')
+
+
+def test_route_escaping_covers_every_dynamic_string_in_the_row():
+    """`_escape_markup` is what the row actually uses, and `_escape_routes` is a wrapper.
+
+    The routes were escaped because `/api/break-approvals/<int:aid>/approve` rendered
+    as `/api/break-approvals//approve`. The next steps contain `status <> 'Cancelled'`
+    and the module names contain a bare `&`, so a test that only checks the routes
+    would be checking the one string somebody happened to notice.
+    """
+    pdf = _todo_pdf_module()
+    assert pdf._escape_markup("status <> 'Cancelled'") == 'status &lt;&gt; \'Cancelled\''
+    assert pdf._escape_markup('Attendance &amp; more') == 'Attendance &amp;amp; more'
+    assert pdf._escape_markup('<int:rid>') == '&lt;int:rid&gt;'
+    # `_escape_routes` is the routes-shaped view of the same function, not a copy of it.
+    assert pdf._escape_routes(('a<b',)) == pdf._escape_markup('a<b')
 
 
 def test_leave_days_are_working_days_not_calendar_days():
@@ -3175,7 +3865,12 @@ def test_a_half_day_leave_is_half_the_allowance(client):
     _create_policy_user(client, 'EMP989', role='Employee')
     try:
         _login_as(client, 'EMP989', 'Employee', 99772)
+        # Chain the dates rather than adding offsets: `_working_day(30)` and
+        # `_working_day(31)` can both walk onto the same Monday (see the note on
+        # `_working_day`), which made the second request a 409 overlap.
         day = _working_day(30)
+        other = _next_working_day(day + timedelta(days=1))
+        third = _next_working_day(other + timedelta(days=1))
 
         full = client.post('/api/leaves', json={
             'leave_type': 'Casual', 'start_date': day.isoformat(),
@@ -3185,7 +3880,6 @@ def test_a_half_day_leave_is_half_the_allowance(client):
         assert full.get_json()['days_requested'] == 1, full.get_json()
         assert full.get_json()['session'] == 'Full', full.get_json()
 
-        other = _working_day(31)
         half = client.post('/api/leaves', json={
             'leave_type': 'Casual', 'start_date': other.isoformat(),
             'end_date': other.isoformat(), 'session': 'First-half',
@@ -3201,7 +3895,6 @@ def test_a_half_day_leave_is_half_the_allowance(client):
         )
 
         # And an unknown session is refused rather than defaulted.
-        third = _working_day(32)
         bad = client.post('/api/leaves', json={
             'leave_type': 'Casual', 'start_date': third.isoformat(),
             'end_date': third.isoformat(), 'session': 'Afternoon-ish',
@@ -4945,37 +5638,6 @@ def test_accrual_run_is_admin_only_and_registered_as_a_job(client):
     app_module._register_scheduler_jobs(2)
     job = app_module.scheduler.get_job('leave-accrual')
     assert job is not None, 'the monthly accrual job is not registered'
-# Every FR-* requirement id in HRMS_SRS_v2.0.pdf, extracted from the
-# requirements tables and Appendix A on 2026-09-29. The matrix in
-# traceability.py must cover exactly this set, so a new SRS requirement cannot
-# go untracked. Parsing the PDF here would add a pypdf dependency to CI for
-# one assertion, so the extracted set is committed instead. To re-extract after
-# an SRS revision:
-#   python -c "from pypdf import PdfReader; import re; t=chr(10).join(
-#     (p.extract_text() or '') for p in PdfReader('HRMS_SRS_v2.0.pdf').pages);
-#     print(sorted(set(re.findall(r'FR-[A-Z]{2,6}-[0-9]{2}[a-z]?', t))))"
-_SRS_REQUIREMENT_IDS = {
-    'FR-ANL-01', 'FR-ANL-02', 'FR-ANL-04', 'FR-AST-01', 'FR-ATS-01', 'FR-ATS-02',
-    'FR-ATS-03', 'FR-ATS-04', 'FR-ATT-01', 'FR-ATT-02', 'FR-ATT-03', 'FR-ATT-04',
-    'FR-ATT-05', 'FR-ATT-06', 'FR-ATT-07', 'FR-ATT-08', 'FR-ATT-09', 'FR-ATT-10',
-    'FR-ATT-11', 'FR-ATT-12', 'FR-ATT-13', 'FR-ATT-14', 'FR-ATT-15', 'FR-ATT-16',
-    'FR-ATT-17', 'FR-AUD-01', 'FR-AUTH-01', 'FR-AUTH-02', 'FR-AUTH-03', 'FR-AUTH-04',
-    'FR-AUTH-05', 'FR-AUTH-06', 'FR-AUTH-07', 'FR-AUTH-08', 'FR-AUTH-09', 'FR-AUTH-10',
-    'FR-AUTH-11', 'FR-AUTH-12', 'FR-AUTH-13', 'FR-AUTH-14', 'FR-DOC-01', 'FR-DOC-02',
-    'FR-DOC-03', 'FR-EXP-01', 'FR-EXP-02', 'FR-EXP-03', 'FR-HOL-01', 'FR-HOL-02',
-    'FR-HOL-03', 'FR-JOB-01', 'FR-JOB-02', 'FR-JOB-03', 'FR-JOB-04', 'FR-JOB-05',
-    'FR-LEA-01', 'FR-LEA-02', 'FR-LEA-03', 'FR-LEA-04', 'FR-LEA-05', 'FR-LEA-06',
-    'FR-LEA-07', 'FR-LEA-08', 'FR-LEA-08a', 'FR-LEA-09', 'FR-NOT-01', 'FR-NOT-02',
-    'FR-NOT-03', 'FR-OFF-01', 'FR-OFF-02', 'FR-OFF-03', 'FR-ONB-01', 'FR-ONB-02',
-    'FR-ONB-03', 'FR-ONB-04', 'FR-ONB-05', 'FR-ONB-06', 'FR-PERF-01', 'FR-PERF-02',
-    'FR-REG-01', 'FR-REG-02', 'FR-REG-03', 'FR-REG-04', 'FR-RPT-01', 'FR-RPT-02',
-    'FR-TKT-01', 'FR-TKT-02', 'FR-TKT-03', 'FR-TKT-04', 'FR-USR-01', 'FR-USR-02',
-    'FR-USR-03', 'FR-USR-04', 'FR-USR-05', 'FR-USR-06', 'FR-USR-06a', 'FR-USR-07',
-    'FR-USR-08', 'FR-USR-09', 'FR-USR-10', 'FR-USR-11', 'FR-USR-12', 'FR-USR-13',
-    'FR-USR-14', 'FR-USR-15',
-}
-
-
 
 
 # ── SRS traceability matrix ───────────────────────────────────────────────
@@ -4983,16 +5645,19 @@ _SRS_REQUIREMENT_IDS = {
 def test_traceability_covers_every_srs_requirement():
     """The matrix must not silently drop a requirement.
 
-    The ID list is the one extracted from `HRMS_SRS_v2.0.pdf`. A new requirement
-    in the SRS has to be added here deliberately, with a verdict, rather than
-    quietly going untracked.
+    The requirement set comes from `srs_spec.py`, which is generated from
+    `HRMS_SRS_v2.0.pdf` and verified against it by
+    `test_srs_spec_matches_the_srs_pdf`. A new requirement in the SRS therefore
+    cannot go untracked: it arrives in `srs_spec` first, and this test fails until
+    someone gives it a verdict in `traceability.py`.
     """
     import traceability
 
-    assert set(traceability.TRACEABILITY) == _SRS_REQUIREMENT_IDS, (
+    expected = set(srs_spec.ORDER)
+    assert set(traceability.TRACEABILITY) == expected, (
         'traceability.py and the SRS disagree: '
-        f'extra={sorted(set(traceability.TRACEABILITY) - _SRS_REQUIREMENT_IDS)} '
-        f'missing={sorted(_SRS_REQUIREMENT_IDS - set(traceability.TRACEABILITY))}')
+        f'extra={sorted(set(traceability.TRACEABILITY) - expected)} '
+        f'missing={sorted(expected - set(traceability.TRACEABILITY))}')
 
 
 def test_traceability_routes_exist():
@@ -5048,16 +5713,84 @@ def test_traceability_partial_rows_name_what_is_missing():
             f'{rid} is PARTIAL but the note does not say what is missing: {note}')
 
 
-def test_traceability_covers_the_srs_pdf_ids():
-    """The recorded ID set matches the PDF, so the two cannot drift apart.
+def test_traceability_records_the_srs_priority_and_delta():
+    """The matrix quotes the SRS's own Pri/Δ columns, and used to disagree with them.
 
-    Parsing the PDF in the test suite would add a pypdf dependency to CI for one
-    assertion, so the extracted IDs are committed here instead. This test is the
-    record of what was extracted and when; regenerate with the helper below if
-    the SRS is revised.
+    43 of the 104 rows the matrix had carried a hand-typed priority or delta that
+    did not match §5 — FR-AUTH-08 read `M`/`N` against the spec's `H`/`C`,
+    FR-JOB-02 read `M`/`C` against `H`/`R`. Nothing noticed, because nothing read
+    both columns at once. SRS §5 is the authority here: the matrix is commentary
+    about *the code*, not about the spec, so when the two differ the matrix is
+    wrong even if the verdict beside it is right.
     """
-    assert len(_SRS_REQUIREMENT_IDS) >= 100
-    assert 'FR-ATT-10' in _SRS_REQUIREMENT_IDS, 'the retired requirement is still listed'
+    import traceability
+
+    assert len(srs_spec.REQUIREMENTS) >= 110, 'the extraction looks truncated'
+    for rid, row in traceability.TRACEABILITY.items():
+        spec = srs_spec.BY_ID[rid]
+        assert (row[0], row[1]) == (spec.priority, spec.delta), (
+            f'{rid} ({spec.serial}): the matrix says priority={row[0]!r} '
+            f'delta={row[1]!r}, SRS §5 says priority={spec.priority!r} '
+            f'delta={spec.delta!r}')
+
+
+def test_srs_spec_serials_are_stable_and_complete():
+    """Serial numbers are allocated in SRS document order and never reused.
+
+    The whole point of a serial is that `SR-042` means one requirement forever, so
+    a commit, a test or a conversation can cite it. Two properties make that true:
+    the sequence has no gaps or duplicates, and it is *document order* rather than
+    the matrix's (verdict-influenced) ordering — otherwise adding a row to
+    `traceability.py` would silently renumber everything after it.
+
+    FR-ANL-04 is the deliberate exception: it has no §5 row (Appendix A-24, a
+    v1.0 id), so it is serialised last and cannot disturb the §5 sequence.
+    """
+    serials = [r.serial for r in srs_spec.REQUIREMENTS]
+    assert serials == [f'SR-{i:03d}' for i in range(1, len(serials) + 1)], (
+        'serial numbers are not a gapless sequence in document order')
+    assert len(set(serials)) == len(serials), 'a serial was issued twice'
+    assert len(set(srs_spec.ORDER)) == len(srs_spec.ORDER), 'duplicate requirement id'
+    assert srs_spec.ORDER[-1] == 'FR-ANL-04', (
+        'the appendix-only requirement must be serialised last so §5 serials are stable')
+    # The lookup helpers agree with the tuple, so a caller cannot get two answers.
+    for req in srs_spec.REQUIREMENTS:
+        assert srs_spec.serial(req.id) == req.serial
+        assert srs_spec.statement(req.id) == req.statement
+    with pytest.raises(KeyError):
+        srs_spec.serial('FR-NOT-A-REQUIREMENT')
+    # The retired requirement keeps its id and its serial, like every other one.
+    assert 'FR-ATT-10' in srs_spec.ORDER, 'the retired requirement is still listed'
+
+
+def test_srs_spec_matches_the_srs_pdf():
+    """`srs_spec.py` is generated from the PDF — this is what keeps it generated.
+
+    A committed extraction is a copy of the spec, and a copy of the spec that has
+    stopped matching the spec is worse than no copy: it reads as authority. So the
+    extractor is re-run here against `HRMS_SRS_v2.0.pdf` and its output compared
+    byte for byte with the file on disk. A revised SRS turns the build red until
+    someone re-runs `python scripts/extract_srs_spec.py` and re-reads what moved.
+
+    pypdf is a dev/CI dependency (`requirements-dev.txt`); without it the test
+    skips rather than silently passing, because an unverifiable extraction should
+    say so.
+    """
+    pytest.importorskip('pypdf', reason='pypdf is in requirements-dev.txt')
+    root = pathlib.Path(__file__).resolve().parent.parent
+    extractor = root / 'scripts' / 'extract_srs_spec.py'
+    assert (root / 'HRMS_SRS_v2.0.pdf').is_file(), 'the SRS itself is missing'
+
+    import importlib.util
+
+    module_spec = importlib.util.spec_from_file_location('extract_srs_spec', extractor)
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    committed = (root / 'srs_spec.py').read_text()
+    assert module.render(module.extract()) == committed, (
+        'srs_spec.py does not match HRMS_SRS_v2.0.pdf: '
+        'run `python scripts/extract_srs_spec.py` and review the diff')
 
 
 def test_generated_traceability_doc_is_up_to_date():
@@ -6392,6 +7125,13 @@ def _future_leave_with_days(client, days=3, reason='trip'):
     return body['leave_id'], body['days_requested']
 
 
+def _next_working_day(day: date) -> date:
+    """The nearest weekday on or after `day` (FR-LEA-09: Sat/Sun are not working)."""
+    while day.weekday() >= 5:          # Saturday, Sunday
+        day += timedelta(days=1)
+    return day
+
+
 def _working_day(offset_from_today: int = 0) -> date:
     """A real working day, `offset_from_today` calendar days from today.
 
@@ -6400,24 +7140,57 @@ def _working_day(offset_from_today: int = 0) -> date:
     the correct answer and made several leave fixtures fail. Rewriting them with a
     fixed literal date would just move the problem to whichever month the suite runs
     in, so this walks to the nearest weekday instead.
+
+    **Walking forward means two nearby offsets can land on the same day.** That is
+    not hypothetical: on 2026-10-08 offsets 30, 31 and 32 are Sat 7, Sun 8 and Mon 9
+    November, and all three walk out onto Mon 9 — so a fixture asking for "one whole
+    day and then the next day" silently created two requests for the *same* date and
+    the second was refused 409 as an overlap. The suite went green the day before
+    and red on that date. Any fixture that needs a *sequence* of working days must
+    chain through `_next_working_day(day + 1 day)` instead of adding offsets, which
+    is what `test_a_half_day_leave_is_half_the_allowance` now does.
     """
-    day = date.today() + timedelta(days=offset_from_today)
-    while day.weekday() >= 5:          # Saturday, Sunday
-        day += timedelta(days=1)
-    return day
+    return _next_working_day(date.today() + timedelta(days=offset_from_today))
 
 
 def _past_leave(client, days=2, reason='already taken'):
-    # Both endpoints are working days: the request has to reserve something for the
-    # cancellation tests to give back.
+    """A leave that has **already started**, so cancel must refuse it (FR-LEA-05).
+
+    Returns ``(leave_id, reserved_days)``.
+
+    Both halves of that pair are load-bearing, and both were wrong in the version this
+    replaced. `_working_day` walks *forwards* to the nearest weekday, so asking for
+    `-1 - days` did not reach back `days` days — it walked into the weekend and came
+    out on the *same* weekday the end date already was. On 2026-10-06 that made
+    `_past_leave()` a one-day leave (start = end = Mon 5 Oct) while the test asserted
+    `used_days == 2`, so the suite went red on a Tuesday and green on the days either
+    side of it. **A fixture that walks forward and then asserts on the span it was
+    supposed to create** — the same "re-derive a calendar the test does not own"
+    mistake the FR-LEA-09 work already fixed twice in the *assertions*; here it was in
+    the *fixture*, which is worse because the fixture is what makes the assertion
+    wrong rather than what catches it.
+
+    So the start date is walked **backwards** from the end over real weekdays, which
+    guarantees `days + 1` distinct working days regardless of what day the suite runs
+    on, and the caller compares against the figure the server stored rather than a
+    literal — the symmetry property (approval moves exactly what apply reserved) is
+    the thing under test, not any particular calendar.
+    """
     end = _working_day(-1)
-    start = _working_day(-1 - days)
-    return client.post('/api/leaves', json={
+    start = end
+    taken = 0
+    while taken < days:
+        start -= timedelta(days=1)
+        while start.weekday() >= 5:
+            start -= timedelta(days=1)
+        taken += 1
+    body = client.post('/api/leaves', json={
         'leave_type': 'Casual',
         'start_date': start.isoformat(),
         'end_date': end.isoformat(),
         'reason': reason,
-    }).get_json()['leave_id']
+    }).get_json()
+    return body['leave_id'], int(body['days_requested'])
 
 
 def _casual_balance(client):
@@ -6496,14 +7269,16 @@ def test_a_leave_that_has_already_started_cannot_be_cancelled(client):
     try:
         _create_policy_user(client, 'EMP988', role='Employee')
         _login_as(client, 'EMP988', 'Employee', 99791)
-        leave_id = _past_leave(client)
+        leave_id, reserved = _past_leave(client)
         _login_as(client, 'EMP001', 'Admin', 99790)
         assert client.post(f'/api/leaves/{leave_id}/approve').status_code == 200
         _login_as(client, 'EMP988', 'Employee', 99789)
         refused = client.post(f'/api/leaves/{leave_id}/cancel')
         assert refused.status_code == 409, refused.get_json()
         assert 'before it starts' in str(refused.get_json()), refused.get_json()
-        assert _casual_balance(client)['used_days'] == 2, 'the started leave was released'
+        # The stored figure, not a literal: approval moves exactly what apply reserved,
+        # and this test owns neither the calendar nor the days.
+        assert _casual_balance(client)['used_days'] == reserved, 'the started leave was released'
     finally:
         _cleanup_leave_rows('EMP988')
 
@@ -8810,10 +9585,21 @@ def test_new_employee_gets_a_derived_balance_and_cannot_double_spend(client):
     assert 'Insufficient balance' in second.get_json()['error']
 
     # A different type is unaffected.
+    #
+    # These dates go through `_working_day`, not a raw `today + 10`: a two-day span
+    # starting on a Saturday is entirely weekend, FR-LEA-09 correctly answers
+    # `400 "That range contains no working days"`, and the suite then reports a
+    # balance-rule test as failing for a reason that has nothing to do with the
+    # balance rule. It failed on 2026-10-07 for exactly that reason. The end is
+    # derived from the start by walking *it* forward, so start <= end holds on every
+    # day the suite runs — walking `today + 11` independently would land before the
+    # start whenever the start itself rolled off a weekend.
+    sick_start = _working_day(10)
+    sick_end = _working_day((sick_start - today).days + 1)
     other = client.post('/api/leaves', json={
         'leave_type': 'Sick',
-        'start_date': (today + __import__('datetime').timedelta(days=10)).isoformat(),
-        'end_date': (today + __import__('datetime').timedelta(days=11)).isoformat(),
+        'start_date': sick_start.isoformat(),
+        'end_date': sick_end.isoformat(),
         'reason': 'policy other type',
     })
     assert other.status_code == 201, other.get_json()

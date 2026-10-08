@@ -199,7 +199,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'Logout closes the active user_sessions row with total_hours = '
                    'logout - login and audits the action.'),
     'FR-AUTH-06': ('M', 'R', 'IMPLEMENTED', ('/',), 'Redirects by session state.'),
-    'FR-AUTH-07': ('M', 'N', 'IMPLEMENTED', ('/dashboard',),
+    'FR-AUTH-07': ('M', 'R', 'IMPLEMENTED', ('/dashboard',),
                    'Admin vs self dashboard chosen by policy.sees_admin_surface(). '
                    'Unauthenticated gets 302 for a page and 401 for JSON - and the '
                    'Accept header the SRS names is now honoured, so this row was '
@@ -211,7 +211,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'multipart case was fixed for, one trigger earlier. A combined Accept '
                    'still redirects, so a browser mentioning JSON among other types is '
                    'unaffected.'),
-    'FR-AUTH-08': ('M', 'N', 'IMPLEMENTED', ('/api/forgot-password', '/reset-password'),
+    'FR-AUTH-08': ('H', 'C', 'IMPLEMENTED', ('/api/forgot-password', '/reset-password'),
                    'Always 202 with the SRS\'s own sentence and never a token, so the '
                    'request has nothing to compare between a real and an unknown '
                    'account; a test asserts all four request shapes answer '
@@ -225,7 +225,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'credential without touching the account. /reset-password now exists '
                    'too: the emailed URL used to 404, so the journey was reachable only '
                    'by calling the API.'),
-    'FR-AUTH-09': ('M', 'N', 'IMPLEMENTED', ('/api/reset-password', '/reset-password'),
+    'FR-AUTH-09': ('H', 'C', 'IMPLEMENTED', ('/api/reset-password', '/reset-password'),
                    'token_urlsafe(32), stored as a SHA-256 digest and never in the '
                    'clear, 1 h expiry, single use via a write conditional on used = 0, '
                    'and every other live token for the account invalidated on a '
@@ -243,7 +243,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'credentials; and it said the expiry should be 24 h, which is wrong - '
                    'that is FR-USR-02\'s welcome-email token, a different flow, and '
                    'FR-AUTH-09 specifies 1 h, which the code already used.'),
-    'FR-AUTH-10': ('M', 'N', 'IMPLEMENTED',
+    'FR-AUTH-10': ('M', 'C', 'IMPLEMENTED',
                    ('/api/users', '/api/change-password', '/api/reset-password'),
                    'passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) '
                    'and a breach-corpus check, enforced at every point a password is set. '
@@ -254,7 +254,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    "default of 'pass123' is gone: a user created without a password gets a "
                    'generated compliant one, returned once. The rejection message is generic, '
                    'so it is not an oracle for confirming a guess.'),
-    'FR-AUTH-11': ('M', 'N', 'IMPLEMENTED',
+    'FR-AUTH-11': ('H', 'N', 'IMPLEMENTED',
                    ('/api/mfa/enrol', '/api/mfa/confirm', '/api/mfa/challenge',
                     '/api/mfa/status', '/api/mfa/qr', '/api/mfa/disable',
                     '/api/admin/users/<emp_id>/mfa/reset'),
@@ -288,11 +288,11 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'those requests authenticate with a signed, expiring token of their own '
                    'and cannot be forged cross-site. Asserted end to end with server-side '
                    'sessions too.'),
-    'FR-AUTH-13': ('H', 'N', 'PARTIAL', ('/api/credentials',),
+    'FR-AUTH-13': ('L', 'C', 'PARTIAL', ('/api/credentials',),
                    'Restricted by the permission policy and no longer returns '
                    'passwords or hashes. Missing the 5-minute re-authentication and '
                    'the audit row for a credential read.'),
-    'FR-AUTH-14': ('M', 'C', 'IMPLEMENTED', ('/api/admin/users/<emp_id>/unlock',),
+    'FR-AUTH-14': ('H', 'C', 'IMPLEMENTED', ('/api/admin/users/<emp_id>/unlock',),
                   'Hourly job does both duties the SRS names in one sentence: purge '
                   'expired reset tokens AND idempotency keys (CC-07), and auto-close '
                   'breaks left Active for more than 12 hours. The sweep is '
@@ -338,27 +338,29 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'Lunch only, one Pending per employee enforced in the handler. The '
                   'partial unique index that would enforce it under concurrency exists '
                   'only in the v2.0 schema.'),
-    'FR-ATT-06': ('H', 'C', 'PARTIAL', ('/api/break-approvals/<int:aid>/approve', '/api/break-approvals/<int:aid>/reject'),
-                  'Manager/HR/Admin may approve, the update is conditional (CC-04), the '
-                  'action is audited and the employee is notified. Every one of those four '
-                  'clauses was false while this row asserted them. The gate was '
-                  '@admin_required, so a Team Leader could not approve their own report - '
-                  'the third instance of that bug here after FR-EXP-03 and FR-PERF-01 - '
-                  'and the requirement was unreachable for the role the SRS names. The '
-                  'approve write was unconditional, so two approvers both won. Nothing was '
-                  'audited, and the employee was never notified. reject additionally '
-                  'answered 200 {"message": "Break rejected"} whether or not it rejected '
-                  'anything, the same always-200 lie the regularization routes had. All '
-                  'fixed, reusing the reporting_line_required gate from FR-PERF-01. '
-                  'Delegated approvers (FR-LEA-08a) are still not consulted, which is why '
-                  'this stays PARTIAL.'),
+    'FR-ATT-06': ('H', 'C', 'IMPLEMENTED', ('/api/break-approvals/<int:aid>/approve', '/api/break-approvals/<int:aid>/reject'),
+                  'Manager/HR/Admin - or an active delegate of that manager (FR-LEA-08a) - '
+                  'may approve, the update is conditional (CC-04), the action is audited '
+                  'and the employee is notified. Every one of those clauses was false while '
+                  'this row asserted them. The gate was @admin_required, so a Team Leader '
+                  'could not approve their own report - the third instance of that bug here '
+                  'after FR-EXP-03 and FR-PERF-01 - and the requirement was unreachable for '
+                  'the role the SRS names. The approve write was unconditional, so two '
+                  'approvers both won. Nothing was audited, and the employee was never '
+                  'notified. reject additionally answered 200 {"message": "Break rejected"} '
+                  'whether or not it rejected anything, the same always-200 lie the '
+                  'regularization routes had. All fixed, reusing the reporting_line_required '
+                  'gate from FR-PERF-01, and the decision itself goes through the shared '
+                  'delegations.can_approve_for/approval_note rule the leave and '
+                  'regularization routes use - so the SRS wording "including an active '
+                  'delegate, FR-LEA-08a" is literally the actor rule, not a comment.'),
     'FR-ATT-07': ('L', 'R', 'PARTIAL', ('/api/break-types', '/api/user-breaks',),
                   'Minutes used and the approval flag are exposed. The per-type summary '
                   'is assembled by the client from two calls rather than served as one '
                   'projection.'),
     'FR-ATT-08': ('M', 'R', 'IMPLEMENTED', ('/api/login-hours',),
                   'First login to last logout, scoped to a shift date.'),
-    'FR-ATT-09': ('M', 'C', 'IMPLEMENTED', ('/api/user/shift-summary',),
+    'FR-ATT-09': ('H', 'C', 'IMPLEMENTED', ('/api/user/shift-summary',),
                   'shift_hours = last_logout - first_login (NOT the sum of sessions) '
                   'when both exist, else now - first_login for an open shift, CAPPED at '
                   'the scheduled shift length +25% and flagged estimated:true. The cap and '
@@ -413,9 +415,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'columns to v2.0 users.'),
 
     # ── FR-REG: regularization ──────────────────────────────────────────
-    'FR-REG-01': ('M', 'R', 'PARTIAL', ('/api/regularization',),
-                  'Filters and the company-wide/self split ship, the split decided by '
-                  'policy.can_view_all. Delegated reports are not included.'),
+    'FR-REG-01': ('M', 'R', 'IMPLEMENTED', ('/api/regularization',),
+                  'pending_my_approval, status and month filters all parse and apply, and '
+                  'the company-wide/self split is decided by policy.can_view_all. The '
+                  'manager view includes delegated reports (FR-LEA-08a): the '
+                  'pending_my_approval filter is the shared _pending_my_approval_clause '
+                  'that also feeds the leave list and the approve routes, so the view '
+                  'cannot promise a request the decision refuses - one rule in the two '
+                  'shapes (delegations.approvable_employees / can_approve_for).'),
     'FR-REG-02': ('M', 'C', 'PARTIAL', ('/api/regularization',),
                   'Corrected times are captured and future dates are refused. The '
                   '"a specific corrected time is required" rule is not enforced: a '
@@ -432,12 +439,22 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'checking status_code believed a decision it had not made. Now a 404 for '
                   'an unknown request and a 409 naming the state found. Neither route '
                   'audited anything either, so an attendance correction that feeds payroll '
-                  'left no trail; both now write a before/after row.'),
-    'FR-REG-04': ('M', 'N', 'NOT_STARTED', (), 'No regularization Excel export.'),
+                  'left no trail; both now write a before/after row. The gate is a '
+                  'deliberate widening that landed with the delegation slice: it was '
+                  '@admin_required, so FR-REG-01\'s "manager view includes delegated '
+                  'reports" was a dead end - a queue a manager was shown but only an admin '
+                  'could decide. It is now reporting_line_required (manager, HR, Admin, '
+                  'or an active delegate of that manager), and _approval_denial still '
+                  'refuses the applicant their own request.'),
+    'FR-REG-04': ('M', 'R', 'NOT_STARTED', (), 'No regularization Excel export.'),
 
     # ── FR-LEA: leave ───────────────────────────────────────────────────
-    'FR-LEA-01': ('M', 'R', 'PARTIAL', ('/api/leaves',),
-                  'Filters and the scope split ship. Missing: delegated-manager visibility.'),
+    'FR-LEA-01': ('M', 'C', 'IMPLEMENTED', ('/api/leaves',),
+                  'pending_my_approval / admin filter / self filters all ship, the split '
+                  'decided by policy.can_view_all, and delegated-manager visibility is '
+                  'real: the pending_my_approval filter is the shared '
+                  '_pending_my_approval_clause, so a delegate sees the delegator\'s '
+                  'reports exactly as the approve route decides them (FR-LEA-08a).'),
     'FR-LEA-02': ('M', 'C', 'IMPLEMENTED', ('/api/leaves',),
                   'Dates parsed and swapped if reversed, and days_requested is now the '
                   'working-day count the SRS names (days_requested = working days in range '
@@ -450,13 +467,23 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'the three values rather than being defaulted. The apply response reports '
                   'days_requested, calendar_days and session, so an employee can see what '
                   'they were charged and reconcile it against their own calendar.'),
-    'FR-LEA-03': ('M', 'N', 'PARTIAL', ('/api/leaves/export',),
+    'FR-LEA-03': ('M', 'R', 'PARTIAL', ('/api/leaves/export',),
                   'Excel export ships, synchronously. The async variant for large ranges '
                   'is not implemented.'),
     'FR-LEA-04': ('H', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/approve',),
-                  'Not the applicant, conditional update, used_days incremented and the '
-                  'reservation consumed.'),
-    'FR-LEA-05': ('M', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/reject',
+                  'Approve and reject are one actor rule, and the "not the applicant" half '
+                  'was previously asserted rather than enforced: the gate was admin-only, '
+                  'so an employee could not reach the route, but nothing refused the wrong '
+                  'approver on the way in. The decision is now '
+                  'delegations.can_approve_for, consulted on every request: the applicant '
+                  'is never their own approver (refused first, whatever their role), the '
+                  'actor must be the employee\'s manager, an active delegate of that '
+                  'manager (FR-LEA-08a), or HR/Admin. The update is conditional on '
+                  'status = Pending (CC-04), so two approvers racing give one winner, and '
+                  'leave_balance.used_days and reserved move in the same transaction. A '
+                  'delegate\'s decision is audited as "approved by delegate for manager X" '
+                  '(delegations.approval_note).'),
+    'FR-LEA-05': ('H', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/reject',
                                              '/api/leaves/<int:leave_id>/cancel'),
                    'Reject is conditional and releases the reservation. Cancel '
                    'now exists: Pending only, or Approved before it starts, by owner or admin '
@@ -466,10 +493,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'function (leave_policy.cancel). Cancelling twice or a settled request is a '
                    '409, a started leave is a 409, and the action taken is in the response and '
                    'the audit row.'),
-    'FR-LEA-06': ('H', 'C', 'IMPLEMENTED', ('/api/leave-balance',),
+    'FR-LEA-06': ('M', 'C', 'IMPLEMENTED', ('/api/leave-balance',),
                   'total/used/reserved/remaining derived per type per year, with the '
                   'source reported so a number can be traced to a policy or a default.'),
-    'FR-LEA-07': ('H', 'C', 'IMPLEMENTED', ('/api/leave-grants',),
+    'FR-LEA-07': ('H', 'R', 'IMPLEMENTED', ('/api/leave-grants',),
                   'All five clauses. HR/Admin can add days to ONE OR MORE employees'
                   'balances for a type/month/year; every grant is audited as LEAVE_GRANT '
                   'with before/after totals; the employee is notified; and a GET returns '
@@ -501,15 +528,28 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'otherwise cost the other forty-nine their adjustment. reason is '
                   'required. An archived or blocked employee is refused with the reason, '
                   'because a grant produces a number nobody can spend.'),
-    'FR-LEA-08': ('H', 'C', 'IMPLEMENTED', ('/api/users/<emp_id>/leave-policy', '/api/accrual/run',),
+    'FR-LEA-08': ('M', 'N', 'IMPLEMENTED', ('/api/users/<emp_id>/leave-policy', '/api/accrual/run',),
                   'Effective-dated per employee, entitlement derived and accrued month '
                   'by month from the rate, capped by the carry-forward cap, the ledger '
                   'posted by cron, on demand, or from the admin UI.'),
-    'FR-LEA-08a': ('M', 'N', 'NOT_STARTED', (),
-                   'approval_delegations exists in the canonical schema with a '
-                   'no-overlap exclusion constraint, but no route reads or writes it. '
-                   'A manager going on leave has no way to delegate.'),
-    'FR-LEA-09': ('M', 'C', 'IMPLEMENTED',
+    'FR-LEA-08a': ('S', 'N', 'IMPLEMENTED', ('/api/delegations', '/api/delegations/<int:delegation_id>'),
+                   'A manager can delegate approval authority to another employee for a '
+                   'date range; the no-overlap rule is enforced in the application and by '
+                   'the canonical no_overlapping_delegation exclusion (the compat schema '
+                   'answers through the same predicate in create). Delegates appear in '
+                   'pending_my_approval views - the shared _pending_my_approval_clause, '
+                   'which the leave and regularization lists and all six approve/reject '
+                   'routes answer from the same delegations.approvable_employees / '
+                   'can_approve_for rule - and a delegate\'s approval is audited as '
+                   '"approved by delegate for manager X" (approval_note, fired only when '
+                   'the delegation is what authorised the decision). Self-delegation is a '
+                   '409, an employee cannot file a delegation in someone else\'s name '
+                   '(403, CC-10), delegating requires actually holding authority (the '
+                   'delegator must manage somebody, or be an admin), and only the '
+                   'delegator or an admin may revoke - revoke also means an admin can '
+                   'withdraw a delegation the delegator cannot reach (e.g. on leave '
+                   'themselves).'),
+    'FR-LEA-09': ('M', 'N', 'IMPLEMENTED',
                   ('/api/leaves', '/api/leaves/<int:leave_id>/approve',
                    '/api/leaves/<int:leave_id>/reject',
                    '/api/leaves/<int:leave_id>/cancel', '/api/leaves/export',
@@ -544,6 +584,88 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'layer down. Behaviour change recorded: leave and payroll now count working '
                   'days, so existing balances shift by however many weekends a request '
                   'spanned.'),
+    # ── FR-PAY: payroll ─────────────────────────────────────────────────
+    # All nine were absent from the matrix until the DSR extraction found them:
+    # §5 prints their ids as `FR-PAY -01`, and plain-text extraction (correctly)
+    # refused to read that as an id, so the module went untracked entirely. The
+    # verdicts below come from reading the handlers, not from the presence of a
+    # route: see each note.
+    'FR-PAY-01': ('M', 'C', 'PARTIAL',
+                  ('/api/salary-structures', '/api/payroll-runs'),
+                  'The pages and APIs exist, but the gate is `finance_or_admin`, which '
+                  'admits Admin and Finance only - the SRS also grants HR READ access, '
+                  'and an HR user gets 403 on both routes. Missing: any surface at all '
+                  'for payroll RATES, which is FR-PAY-03 and has no table to read from.'),
+    'FR-PAY-02': ('M', 'C', 'PARTIAL', ('/api/salary-structures',),
+                  'CRUD ships and the non-overlapping effective ranges are a real '
+                  'exclusion constraint (no_overlapping_structure), not an app check. '
+                  'Missing: the preview endpoint, which is the half the requirement '
+                  'spends its second sentence on - it must call the SAME function as '
+                  'FR-PAY-05, "one function, not two" (Appendix A-07), and there is no '
+                  'preview route to be sharing it with yet.'),
+    'FR-PAY-03': ('M', 'C', 'NOT_STARTED', (),
+                  'No rates table exists in the canonical schema or anywhere in the '
+                  'code, so there is nothing versioned, effective-dated or editable. '
+                  'Every rate the calculation needs is a literal inside '
+                  'calc_payroll_item (app.py): PF 0.12 / ESI 0.0075 / pf_max 1800 / '
+                  'esi_max 21000 / pt 200 / pt_threshold 10000. A run therefore cannot '
+                  '"use the rates effective on the run period end date" because there '
+                  'are no rates to date, and changing one is a code change.'),
+    'FR-PAY-04': ('M', 'C', 'PARTIAL',
+                  ('/api/payroll-runs', '/api/payroll-runs/<int:rid>/items'),
+                  'Gross, PF, ESI and PT are computed from the hard-coded literals named '
+                  'in FR-PAY-03 rather than from configured slabs. Three columns the '
+                  'requirement needs exist but are never written - tds, lop_amount and '
+                  'reimbursements all stay at their 0 default - so net pay silently '
+                  'omits TDS, omits the FR-LEA-09 loss-of-pay deduction (which would '
+                  'duplicate the arithmetic FR-LEA-09 exists to single-source) and omits '
+                  'approved unpaid reimbursements. calc_tds hard-codes its own slab table '
+                  'and is used only by the TDS report, so the report and the payslip can '
+                  'disagree.'),
+    'FR-PAY-05': ('M', 'C', 'PARTIAL', ('/api/payroll-runs',),
+                  'Creation, Active/Onboarding coverage (Appendix A-08) and the Draft '
+                  'initial status all ship. Two things are missing: the duplicate '
+                  '(month, year, not-Cancelled) check is an app-level SELECT with no '
+                  'unique constraint behind it, so two concurrent requests both pass it; '
+                  'and the run executes synchronously on the request thread with no '
+                  'background job and no progress to poll, so a large payroll holds a '
+                  'worker for its whole duration.'),
+    'FR-PAY-06': ('H', 'N', 'IMPLEMENTED',
+                  ('/api/payroll-runs/<int:rid>/submit',
+                   '/api/payroll-runs/<int:rid>/approve',
+                   '/api/payroll-runs/<int:rid>/finalize'),
+                  'Draft -> Submitted -> Approved -> Finalized, Finance/Admin only, the '
+                  'submitter cannot approve their own run, every transition conditional '
+                  'and audited into payroll_approvals, and finalization enqueues '
+                  'payroll.finalized in the same transaction. Finalized items are '
+                  'immutable; corrections go through an adjustment run referencing the '
+                  'original. v1.0 had no approval step at all (Appendix A-09). Maker-'
+                  'checker, self-approval and state-transition tests cover it on both '
+                  'backends plus the v2.0 probe.'),
+    'FR-PAY-07': ('H', 'C', 'PARTIAL',
+                  ('/api/payslip/<int:run_id>/<emp_id>',
+                   '/api/payroll-runs/<int:rid>/payslip-pdf/<emp_id>'),
+                  'JSON and PDF both serve, self-or-admin/Finance access is enforced, '
+                  'and payslip_generated is set on first PDF generation. Missing: the '
+                  'PDF is written to local disk and handed back with send_file - there '
+                  'is no object storage and no presigned URL, so the last sentence of '
+                  'the requirement does not apply to this deployment.'),
+    'FR-PAY-08': ('H', 'C', 'IMPLEMENTED',
+                  ('/api/payroll-runs/<int:rid>/bank-file',
+                   '/api/payroll-runs/<int:rid>/tds-report'),
+                  'Bank file CSV (employee id, name, net salary, account, IFSC) and the '
+                  'TDS report, both behind finance_or_admin and both refused with a 409 '
+                  'unless the run is Finalized. Covered by a unit test and by two probe '
+                  'flows that exercise both endpoints on the v2.0 target.'),
+    'FR-PAY-09': ('S', 'R', 'NOT_STARTED', (),
+                  'The SRS sentence is printed under Payroll but is a performance-review '
+                  'requirement, cross-referenced by FR-JOB-03 (which names the same '
+                  'quarterly job). Neither half exists: there is no review_cycles table - '
+                  'performance_reviews rows carry a review_period string, which is a '
+                  'label on a review, not a cycle to report progress against - so the '
+                  'progress query has nothing to be progress OF, and no quarterly job '
+                  'opens the next cycle. The flat GET /api/performance-reviews that '
+                  'exists answers a different question.'),
     'FR-NOT-01': ('M', 'C', 'IMPLEMENTED', ('/api/notifications',
                                                '/api/send-notification-email'),
                   'Last-50 list with an unread count, and delivery through the '
@@ -563,7 +685,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'reporting False would be no better now because the route does not '
                   'know either - what it says is that the credentials were not '
                   'delivered by this request, and names the recovery route.'),
-    'FR-NOT-02': ('M', 'R', 'IMPLEMENTED', ('/api/notifications/read',),
+    'FR-NOT-02': ('M', 'C', 'IMPLEMENTED', ('/api/notifications/read',),
                   'Sets is_read and keeps the row, so a read notification does not vanish.'),
     'FR-NOT-03': ('S', 'R', 'PARTIAL',
                   ('/api/notification-preferences',),
@@ -603,7 +725,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'login response cannot become a status oracle. STILL PARTIAL: no SMTP '
                   'provider is configured yet, so on the current deployment nothing is '
                   'actually delivered.'),
-    'FR-AST-01': ('M', 'R', 'IMPLEMENTED', ('/api/assets', '/api/my-assets', '/api/assets/<int:aid>/return'),
+    'FR-AST-01': ('M', 'C', 'IMPLEMENTED', ('/api/assets', '/api/my-assets', '/api/assets/<int:aid>/return'),
                   'Issue/return with return_date set on return, own-assets view, and '
                   'outstanding counts feeding the offboarding clearance gate.'),
     'FR-ATS-01': ('M', 'C', 'IMPLEMENTED', ('/api/candidates/<int:cid>/status', '/api/pipeline'),
@@ -613,43 +735,43 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-ATS-02': ('M', 'C', 'IMPLEMENTED', ('/api/jobs', '/api/candidates', '/api/jobs/<int:jid>/close', '/api/candidates/<int:cid>'),
                   'Jobs and candidates CRUD for HR/Admin; status changes go through the '
                   'same guarded stage machine.'),
-    'FR-ATS-03': ('H', 'C', 'IMPLEMENTED', ('/api/offers/<int:oid>/accept',),
+    'FR-ATS-03': ('M', 'C', 'IMPLEMENTED', ('/api/offers/<int:oid>/accept',),
                   'The only path to Hired is offer acceptance, which atomically creates '
                   'the pre-hire user, salary structure, onboarding workflow and checklist.'),
-    'FR-ATS-04': ('H', 'C', 'IMPLEMENTED', ('/api/offers',),
+    'FR-ATS-04': ('M', 'C', 'IMPLEMENTED', ('/api/offers',),
                   'Offers require a 100% salary split, basic_pct/hra_pct/allowances_pct '
                   'are stored, and a unique constraint keeps two active checklists per '
                   'employee from existing.'),
 
     # ── FR-ONB / FR-OFF: lifecycle ──────────────────────────────────────
-    'FR-ONB-01': ('H', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows',),
+    'FR-ONB-01': ('M', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows',),
                   'All five steps with their guards, task owners and per-step timestamps.'),
-    'FR-ONB-02': ('H', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows', '/api/onboarding-workflows/<int:workflow_id>'),
+    'FR-ONB-02': ('M', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows', '/api/onboarding-workflows/<int:workflow_id>'),
                   'HR/Admin see everyone; the candidate view is token-scoped through '
                   '/api/preboarding/<token>.'),
-    'FR-ONB-03': ('H', 'C', 'IMPLEMENTED', ('/api/offers/<int:oid>/accept',),
+    'FR-ONB-03': ('M', 'C', 'IMPLEMENTED', ('/api/offers/<int:oid>/accept',),
                   'The checklist is created by the offer-acceptance transaction, not by '
                   'a separate call a caller could forget.'),
-    'FR-ONB-04': ('H', 'C', 'PARTIAL', ('/api/preboarding/<token>/documents/<doc_type>', '/api/onboarding-checklist/<int:item_id>/review'),
+    'FR-ONB-04': ('M', 'C', 'PARTIAL', ('/api/preboarding/<token>/documents/<doc_type>', '/api/onboarding-checklist/<int:item_id>/review'),
                   'Upload, review, and mandatory rejection notes all ship. The shared '
                   'pipeline only checks the file extension (FR-DOC-02 is partial).'),
-    'FR-ONB-05': ('H', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete',),
+    'FR-ONB-05': ('M', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete',),
                   'Advancement is guard-based; HR only confirms the physical/logistics steps.'),
-    'FR-ONB-06': ('L', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows',),
+    'FR-ONB-06': ('M', 'R', 'IMPLEMENTED', ('/api/onboarding-workflows',),
                   'Own workflow, or the HR/Admin list with days-in-step.'),
-    'FR-OFF-01': ('H', 'C', 'IMPLEMENTED', ('/api/resignations', '/api/resignations/<int:resignation_id>/acknowledge'),
+    'FR-OFF-01': ('M', 'C', 'IMPLEMENTED', ('/api/resignations', '/api/resignations/<int:resignation_id>/acknowledge'),
                   'Resignation is a first-class record that triggers the workflow; it is '
                   'never implied by a status change.'),
-    'FR-OFF-02': ('M', 'C', 'IMPLEMENTED', ('/api/offboarding-tasks', '/api/exit-interviews'),
+    'FR-OFF-02': ('M', 'R', 'IMPLEMENTED', ('/api/offboarding-tasks', '/api/exit-interviews'),
                   'Per-stage tasks with owners, and exit-interview scheduling.'),
-    'FR-OFF-03': ('H', 'C', 'IMPLEMENTED', ('/api/offboarding-workflows/<int:offboard_id>/stages/<int:stage>/complete',
+    'FR-OFF-03': ('M', 'C', 'IMPLEMENTED', ('/api/offboarding-workflows/<int:offboard_id>/stages/<int:stage>/complete',
                                              '/api/offboarding-workflows/<int:offboard_id>/revoke-access'),
                   'Each stage is a guarded conditional update; stages 2 and 3 run in '
                   'parallel; Finance prepares and approves the settlement separately; the '
                   'nightly job revokes access on the LWD.'),
 
     # ── FR-PERF: goals and reviews ──────────────────────────────────────
-    'FR-PERF-01': ('M', 'R', 'IMPLEMENTED', ('/api/goals', '/api/goals/<int:gid>', '/api/goals/<int:gid>/rate'),
+    'FR-PERF-01': ('M', 'C', 'IMPLEMENTED', ('/api/goals', '/api/goals/<int:gid>', '/api/goals/<int:gid>/rate'),
                    'CRUD plus a 1-5 rating that transitions the goal to Completed, all in '
                    'goals.py. POST /api/goals had never worked (a bare VALUES with ten '
                    'placeholders against a nine-column table, so every create was a 500) '
@@ -661,7 +783,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'HR/Admin and never the owner (the SRS calls that out), through a new '
                    'reporting-line gate because @admin_required excluded the role the '
                    'requirement names. Completed is terminal and the write is conditional.'),
-    'FR-PERF-02': ('M', 'R', 'IMPLEMENTED', ('/api/performance-reviews',
+    'FR-PERF-02': ('M', 'C', 'IMPLEMENTED', ('/api/performance-reviews',
                                              '/api/performance-reviews/<int:rid>/submit',
                                              '/api/feedback-360'),
                    'reviews.py. Cycle create/list stays HR/Admin-gated; a self-review is '
@@ -696,7 +818,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-TKT-01': ('M', 'C', 'PARTIAL', ('/api/tickets',),
                   'HR/IT queues and a priority on every ticket. The SLA target per '
                   'priority is not configurable and there are no subcategories.'),
-    'FR-TKT-02': ('M', 'C', 'PARTIAL', ('/api/tickets',),
+    'FR-TKT-02': ('M', 'R', 'PARTIAL', ('/api/tickets',),
                   'Create and list with one shared visibility rule in tickets.can_view: '
                   'owner, assignee, or a role policy.can_view_all admits. The reporter is '
                   'always the session user, so a ticket cannot be filed in a colleague\'s '
@@ -733,7 +855,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'mis-targeted add_holiday against v2.0 sixth column. It names its '
                   'columns now, and a test reads the canonical schema and fails if the '
                   'route list and the schema stop agreeing.'),
-    'FR-DOC-02': ('H', 'C', 'PARTIAL', ('/api/upload',),
+    'FR-DOC-02': ('M', 'C', 'PARTIAL', ('/api/upload',),
                   'Multipart upload, a size cap and an extension allow-list. The MIME '
                   'type is taken from the filename extension rather than sniffed from '
                   'the content, and there is no malware scan. A renamed .exe passes.'),
@@ -745,7 +867,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'response, so the object store is never reachable directly.'),
 
     # ── FR-HOL: holidays ────────────────────────────────────────────────
-    'FR-HOL-01': ('M', 'C', 'IMPLEMENTED', ('/api/holidays',),
+    'FR-HOL-01': ('M', 'R', 'IMPLEMENTED', ('/api/holidays',),
                   'National/Optional types, per-location applicability and search. The '
                   'location column is now writable, reported, and filtered on: a location '
                   'filter includes org-wide holidays rather than hiding them, and the '
@@ -753,7 +875,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'over-narrow one. Creation is audited, which is worth stating because '
                   'the *edit* already was: a holiday could be added to the company '
                   'calendar with no record of it, then edited with one.'),
-    'FR-HOL-02': ('H', 'C', 'IMPLEMENTED',
+    'FR-HOL-02': ('M', 'R', 'IMPLEMENTED',
                   ('/api/holidays', '/api/holidays/<int:hid>',
                    '/api/holidays/copy-year', '/api/holidays/export',
                    '/api/holidays/import', '/api/holidays/ical'),
@@ -767,7 +889,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'DTSTART;VALUE=DATE and folds every content line to the 75-octet RFC 5545 '
                   'limit. Delete is refused while opt-ins reference the holiday. Import '
                   'reports per-row reasons and converges on a re-run.'),
-    'FR-HOL-03': ('H', 'C', 'IMPLEMENTED',
+    'FR-HOL-03': ('M', 'R', 'IMPLEMENTED',
                   ('/api/holidays/<int:hid>/opt-in', '/api/holidays/opt-ins/mine',
                    '/api/holidays/opt-ins', '/api/holidays/opt-ins/<int:oid>/approve',
                    '/api/holidays/opt-ins/<int:oid>/cancel'),
@@ -787,12 +909,12 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'definition in a conditional INSERT because DuckDB has no partial index.'),
 
     # ── FR-JOB: scheduled work ──────────────────────────────────────────
-    'FR-JOB-01': ('H', 'C', 'IMPLEMENTED', (),
+    'FR-JOB-01': ('M', 'N', 'IMPLEMENTED', (),
                   'Nightly finalisation classifies every active employee in the required '
                   'priority order, groups per shift date so night shifts finalize '
                   'correctly, replaces the target date transactionally, and recomputes '
                   'on regularization approval.'),
-    'FR-JOB-02': ('M', 'C', 'IMPLEMENTED', ('/api/health',),
+    'FR-JOB-02': ('H', 'R', 'IMPLEMENTED', ('/api/health',),
                   'Hourly: purge expired reset tokens; close orphaned breaks '
                   '(FR-AUTH-14). Both now run in the same job the SRS describes, so this '
                   'row and FR-AUTH-14 were the same unimplemented requirement counted '
@@ -803,7 +925,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'in this codebase.'),
     'FR-JOB-03': ('S', 'R', 'NOT_STARTED', (),
                   'No quarterly job opens the next performance review cycle.'),
-    'FR-JOB-04': ('H', 'C', 'IMPLEMENTED', ('/api/admin/offboarding/revoke',),
+    'FR-JOB-04': ('M', 'N', 'IMPLEMENTED', ('/api/admin/offboarding/revoke',),
                   'The nightly job closes sessions, clears permissions, disables login and '
                   'marks the employee Inactive on their last working day.'),
     'FR-JOB-05': ('M', 'N', 'IMPLEMENTED', ('/api/health',),
@@ -829,10 +951,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'All four metrics ship and match the v1.0 figures. They are computed '
                   'live per request, not served from materialized views refreshed on a '
                   'schedule.'),
-    'FR-ANL-02': ('M', 'C', 'PARTIAL', ('/api/analytics/attrition-risk',),
+    'FR-ANL-02': ('S', 'C', 'PARTIAL', ('/api/analytics/attrition-risk',),
                   'The four factors are all present. The weights are hard-coded rather '
                   'than configuration (FR-ANL-04), and the score is not versioned.'),
-    'FR-ANL-04': ('M', 'C', 'NOT_STARTED', ('/api/analytics/attrition-risk',),
+    'FR-ANL-04': ('S', 'C', 'NOT_STARTED', ('/api/analytics/attrition-risk',),
                   'The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing '
                   'them needs a code change and redeploy.'),
     'FR-RPT-01': ('M', 'C', 'PARTIAL', ('/api/reports',),
@@ -844,7 +966,7 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'async job for ranges beyond a month or 200 employees.'),
 
     # ── FR-AUD: audit ───────────────────────────────────────────────────
-    'FR-AUD-01': ('H', 'C', 'PARTIAL', ('/api/audit-log',),
+    'FR-AUD-01': ('M', 'C', 'PARTIAL', ('/api/audit-log',),
                   'actor/action/entity/entity_id/before/after/ip/request_id/created_at, '
                   'written from a scheduler thread without raising (which it used to, and its '
                   'own except swallowed it, so those rows never existed), and the log is never '

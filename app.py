@@ -46,6 +46,7 @@ from security import (
 load_dotenv()
 
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
+import delegations  # noqa: E402  # approval delegation for a date range (FR-LEA-08a)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
 import holiday_calendar  # noqa: E402  # holiday calendar maintenance (FR-HOL-01/02)
@@ -790,6 +791,24 @@ def init_db():
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    # FR-LEA-08a: approval delegation. The canonical schema has carried this table with
+    # a `no_overlapping_delegation` GiST exclusion constraint since the baseline and no
+    # route read or wrote it. The compatibility shape gains the table here; the
+    # exclusion constraint cannot be reproduced portably, so the same predicate runs in
+    # `delegations.create` and is asserted by a test.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS approval_delegations (
+            delegation_id INTEGER PRIMARY KEY,
+            delegator_id VARCHAR NOT NULL,
+            delegate_id VARCHAR NOT NULL,
+            starts_on DATE NOT NULL,
+            ends_on DATE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (delegator_id) REFERENCES users(emp_id),
+            FOREIGN KEY (delegate_id) REFERENCES users(emp_id)
+        )
+    ''')
+
     # FR-LEA-07: manual leave grants. A separate ledger rather than a write to
     # `leave_balance.total_days`, because that column is DERIVED and `ensure_balances`
     # overwrites it on every read — a grant written straight there would be silently
@@ -2716,52 +2735,127 @@ def _manages_any_employee(conn, manager_emp_id):
         return False
 
 
-def reporting_line_required(f):
+def reporting_line_required(f=None, *, module=None):
     """Gate for an action the SRS assigns to a *manager* rather than a role.
 
-    FR-PERF-01 says a goal is "rated 1-5 by manager (not self)", but the rating
-    route was `@admin_required`, so a Team Leader who actually manages people
-    could not rate their reports' goals — the requirement was unreachable for the
-    role it names, the same way `Approved -> Paid` was unreachable for Finance
-    before the expense gate.
+    FR-PERF-01 says a goal is "rated 1-5 by manager (not self)", but the rating route
+    was `@admin_required`, so a Team Leader who actually manages people could not rate
+    their reports' goals — the requirement was unreachable for the role it names, the
+    same way `Approved -> Paid` was unreachable for Finance before the expense gate.
+    FR-LEA-04 (leave approve/reject) and FR-REG-03 (regularization approve/reject) had
+    the identical gate, and this is also FR-ATT-06's break-approval gate: four
+    handlers the SRS gives to "the employee's manager or HR/Admin", three of them
+    written as admin-only while the matrix recorded them as done.
 
     The gate is deliberately coarse: it admits an administrator, HR, or anyone who
-    manages at least one employee. Which report, and whether the actor is the
-    owner, is decided by `goals.check_rating`, which re-reads the actor from the
-    database. The `performance` module still applies, so an explicit override can
-    revoke it.
-    """
-    def denial():
-        if _wants_json():
-            return jsonify({'error': 'Forbidden'}), 403
-        return redirect(url_for('dashboard'))
+    manages at least one employee — or stands in for a manager today *as an active
+    delegate* (FR-LEA-08a) — so a plain-employee delegate who manages nobody can
+    reach the route their delegation is for. *Which* employee, whether the caller is
+    the applicant, and whether an active delegate stands in for the manager are
+    decided per request by `_approval_denial`, which re-reads the actor from the
+    database.
 
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if 'emp_id' not in session or not _session_user_active():
-            session.clear()
+    The matrix is consulted on **the view's own module** (`module=` overrides it). It
+    used to hard-code `performance`, so the module the navbar reads off
+    `__hrms_module__` and the module the gate actually checked disagreed: an explicit
+    deny on `breaks` left break approval reachable, and a deny on `performance`
+    removed a route that has nothing to do with performance reviews. Deriving it from
+    the route is what keeps the two from drifting apart again.
+    """
+    def decorator(view):
+        gate_module = module or _gate_module(view)
+
+        def denial():
             if _wants_json():
-                return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login'))
-        conn = get_db()
-        try:
-            actor = policy.current_actor(conn)
-            role = str(actor.get('role') or '')
-            on_the_line = (
-                role in policy.ADMIN_ROLES
-                or role == 'HR'
-                or actor.get('department') == 'HR'
-                or _manages_any_employee(conn, actor.get('emp_id'))
-            )
-            if not on_the_line:
-                return denial()
-            # The matrix may revoke, never grant — the same invariant as `_gated`.
-            if not policy.can(actor, 'performance', conn=conn) and role not in policy.ADMIN_ROLES:
-                return denial()
-        finally:
-            conn.close()
-        return f(*args, **kwargs)
-    return _tag_gate(decorated, 'reporting_line', _gate_module(f))
+                return jsonify({'error': 'Forbidden'}), 403
+            return redirect(url_for('dashboard'))
+
+        @wraps(view)
+        def decorated(*args, **kwargs):
+            if 'emp_id' not in session or not _session_user_active():
+                session.clear()
+                if _wants_json():
+                    return jsonify({'error': 'Authentication required'}), 401
+                return redirect(url_for('login'))
+            conn = get_db()
+            try:
+                actor = policy.current_actor(conn)
+                role = str(actor.get('role') or '')
+                on_the_line = (
+                    role in policy.ADMIN_ROLES
+                    or role == 'HR'
+                    or actor.get('department') == 'HR'
+                    or _manages_any_employee(conn, actor.get('emp_id'))
+                    or delegations.delegate_is_standing_in(conn, actor.get('emp_id'))
+                )
+                if not on_the_line:
+                    return denial()
+                # The matrix may revoke, never grant — the same invariant as `_gated`.
+                if not policy.can(actor, gate_module, conn=conn) and role not in policy.ADMIN_ROLES:
+                    return denial()
+            finally:
+                conn.close()
+            return view(*args, **kwargs)
+        return _tag_gate(decorated, 'reporting_line', gate_module)
+
+    if f is None:
+        return decorator
+    return decorator(f)
+
+
+def _approval_denial(conn, actor, target_emp_id):
+    """A ready refusal when the caller may not decide *this* employee's request, else ``None``.
+
+    The coarse gate above only establishes that the caller is a manager, HR or an
+    administrator *somewhere*. This says they may act on this employee, and it is one
+    function because it is one question with one answer (FR-LEA-04's "actor is manager
+    (or delegate) or HR/Admin, **not the applicant**" and FR-ATT-06's "actor is the
+    employee's manager (including an active delegate, FR-LEA-08a) or has role
+    HR/Admin"). Leave and regularization used to answer it by not asking; a fourth
+    approval path later would have made it four slightly different answers.
+
+    Self-decision is **409**, not 403: this codebase already answers a self-action
+    (self-archive, self-anonymise, self-delegation) with 409, and 403 here would read
+    as "you lack the module" when the real fact is that the applicant and the approver
+    are the same person, which no permission change can fix.
+    """
+    if actor == target_emp_id:
+        return jsonify({
+            'error': 'You cannot decide your own request',
+            'target_emp_id': target_emp_id,
+        }), 409
+    if not delegations.can_approve_for(conn, actor, target_emp_id):
+        return jsonify({
+            'error': 'Only this employee\u2019s manager, an active delegate, or '
+                     'HR/Admin may decide this request',
+            'target_emp_id': target_emp_id,
+        }), 403
+    return None
+
+
+def _pending_my_approval_clause(conn, actor, prefix=''):
+    """The ``pending_my_approval`` list filter (FR-LEA-01, FR-REG-01, FR-LEA-08a).
+
+    Returns ``(condition, params)``, or ``(None, None)`` when the caller can decide
+    nothing at all. An employee with no reports and no live delegation has an empty
+    queue, and answering that with every pending row would be the exact opposite of
+    what the filter's name promises.
+
+    ``None`` from `approvable_employees` means HR/Admin: every request but their own,
+    because `can_approve_for` refuses the applicant whatever their role. The role half
+    of the rule stays in `delegations` rather than being re-derived here, so the list
+    and the approve route cannot disagree about who is an approver.
+    """
+    targets = delegations.approvable_employees(conn, actor)
+    if targets is None:
+        return f"{prefix}status = 'Pending' AND {prefix}emp_id != ?", [actor]
+    if not targets:
+        return None, None
+    placeholders = ','.join('?' for _ in targets)
+    return (
+        f"{prefix}status = 'Pending' AND {prefix}emp_id IN ({placeholders})",
+        list(targets),
+    )
 
 
 def _tag_gate(decorated, gate, module):
@@ -5097,16 +5191,48 @@ def update_notification_preferences():
 def regularization_api():
     emp_id = session['emp_id']
     if request.method == 'GET':
+        # FR-REG-01 — "list with pending_my_approval, status, month filters; manager
+        # view includes delegated reports (FR-LEA-08a)". None of the three existed: the
+        # route answered either *every* request for a `can_view_all` actor or the
+        # caller's own, and read no query argument at all, while the matrix note said
+        # "filters and the company-wide/self split ship". The manager view is the same
+        # `_pending_my_approval_clause` the leave list uses, so "who may decide" has one
+        # answer on both surfaces — a delegate sees their delegator's reports' requests
+        # here and on `/api/leaves`, or neither.
+        status_filter = request.args.get('status')
+        month_filter = request.args.get('month', type=int)
+        year_filter = request.args.get('year', type=int)
+        pending_my_approval = request.args.get(
+            'pending_my_approval', '').lower() in ('1', 'true', 'yes')
         conn = get_db()
-        if policy.can_view_all(policy.current_actor(conn), 'regularization', conn=conn):
-            rows = conn.execute(
-                "SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at FROM regularization_requests ORDER BY created_at DESC"
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT request_id, emp_id, request_date, reason, status, approved_by, created_at FROM regularization_requests WHERE emp_id = ? ORDER BY created_at DESC",
-                [emp_id]
-            ).fetchall()
+        conditions, params = [], []
+        if pending_my_approval:
+            clause, extra = _pending_my_approval_clause(conn, emp_id)
+            if clause is None:
+                conn.close()
+                return jsonify([]), 200
+            conditions.append(clause)
+            params.extend(extra)
+        elif not policy.can_view_all(
+            policy.current_actor(conn), 'regularization', conn=conn
+        ):
+            conditions.append('emp_id = ?')
+            params.append(emp_id)
+        if status_filter:
+            conditions.append('status = ?')
+            params.append(status_filter)
+        if month_filter:
+            conditions.append("CAST(strftime('%m', request_date) AS INTEGER) = ?")
+            params.append(month_filter)
+        if year_filter:
+            conditions.append("CAST(strftime('%Y', request_date) AS INTEGER) = ?")
+            params.append(year_filter)
+        query = ('SELECT request_id, emp_id, request_date, reason, status, '
+                 'approved_by, created_at FROM regularization_requests')
+        if conditions:
+            query += ' WHERE ' + ' AND '.join(conditions)
+        query += ' ORDER BY created_at DESC'
+        rows = conn.execute(query, params).fetchall()
         conn.close()
         return jsonify([{
             'id': r[0], 'emp_id': r[1], 'date': r[2].isoformat(),
@@ -5145,8 +5271,21 @@ def regularization_api():
 
 @app.route('/api/v1/regularization/<int:rid>/approve', methods=['POST'])
 @app.route('/api/regularization/<int:rid>/approve', methods=['POST'])
-@admin_required
+@reporting_line_required
 def approve_regularization(rid):
+    """Approve a regularization request (FR-REG-03) on behalf of the right actor.
+
+    The gate was `@admin_required` — the same defect FR-LEA-04 has on leave. FR-REG-01
+    already describes a *manager* acting on this queue ("manager view includes
+    delegated reports (FR-LEA-08a)"), so keeping the route admin-only made that view a
+    dead end and would have left the delegation consultation unreachable behind an
+    admin door. Admitting a manager, HR or an administrator, then deciding **which**
+    employee per request, matches what the list already says about who sees it.
+
+    Attendance correction is a deliberate widening and it is recorded as one: a Team
+    Leader may now correct their own report's timesheet, which is what "manager view"
+    implies, and `_approval_denial` still refuses their own request.
+    """
     conn = get_db()
     try:
         row = conn.execute(
@@ -5166,18 +5305,27 @@ def approve_regularization(rid):
                 'error': f'Request is already {row[2].lower()}',
                 'status': row[2],
             }), 409
-        # Conditional on `status = 'Pending'`, so two approvers racing give one
-        # winner and one 409 rather than two successes.
-        conn.execute(
+        denial = _approval_denial(conn, session['emp_id'], row[0])
+        if denial is not None:
+            return denial
+        note = delegations.approval_note(conn, session['emp_id'], row[0])
+        # Conditional on `status = 'Pending'` (CC-04), so two approvers racing give one
+        # winner and one 409 rather than two successes. The UPDATE has been conditional
+        # since the always-200 fix but nobody looked at the rowcount, so the race it
+        # guarded against was still two successes.
+        claimed = conn.execute(
             "UPDATE regularization_requests SET status = 'Approved', approved_by = ?, "
             "updated_at = ? WHERE request_id = ? AND status = 'Pending'",
             [session['emp_id'], datetime.now(), rid],
         )
+        if not getattr(claimed, 'rowcount', 1):
+            return jsonify({'error': 'Request was reviewed by someone else'}), 409
     finally:
         conn.close()
     audit_log(
         session['emp_id'], 'REGULARIZATION_APPROVE',
-        f'Approved regularization request {rid} for {row[0]}', entity='regularization_requests',
+        f'Approved regularization request {rid} for {row[0]}'
+        + (f' ({note})' if note else ''), entity='regularization_requests',
         entity_id=rid, before={'status': 'Pending'}, after={'status': 'Approved'},
     )
     # FR-JOB-01/FR-REG-03: a later approved correction recomputes only
@@ -5191,8 +5339,11 @@ def approve_regularization(rid):
 
 @app.route('/api/v1/regularization/<int:rid>/reject', methods=['POST'])
 @app.route('/api/regularization/<int:rid>/reject', methods=['POST'])
-@admin_required
+@reporting_line_required
 def reject_regularization(rid):
+    """Reject a regularization request. The same actor rule as approve — a queue whose
+    two decisions are reachable by different people is a queue where rejecting is
+    harder than approving, and FR-REG-03 gives both to one actor."""
     conn = get_db()
     try:
         row = conn.execute(
@@ -5206,16 +5357,23 @@ def reject_regularization(rid):
                 'error': f'Request is already {row[2].lower()}',
                 'status': row[2],
             }), 409
-        conn.execute(
+        denial = _approval_denial(conn, session['emp_id'], row[0])
+        if denial is not None:
+            return denial
+        note = delegations.approval_note(conn, session['emp_id'], row[0])
+        claimed = conn.execute(
             "UPDATE regularization_requests SET status = 'Rejected', approved_by = ?, "
             "updated_at = ? WHERE request_id = ? AND status = 'Pending'",
             [session['emp_id'], datetime.now(), rid],
         )
+        if not getattr(claimed, 'rowcount', 1):
+            return jsonify({'error': 'Request was reviewed by someone else'}), 409
     finally:
         conn.close()
     audit_log(
         session['emp_id'], 'REGULARIZATION_REJECT',
-        f'Rejected regularization request {rid} for {row[0]}', entity='regularization_requests',
+        f'Rejected regularization request {rid} for {row[0]}'
+        + (f' ({note})' if note else ''), entity='regularization_requests',
         entity_id=rid, before={'status': 'Pending'}, after={'status': 'Rejected'},
     )
     return jsonify({'message': 'Rejected', 'status': 'Rejected'}), 200
@@ -9539,40 +9697,42 @@ def leaves_api():
         status_filter = request.args.get('status')
         month_filter = request.args.get('month', type=int)
         year_filter = request.args.get('year', type=int)
-        if policy.can_view_all(policy.current_actor(conn), 'leaves', conn=conn):
-            query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
-                       l.reason, l.status, l.approved_by, l.created_at
-                       FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id"""
-            params = []
-            conditions = []
-            if status_filter:
-                conditions.append("l.status = ?")
-                params.append(status_filter)
-            if year_filter:
-                conditions.append("l.year = ?")
-                params.append(year_filter)
-            if month_filter:
-                conditions.append("CAST(strftime('%m', l.start_date) AS INTEGER) = ?")
-                params.append(month_filter)
-            if conditions:
-                query += " WHERE " + " AND ".join(conditions)
-            query += " ORDER BY l.created_at DESC"
-        else:
-            query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
-                       l.reason, l.status, l.approved_by, l.created_at
-                       FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id
-                       WHERE l.emp_id = ?"""
-            params = [emp_id]
-            if status_filter:
-                query += " AND l.status = ?"
-                params.append(status_filter)
-            if year_filter:
-                query += " AND l.year = ?"
-                params.append(year_filter)
-            if month_filter:
-                query += " AND CAST(strftime('%m', l.start_date) AS INTEGER) = ?"
-                params.append(month_filter)
-            query += " ORDER BY l.created_at DESC"
+        # FR-LEA-01 — "list with pending_my_approval / admin filters / self filters,
+        # plus delegated-manager visibility". The three scopes are mutually exclusive
+        # on purpose, and collapsing the duplicated branch into one is what makes that
+        # readable: the pending filter is *not* a narrowing of the company-wide list,
+        # it is the caller's own approval queue. So it has to work for a manager who is
+        # not in `can_view_all` at all (a Team Leader sees no leave but their reports'),
+        # and it has to answer *nothing* rather than *everything* for somebody who
+        # manages nobody and holds no delegation.
+        pending_my_approval = request.args.get(
+            'pending_my_approval', '').lower() in ('1', 'true', 'yes')
+        conditions, params = [], []
+        if pending_my_approval:
+            clause, extra = _pending_my_approval_clause(conn, emp_id, 'l.')
+            if clause is None:
+                conn.close()
+                return jsonify([]), 200
+            conditions.append(clause)
+            params.extend(extra)
+        elif not policy.can_view_all(policy.current_actor(conn), 'leaves', conn=conn):
+            conditions.append('l.emp_id = ?')
+            params.append(emp_id)
+        if status_filter:
+            conditions.append('l.status = ?')
+            params.append(status_filter)
+        if year_filter:
+            conditions.append('l.year = ?')
+            params.append(year_filter)
+        if month_filter:
+            conditions.append("CAST(strftime('%m', l.start_date) AS INTEGER) = ?")
+            params.append(month_filter)
+        query = """SELECT l.leave_id, l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
+                   l.reason, l.status, l.approved_by, l.created_at
+                   FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id"""
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY l.created_at DESC"
         rows = conn.execute(query, params).fetchall()
         conn.close()
         return jsonify([{
@@ -9763,6 +9923,136 @@ def leave_grants_api():
     return jsonify(body), (207 if failures else 201)
 
 
+@app.route('/api/v1/delegations', methods=['GET', 'POST'])
+@app.route('/api/delegations', methods=['GET', 'POST'])
+@login_required
+def delegations_api():
+    """FR-LEA-08a — hand approval authority to somebody else for a date range.
+
+    *"A manager can delegate approval authority to another employee for a date range
+    (e.g. while on leave). Delegates appear in pending_my_approval views and their
+    approvals are audited as 'approved by delegate for manager X'."*
+
+    Creating one requires that the caller **actually manages somebody** — a delegation
+    is a handover of authority they hold, so an employee with no reports has nothing to
+    delegate and the row would be decorative. Admins may delegate for themselves; they
+    can also delegate on behalf of anyone, which is the practical case for a manager who
+    is on leave and cannot be asked to set this up first.
+
+    `GET` returns both directions for the caller — what they have delegated away and
+    what has been delegated *to* them — because "pending_my_approval" needs the second
+    and an administrator needs both.
+    """
+    actor = session['emp_id']
+    conn = get_db()
+    try:
+        actor_row = conn.execute(
+            'SELECT role, manager_emp_id FROM users WHERE emp_id = ?', [actor],
+        ).fetchone()
+        is_admin = bool(actor_row) and actor_row[0] in policy.ADMIN_ROLES
+        manages_anyone = _manages_any_employee(conn, actor)
+
+        if request.method == 'GET':
+            subject = request.args.get('emp_id') or actor
+            return jsonify({
+                'delegated_by_me': delegations.for_delegator(conn, subject),
+                'delegated_to_me': delegations.for_delegate(conn, actor),
+                # Who I can currently approve for — the "pending_my_approval" half
+                # made explicit, and answered by the same function the list filters
+                # use so this response and the queue cannot disagree. `null` means
+                # "every employee but yourself" (the HR/Admin case), `[]` means
+                # nobody, and the list itself never contains the caller.
+                'act_for': delegations.approvable_employees(conn, actor),
+            }), 200
+
+        data = request.get_json(silent=True) or {}
+        delegator = str(data.get('delegator_id') or actor).strip().upper()
+        if delegator != actor and not is_admin:
+            return jsonify({
+                'error': 'You can only delegate your own approval authority',
+            }), 403
+        if delegator != actor and not _manages_any_employee(conn, delegator):
+            return jsonify({
+                'error': f'{delegator} manages nobody, so there is no authority to '
+                         f'delegate',
+            }), 409
+        # The same rule for the ordinary case: delegating your *own* authority. The
+        # docstring above promises this and nothing enforced it — `manages_anyone` was
+        # computed, then dropped, so an employee with no reports could file a
+        # decorative delegation that made it into `pending_my_approval` views looking
+        # like coverage. Admins are exempt because they hold approval authority by
+        # role rather than by having reports.
+        if delegator == actor and not is_admin and not manages_anyone:
+            return jsonify({
+                'error': 'You manage nobody, so there is no approval authority to '
+                         'delegate',
+            }), 409
+
+        starts_on = parse_date(data.get('starts_on'))
+        ends_on = parse_date(data.get('ends_on'), starts_on)
+        try:
+            created = delegations.create(
+                conn, delegator, data.get('delegate_id'), starts_on, ends_on,
+                str(data.get('reason') or '').strip(),
+            )
+            conn.commit()
+        except delegations.DelegationError as exc:
+            conn.rollback()
+            return jsonify({'error': exc.message}), exc.status
+    finally:
+        conn.close()
+
+    audit_log(
+        actor, 'APPROVAL_DELEGATION_CREATED',
+        f"{actor} delegated approval authority for {created['delegator_id']} to "
+        f"{created['delegate_id']} from {created['starts_on']} to {created['ends_on']}",
+        entity='approval_delegations', entity_id=str(created['delegation_id']),
+        after=created,
+    )
+    add_notification(
+        created['delegate_id'], 'APPROVAL_DELEGATED',
+        f"{actor} has delegated their approval authority to you from "
+        f"{created['starts_on']} to {created['ends_on']}. Requests awaiting their approval "
+        f"will appear in your pending list during that period.",
+        category=notifications.category_for('APPROVAL_DELEGATED'),
+    )
+    return jsonify(created), 201
+
+
+@app.route('/api/v1/delegations/<int:delegation_id>', methods=['DELETE'])
+@app.route('/api/delegations/<int:delegation_id>', methods=['DELETE'])
+@login_required
+def delegations_revoke(delegation_id):
+    """Withdraw a delegation early — the manager is back, or the delegate is unsuitable.
+
+    Without this the only way to stop a delegation was to wait for it to expire, which
+    for a delegation made in good faith and then regretted is the wrong answer.
+    """
+    conn = get_db()
+    try:
+        # `is_admin` is read from the **database**, never from the session's copy of
+        # the role — the same rule every other authorization decision here follows
+        # (FR-USR-15): a role change has to take effect on the next request, not the
+        # next login.
+        actor = policy.current_actor(conn)
+        is_admin = str(actor.get('role') or '') in policy.ADMIN_ROLES
+        delegations.revoke(
+            conn, delegation_id, session['emp_id'], is_admin=is_admin)
+        conn.commit()
+    except delegations.DelegationError as exc:
+        conn.rollback()
+        return jsonify({'error': exc.message}), exc.status
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'APPROVAL_DELEGATION_REVOKED',
+        f'Revoked delegation {delegation_id}',
+        entity='approval_delegations', entity_id=str(delegation_id),
+        before={'revoked': False}, after={'revoked': True},
+    )
+    return jsonify({'message': 'Delegation revoked', 'delegation_id': delegation_id}), 200
+
+
 @app.route('/api/v1/leaves/export', methods=['GET'])
 @app.route('/api/leaves/export', methods=['GET'])
 @admin_required
@@ -9820,9 +10110,28 @@ def export_leaves():
                      download_name=f'leaves_{month_name}_{year}.xlsx', as_attachment=True)
 
 
+# FR-LEA-04 — *"Approve: actor is manager (or delegate) or HR/Admin, not the
+# applicant; conditional update Pending → Approved; leave_balance.used_days += days,
+# leave_balance.reserved −= days, in one transaction."* Three of those clauses were
+# not enforced, and the matrix note claimed all three:
+#
+#   * the gate was `@admin_required`, so a Team Leader could not approve their own
+#     report's leave — the third instance of the gate bug, after FR-EXP-03 (Finance
+#     could not mark a claim Paid) and FR-PERF-01 (a reporting manager could not
+#     rate their report's goal);
+#   * there was no self-approval block of any kind, so an HR administrator could
+#     sign off their own application;
+#   * the write was `WHERE leave_id = ?` with only a prior SELECT in front of it, so
+#     two approvers racing would **both** win and `leave_policy.consume` would run
+#     twice against one reservation — the exact double spend CC-04 exists to
+#     prevent, on the one ledger where it is silent and permanent.
+#
+# The first two are `_approval_denial`, shared with regularization and break approval
+# so the four approval paths cannot re-answer the same question differently; the
+# third is the `status = 'Pending'` predicate plus its rowcount.
 @app.route('/api/v1/leaves/<int:leave_id>/approve', methods=['POST'])
 @app.route('/api/leaves/<int:leave_id>/approve', methods=['POST'])
-@admin_required
+@reporting_line_required
 def approve_leave(leave_id):
     """Approve a leave request
     ---
@@ -9844,41 +10153,61 @@ def approve_leave(leave_id):
     # and the balance would drift by the difference with every audit row still
     # honest. A NULL `days` is a pre-migration row: fall back to the shared function
     # and persist the answer, which is what lets old requests stay correct.
-    row = conn.execute(
-        "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
-        "FROM leave_requests WHERE leave_id = ?",
-        [leave_id]
-    ).fetchone()
-    if not row:
-        conn.close()
-        return jsonify({'error': 'Leave not found'}), 404
-    if row[4] != 'Pending':
-        conn.close()
-        return jsonify({'error': 'Leave is not pending'}), 400
+    try:
+        row = conn.execute(
+            "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
+            "FROM leave_requests WHERE leave_id = ?",
+            [leave_id]
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Leave not found'}), 404
+        if row[4] != 'Pending':
+            return jsonify({'error': 'Leave is not pending'}), 400
+        denial = _approval_denial(conn, session['emp_id'], row[0])
+        if denial is not None:
+            return denial
+        note = delegations.approval_note(conn, session['emp_id'], row[0])
 
-    days = row[5]
-    if days is None:
-        raw = working_days.working_days(conn, row[0], row[2], row[3], allow_half=True)
-        days = working_days.whole_days(raw)
-        if str(row[6] or 'Full') in ('First-half', 'Second-half'):
-            days = max(1, days // 2)
-        conn.execute(
-            "UPDATE leave_requests SET days = ? WHERE leave_id = ?", [days, leave_id])
-    conn.execute(
-        "UPDATE leave_requests SET status = 'Approved', approved_by = ?, updated_at = ? WHERE leave_id = ?",
-        [session['emp_id'], datetime.now(), leave_id]
+        days = row[5]
+        if days is None:
+            raw = working_days.working_days(conn, row[0], row[2], row[3], allow_half=True)
+            days = working_days.whole_days(raw)
+            if str(row[6] or 'Full') in ('First-half', 'Second-half'):
+                days = max(1, days // 2)
+            conn.execute(
+                "UPDATE leave_requests SET days = ? WHERE leave_id = ?", [days, leave_id])
+        # Conditional on `status = 'Pending'` (CC-04), so two approvers racing give
+        # one winner and one 409. The comment above is the reason this is not
+        # cosmetic: the loser must not reach `leave_policy.consume`.
+        claimed = conn.execute(
+            "UPDATE leave_requests SET status = 'Approved', approved_by = ?, updated_at = ? "
+            "WHERE leave_id = ? AND status = 'Pending'",
+            [session['emp_id'], datetime.now(), leave_id]
+        )
+        if not getattr(claimed, 'rowcount', 1):
+            return jsonify({'error': 'Leave was reviewed by someone else'}), 409
+        leave_policy.consume(conn, row[0], row[1], days, row[2].year)
+        conn.commit()
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'LEAVE_APPROVE',
+        f'Leave {leave_id} approved' + (f' ({note})' if note else ''),
+        entity='leave_requests', entity_id=leave_id,
+        before={'status': 'Pending'}, after={'status': 'Approved'},
     )
-    leave_policy.consume(conn, row[0], row[1], days, row[2].year)
-    conn.commit()
-    conn.close()
-    audit_log(session['emp_id'], 'LEAVE_APPROVE', f'Leave {leave_id} approved', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_APPROVED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been approved.', '/leaves')
     return jsonify({'message': 'Leave approved'}), 200
 
 
+# The same actor rule as approve (FR-LEA-04 gives both decisions to one actor), and
+# the same reason the gate had to change: a queue where rejecting is admin-only while
+# approving is manager-reachable is a queue that only ever gets approved. The
+# conditional write matters here too — reject *releases* the reservation, so a loser
+# in the race would give an employee their days back twice.
 @app.route('/api/v1/leaves/<int:leave_id>/reject', methods=['POST'])
 @app.route('/api/leaves/<int:leave_id>/reject', methods=['POST'])
-@admin_required
+@reporting_line_required
 def reject_leave(leave_id):
     """Reject a leave request"""
     conn = get_db()
@@ -9888,25 +10217,43 @@ def reject_leave(leave_id):
     # added between applying and rejecting would otherwise give back a different
     # number of days than was taken, and the balance would drift with every audit row
     # still honest. A NULL `days` is a pre-migration row and falls back to the
-    # function.
-    row = conn.execute(
-        "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
-        "FROM leave_requests WHERE leave_id = ?", [leave_id]).fetchone()
-    if not row:
+    # function — with the *same* half-day handling approve uses, because a fallback
+    # that releases more than apply reserved raises an employee's balance on every
+    # rejected request.
+    try:
+        row = conn.execute(
+            "SELECT emp_id, leave_type, start_date, end_date, status, days, session "
+            "FROM leave_requests WHERE leave_id = ?", [leave_id]).fetchone()
+        if not row:
+            return jsonify({'error': 'Not found'}), 404
+        if row[4] != 'Pending':
+            return jsonify({'error': 'Leave is not pending'}), 400
+        denial = _approval_denial(conn, session['emp_id'], row[0])
+        if denial is not None:
+            return denial
+        note = delegations.approval_note(conn, session['emp_id'], row[0])
+        claimed = conn.execute(
+            "UPDATE leave_requests SET status = 'Rejected', approved_by = ?, updated_at = ? "
+            "WHERE leave_id = ? AND status = 'Pending'",
+            [session['emp_id'], datetime.now(), leave_id]
+        )
+        if not getattr(claimed, 'rowcount', 1):
+            return jsonify({'error': 'Leave was reviewed by someone else'}), 409
+        days = row[5]
+        if days is None:
+            days = working_days.whole_days(working_days.working_days(
+                conn, row[0], row[2], row[3], allow_half=True))
+            if str(row[6] or 'Full') in ('First-half', 'Second-half'):
+                days = max(1, days // 2)
+        leave_policy.release(conn, row[0], row[1], days, row[2].year)
+    finally:
         conn.close()
-        return jsonify({'error': 'Not found'}), 404
-    if row[4] != 'Pending':
-        conn.close()
-        return jsonify({'error': 'Leave is not pending'}), 400
-    conn.execute(
-        "UPDATE leave_requests SET status = 'Rejected', approved_by = ?, updated_at = ? WHERE leave_id = ?",
-        [session['emp_id'], datetime.now(), leave_id]
+    audit_log(
+        session['emp_id'], 'LEAVE_REJECT',
+        f'Leave {leave_id} rejected' + (f' ({note})' if note else ''),
+        entity='leave_requests', entity_id=leave_id,
+        before={'status': 'Pending'}, after={'status': 'Rejected'},
     )
-    days = row[5] if row[5] is not None else working_days.working_days(
-        conn, row[0], row[2], row[3])
-    leave_policy.release(conn, row[0], row[1], days, row[2].year)
-    conn.close()
-    audit_log(session['emp_id'], 'LEAVE_REJECT', f'Leave {leave_id} rejected', entity='leave_requests', entity_id=leave_id)
     add_notification(row[0], 'LEAVE_REJECTED', f'Your {row[1]} leave ({row[2]} to {row[3]}) has been rejected.', '/leaves')
     return jsonify({'message': 'Leave rejected'}), 200
 
@@ -10524,9 +10871,11 @@ def _review_break_approval(aid, decision):
 
     The other three clauses were missing too, and the matrix claimed all of them:
     the write was **unconditional** (so two approvers both won), nothing was
-    audited, and the employee was never notified. Delegated approvers are still not
-    consulted, because FR-LEA-08a is unimplemented — that half stays PARTIAL and the
-    row says so.
+    audited, and the employee was never notified. All three now run, and the
+    per-employee half is `_approval_denial` — so an active delegate of this
+    employee's manager is admitted here exactly as they are on leave and
+    regularization, which is what FR-ATT-06's "(including an active delegate,
+    FR-LEA-08a)" asks for.
     """
     conn = get_db()
     try:
@@ -10544,6 +10893,10 @@ def _review_break_approval(aid, decision):
                 'error': f'Request is already {row[3].lower()}',
                 'status': row[3],
             }), 409
+        denial = _approval_denial(conn, session['emp_id'], row[0])
+        if denial is not None:
+            return denial
+        note = delegations.approval_note(conn, session['emp_id'], row[0])
         # Conditional on `status = 'Pending'` (CC-04). Two approvers racing now give
         # one winner and one 409 instead of two successes.
         claimed = conn.execute(
@@ -10557,7 +10910,8 @@ def _review_break_approval(aid, decision):
         conn.close()
     audit_log(
         session['emp_id'], f'BREAK_APPROVAL_{decision.upper()}',
-        f'{decision} {row[1]} break request {aid} for {row[0]} ({row[2]})',
+        f'{decision} {row[1]} break request {aid} for {row[0]} ({row[2]})'
+        + (f' ({note})' if note else ''),
         entity='break_approvals', entity_id=aid,
         before={'status': 'Pending'}, after={'status': decision},
     )

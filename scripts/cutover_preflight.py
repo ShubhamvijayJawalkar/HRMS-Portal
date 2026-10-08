@@ -276,7 +276,7 @@ def main() -> int:
     parser.add_argument("--legacy-schema", default="legacy", help="fallback schema to compare")
     parser.add_argument(
         "--expected-head",
-        default="0011_leave_grants",
+        default="0012_approval_delegations_compat",
         help="required Alembic head on the target schema",
     )
     parser.add_argument(
