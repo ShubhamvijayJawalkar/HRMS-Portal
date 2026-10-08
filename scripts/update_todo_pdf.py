@@ -52,6 +52,25 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-08", "FR-ATT-05 (High): 'one Pending Lunch approval per employee per "
+     "shift date' is now enforced by a unique **partial** index on both schemas, not "
+     "just an app check. The canonical schema already had `uq_pending_lunch_approval`; "
+     "`init_db` now creates the same index on the compatibility shape (PostgreSQL is "
+     "the only backend since the Phase-6 DuckDB decommission, so the partial-index "
+     "limitation that forced conditional INSERTs elsewhere no longer applies), and the "
+     "route translates a concurrency UniqueViolation race into the same 409 instead of "
+     "a 500. The index is partial by design - an Approved/Rejected row frees the slot "
+     "for a fresh request - and three unit tests assert the sequential rule, the "
+     "DB-level concurrency refusal (twin direct inserts, one winner), and the index "
+     "metadata on the connected schema; the probe gained a write flow that bypasses "
+     "the route on purpose to prove the canonical index refuses the duplicate. "
+     "Verifying the browser suite also surfaced a pre-existing FR-JOB-05 wiring "
+     "defect: the lease-renewal job was installed unconditionally, and on the "
+     "no-Redis fallback `renew()` correctly returns False, so the dev/CI scheduler "
+     "shut itself down ~20 seconds after start - visible only as a stray "
+     "'Scheduler lease lost' log line in an unrelated test's captured output. "
+     "Renewal is now installed only under `scheduler_leader.renewal_required()`, "
+     "with a truth-table test and an AST wiring test."),
     ("2026-10-08", "FR-LEA-08a at last: the approval-delegation slice, the last NOT_STARTED "
      "row in the leaves module. The table existed in the canonical schema with a "
      "no-overlap exclusion and no route anywhere. `delegations.py` owns one rule in two "
@@ -1360,9 +1379,6 @@ def _srs_modules(rows):
 #: status report wearing a different heading.
 _NEXT_STEPS = {
     # ── High ────────────────────────────────────────────────────────────
-    'FR-ATT-05': 'Add the partial unique index that stops two concurrent opens for one '
-                 'employee to `init_db` as well as the v2.0 schema, then assert a second '
-                 'simultaneous start is refused.',
     'FR-PAY-07': 'Decide whether object storage is in scope for this deployment. If it is, '
                  'serve the payslip from a bucket with a signed URL; if it is not, record '
                  'the deviation in traceability.py so the row stops claiming a sentence '

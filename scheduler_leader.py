@@ -185,3 +185,19 @@ def should_start_scheduler() -> bool:
         return True
     logger.info('Another instance holds the scheduler lease; this one runs no cron jobs')
     return False
+
+
+def renewal_required() -> bool:
+    """Is there a lease for this process to renew at all?
+
+    The no-Redis fallback deliberately runs the scheduler unowned (single-process
+    dev/CI; `should_start_scheduler` returns True there and a test asserts it).
+    But `renew()` correctly returns False when there is no lease store — so
+    installing the renewal job on that path shuts the scheduler down on its
+    first tick, defeating the fallback two functions above. The boot block calls
+    this before installing `_install_lease_renewal`.
+
+    Reachable Redis is the only case that answers True: unreachable Redis never
+    gets this far (`should_start_scheduler` refuses to start at all).
+    """
+    return bool(os.getenv('REDIS_URL')) and _redis() is not None

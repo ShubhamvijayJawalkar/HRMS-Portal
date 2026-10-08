@@ -2683,3 +2683,94 @@ transaction on the compat schema), FR-ATT-15 (M, cache), FR-ATT-07 (L, one proje
   **23/23**, and the probe (with the new `approval-delegations(delegate approves)`
   flow) is **115/115 GET + 60/60 write**, run twice for idempotency, with CC-01 and
   the read-only preflight green at head `0012_approval_delegations_compat`.
+
+## FR-ATT-05: one Pending Lunch approval per employee per shift date, in the database
+- **The High-priority row's gap was exactly what it said:** the canonical schema
+  has had the partial unique index `uq_pending_lunch_approval
+  (emp_id, break_type, break_date) WHERE status = 'Pending'` since the baseline,
+  but `init_db` never created it on the compatibility shape — so on `legacy` the
+  rule lived only in the route's `SELECT ... WHERE status = 'Pending'` pre-check,
+  which two simultaneous requests can both pass. The route now also translates a
+  `UniqueViolation` race into the same 409 (idiom matches the other unique-guard
+  sites: match the exception string, no `psycopg` import in `app.py`), with
+  `conn.close()` moved into a `finally` so the failure path cannot leak a
+  connection.
+- **No workaround pattern this time.** The holiday-opt-in slice used
+  `INSERT ... WHERE NOT EXISTS` because DuckDB cannot build a partial index;
+  DuckDB is gone (Phase-6), so the compatibility schema gets the real index with
+  `CREATE UNIQUE INDEX IF NOT EXISTS` guarded by `if not _is_public_target_schema()`
+  (the `uq_active_offer_candidate` precedent). `init_db` runs per boot, so
+  `IF NOT EXISTS` is what makes it safe to add without a migration. No Alembic
+  revision: the index exists in the canonical target since `0001_baseline`.
+- **The index is partial by design, and both halves are tested.** An
+  `Approved`/`Rejected` row frees the slot for a fresh request (the rule is "one
+  *Pending*", not "one row ever"). Three unit tests: the sequential API rule
+  (201 → 409 → reject → 201), a DB-level concurrency refusal (twin direct
+  inserts bypassing the route's SELECT, one winner, index name in the error),
+  and the index metadata on the **connected** schema (`pg_indexes.indexdef`;
+  assert `' WHERE '` + `'Pending'`, because PostgreSQL renders the predicate as
+  `WHERE ((status)::text = 'Pending'::text)` — the first draft asserted the
+  literal source text and failed on the casts).
+- **Probe flow `break-approvals(partial index)`** (61/61 write): checks the
+  index exists on `public`, direct-inserts a Pending row, proves the duplicate
+  is refused by the index (bypassing the route on purpose), then re-requests
+  after deciding the row. Rows carry `reason = 'public write probe'` so the
+  existing cleanup deletes them between runs; the date is `2099-01-04` so it
+  never collides with the `lunch_request` flow's today-dated row regardless of
+  flow order.
+
+## The FR-JOB-05 renewal wiring defect, found only because the browser suite logs everything
+- The FR-LEA-08a verification's browser run printed, inside an unrelated test's
+  captured output: `Scheduler lease lost (...); shutting down cron jobs on this
+  instance` — **in an environment with no `REDIS_URL` at all.** The boot block
+  installed `_install_lease_renewal` unconditionally after `should_start_scheduler()`
+  returned True, but on the no-Redis fallback `renew()` correctly returns `False`
+  (there is no lease store), so the dev/CI scheduler has been **starting and then
+  killing itself on its first ~20 s tick** (`RENEW_INTERVAL_SECONDS = max(60//3, 5)`)
+  since the FR-JOB-05 slice landed. The matrix row asserted "no Redis at all falls
+  back to the single-process heuristic", and a test asserted
+  `should_start_scheduler() is True` there — both true, and the behaviour still
+  false, because the guard is two lines further down in a different file. Exactly
+  the shape the traceability work keeps finding: two statements that are each
+  individually correct and a system property neither of them checks.
+- **Fixed in the FR-ATT-05 slice** as a recorded cross-cutting defect:
+  `scheduler_leader.renewal_required()` (`bool(REDIS_URL) and _redis() is not None`)
+  decides whether the renewal job is installed; unreachable Redis never reaches
+  the decision because `should_start_scheduler` already refuses to start there.
+  Two tests: a truth-table test over the `_redis` seam (the pattern
+  `test_a_broken_redis_refuses...` established), and an **AST wiring test** that
+  fails if any `_install_lease_renewal` call site in `app.py` sits outside an
+  `if ...renewal_required()` — the function-level test alone would keep passing
+  if someone moved the call back out of the guard. The FR-JOB-05 matrix note
+  records the defect and the fix rather than being silently corrected.
+- Consequence worth knowing: the browser suite's live scheduler now **survives
+  the whole run** (it died ~20 s in on every run since FR-JOB-05). That is the
+  configuration the suite ran under before FR-JOB-05 and passed 23/23 under, so
+  this restores the historical passing state rather than introducing a new one;
+  the import-dispatch tests already tolerate a competing dispatcher tick.
+
+## Two browser flakes recorded, both in the CDN `Page.goto` class
+- Full runs 1 and 2 of this slice each failed **a different test**
+  (`test_login_page`, then `test_admin_sets_a_password_from_the_user_management_panel`)
+  with `Page.goto: Timeout 30000ms exceeded`; both passed in isolation
+  (5.99 s / 27.01 s), and run 3 passed **23/23**. Every page loads Bootstrap,
+  bootstrap-icons and Google Fonts from CDNs and `goto` default-waits for `load`,
+  so a slow CDN segment in this codespace fails any test at page load — the same
+  class as the recorded `#pageInfo`/ATS flakes. Nothing in the FR-ATT-05 changes
+  touches page rendering (one index DDL at boot, one POST route). Run 1's failure
+  output is also what surfaced the lease-lost line above — the flakes and the
+  defect are unrelated, but both came out of reading the failure output instead
+  of shrugging at it.
+
+## FR-ATT-05 verification
+- Matrix moves FR-ATT-05 to `IMPLEMENTED`
+  (**75 IMPLEMENTED / 32 PARTIAL / 5 NOT_STARTED / 1 RETIRED**); its
+  `_NEXT_STEPS` entry is gone (the key-set test forces that).
+- Unit **333 passed / 2 skipped** (3 new FR-ATT-05 tests + 2 scheduler-renewal
+  tests on top of 328), browser **23/23** (third run), v2.0 gates on a fresh
+  `alembic`-created database: probe **115/115 GET + 61/61 write** run twice for
+  idempotency, CC-01 OK, read-only preflight exit 0 at head
+  `0012_approval_delegations_compat`. The Redis session store suite was not
+  re-run: no session code changed and no Redis container is up.
+- High-priority open items after this slice: only **FR-PAY-07** (the
+  object-storage operator decision) remains.

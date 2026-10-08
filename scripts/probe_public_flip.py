@@ -686,6 +686,48 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         return _post(cl_a, tok_a, f"/api/break-approvals/{target['approval_id']}/approve").status_code
     run("break-approvals(approve)", approve_lunch)
 
+    # FR-ATT-05: the "one Pending per employee per shift date" rule is enforced
+    # by a unique **partial** index, not just an app check — so under real
+    # concurrency the database refuses the duplicate even when neither request
+    # passed the route's SELECT, and a decided row frees the slot again. Direct
+    # psycopg writes bypass the route's pre-check on purpose; that is the point.
+    def partial_index_enforces():
+        pg = dsn.replace("postgresql+psycopg://", "postgresql://")
+        with psycopg.connect(pg, autocommit=True) as pc:
+            if not pc.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+                "AND indexname = 'uq_pending_lunch_approval'"
+            ).fetchone():
+                return 409, "uq_pending_lunch_approval missing on public"
+            probe_date = date(2099, 1, 4)
+            pc.execute(
+                "INSERT INTO break_approvals (emp_id, break_type, break_date, reason, status) "
+                "VALUES ('EMP002', 'Lunch', %s, 'public write probe', 'Pending')",
+                [probe_date],
+            )
+            try:
+                pc.execute(
+                    "INSERT INTO break_approvals (emp_id, break_type, break_date, reason, status) "
+                    "VALUES ('EMP002', 'Lunch', %s, 'public write probe', 'Pending')",
+                    [probe_date],
+                )
+                return 409, "duplicate Pending insert was not refused by the index"
+            except Exception:
+                pass  # the index refused it — that is the assertion
+            # The index is partial: a decided row frees the slot for a fresh request.
+            pc.execute(
+                "UPDATE break_approvals SET status = 'Rejected' "
+                "WHERE emp_id = 'EMP002' AND break_date = %s AND reason = 'public write probe'",
+                [probe_date],
+            )
+            pc.execute(
+                "INSERT INTO break_approvals (emp_id, break_type, break_date, reason, status) "
+                "VALUES ('EMP002', 'Lunch', %s, 'public write probe', 'Pending')",
+                [probe_date],
+            )
+        return 200, "duplicate refused by index; fresh Pending after decision ok"
+    run("break-approvals(partial index)", partial_index_enforces)
+
     # ── service-layer rewrite: shifts resolve from shift_assignments, and
     #    init_db must NOT have re-added users.shift_start/shift_end ──────────
     def shift_write():

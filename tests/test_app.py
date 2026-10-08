@@ -1082,6 +1082,151 @@ def test_reviewing_a_break_twice_is_a_conflict_not_a_second_success(client):
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# FR-ATT-05: "one Pending Lunch approval per employee per shift date enforced
+# by a unique partial index, not just an app check". The canonical schema has
+# had `uq_pending_lunch_approval` since the baseline; the compatibility schema
+# now carries the same index, and the route translates a concurrency race into
+# the same 409 instead of a 500.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def test_lunch_approval_request_is_unique_per_shift_date_and_partial(client):
+    """FR-ATT-05, the sequential half: a second Pending request for the same
+    employee and shift date is a 409, but once the first is decided the slot is
+    free again — the rule is "one *Pending*", not "one row ever"."""
+    _cleanup_user_contract_rows('EMP886')
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department, manager_emp_id) VALUES ('EMP886', 'Break Req', "
+            "'emp886@company.com', 'Employee', ?, 'Active', 1, 'IT', 'EMP001')",
+            [hash_password('correct-horse-battery')],
+        )
+    finally:
+        conn.close()
+    try:
+        login_as(client, 'EMP886', 'correct-horse-battery')
+        first = client.post('/api/break-approvals', json={
+            'break_type': 'Lunch', 'reason': 'FR-ATT-05 test'})
+        assert first.status_code == 201, first.get_json()
+        aid = first.get_json()['approval_id']
+        second = client.post('/api/break-approvals', json={
+            'break_type': 'Lunch', 'reason': 'FR-ATT-05 test again'})
+        assert second.status_code == 409, second.get_json()
+        assert second.get_json()['error'] == 'Pending approval already exists for today'
+        # A decided request frees the slot: reject as the admin, then the same
+        # employee can ask again for the same shift date.
+        _set_admin_session(client, 99154)
+        rejected = client.post(f'/api/break-approvals/{aid}/reject')
+        assert rejected.status_code == 200, rejected.get_json()
+        login_as(client, 'EMP886', 'correct-horse-battery')
+        third = client.post('/api/break-approvals', json={
+            'break_type': 'Lunch', 'reason': 'FR-ATT-05 final'})
+        assert third.status_code == 201, third.get_json()
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT status FROM break_approvals WHERE emp_id = 'EMP886' "
+                "AND break_type = 'Lunch' ORDER BY approval_id",
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [r[0] for r in rows] == ['Rejected', 'Pending'], rows
+    finally:
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM break_approvals WHERE emp_id = 'EMP886'")
+            conn.execute("DELETE FROM notifications WHERE emp_id = 'EMP886'")
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP886')
+
+
+def test_lunch_approval_duplicate_is_refused_by_the_index_not_the_check():
+    """FR-ATT-05, the concurrency half: two *simultaneous* inserts of the same
+    (emp_id, break_type, break_date) cannot both land, even though neither went
+    through the route's SELECT — the partial index is the enforcement. Once the
+    row is decided, the same key is insertable again (it is partial)."""
+    _cleanup_user_contract_rows('EMP887')
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO users (emp_id, name, email, role, password, status, '
+            "allow_login, department, manager_emp_id) VALUES ('EMP887', 'Break Race', "
+            "'emp887@company.com', 'Employee', ?, 'Active', 1, 'IT', 'EMP001')",
+            [hash_password('correct-horse-battery')],
+        )
+    finally:
+        conn.close()
+    probe_date = '2099-01-04'
+    conn1, conn2 = get_db(), get_db()
+    try:
+        conn1.execute(
+            "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) "
+            "VALUES (?, ?, 'Lunch', ?, 'concurrency probe', 'Pending')",
+            [_next_generated_id(conn1, 'break_approvals', 'approval_id'),
+             'EMP887', probe_date],
+        )
+        with pytest.raises(Exception) as excinfo:
+            conn2.execute(
+                "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) "
+                "VALUES (?, ?, 'Lunch', ?, 'concurrency probe', 'Pending')",
+                [_next_generated_id(conn2, 'break_approvals', 'approval_id'),
+                 'EMP887', probe_date],
+            )
+        assert 'uq_pending_lunch_approval' in str(excinfo.value).lower(), str(excinfo.value)
+        count = conn1.execute(
+            "SELECT COUNT(*) FROM break_approvals WHERE emp_id = 'EMP887' AND break_date = ?",
+            [probe_date],
+        ).fetchone()[0]
+        assert count == 1, count
+        # Partial: a decided row frees the slot for a fresh request.
+        conn1.execute(
+            "UPDATE break_approvals SET status = 'Rejected' WHERE emp_id = 'EMP887' AND break_date = ?",
+            [probe_date],
+        )
+        conn1.execute(
+            "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) "
+            "VALUES (?, ?, 'Lunch', ?, 'concurrency probe', 'Pending')",
+            [_next_generated_id(conn1, 'break_approvals', 'approval_id'),
+             'EMP887', probe_date],
+        )
+    finally:
+        conn1.close()
+        conn2.close()
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM break_approvals WHERE emp_id = 'EMP887'")
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP887')
+
+
+def test_pending_lunch_approval_index_is_a_partial_unique_index():
+    """FR-ATT-05: the constraint lives in the database, on the compatibility
+    schema just as on the canonical one, and it is *partial* — an app-level
+    SELECT can be raced through, an index cannot."""
+    schema = db_backend.app_schema()
+    conn = get_db()
+    try:
+        row = conn.execute(
+            'SELECT indexdef FROM pg_indexes WHERE schemaname = ? AND indexname = ?',
+            [schema, 'uq_pending_lunch_approval'],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row, f'uq_pending_lunch_approval is missing on schema {schema}'
+    ddl = row[0]
+    assert ddl.startswith('CREATE UNIQUE INDEX'), ddl
+    # pg_indexes renders the predicate with casts (`WHERE ((status)::text =
+    # 'Pending'::text)`); what matters is that it is a *partial* index and that
+    # it only holds rows still awaiting a decision.
+    assert ' WHERE ' in ddl, ddl
+    assert 'Pending' in ddl, ddl
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # FR-LEA-08a approval delegation, plus the two approval-gate fixes that ride
 # in the same slice: FR-LEA-04 (leave approve/reject) and FR-ATT-06 (break
 # approval). All four approval paths now answer the same three questions —
@@ -2415,6 +2560,86 @@ def test_a_broken_redis_refuses_the_scheduler_rather_than_running_it_unowned():
             os.environ.pop('REDIS_URL', None)
         else:
             os.environ['REDIS_URL'] = original_url
+
+
+def test_renewal_is_required_only_where_a_lease_exists():
+    """The no-Redis scheduler must not install the job that kills it.
+
+    The boot block installed `_install_lease_renewal` unconditionally after
+    `should_start_scheduler()` returned True — but on the no-Redis fallback
+    `renew()` correctly returns False (there is no lease store), so the renewal
+    job shut the dev/CI scheduler down on its first tick (~20 s), defeating the
+    very fallback `should_start_scheduler` approves two functions above. Seen in
+    a browser-suite run as "Scheduler lease lost ...; shutting down cron jobs on
+    this instance" in an environment with no REDIS_URL.
+    """
+    import scheduler_leader
+
+    original_url = os.environ.get('REDIS_URL')
+    original_redis = scheduler_leader._redis
+    try:
+        # No Redis at all: the single-process fallback runs the scheduler
+        # unowned, and there is nothing to renew — installing the renewal job
+        # here would kill it.
+        os.environ.pop('REDIS_URL', None)
+        assert scheduler_leader.renewal_required() is False
+
+        # Redis configured but unreachable: the scheduler refuses to start at
+        # all (`should_start_scheduler`), so renewal is moot — still False.
+        os.environ['REDIS_URL'] = 'redis://127.0.0.1:1/0'
+        scheduler_leader._redis = lambda: None
+        assert scheduler_leader.renewal_required() is False
+
+        # Redis configured and reachable: this is the one case where a lease
+        # exists to renew, and the renewal job belongs on the scheduler.
+        scheduler_leader._redis = lambda: object()
+        assert scheduler_leader.renewal_required() is True
+    finally:
+        scheduler_leader._redis = original_redis
+        if original_url is None:
+            os.environ.pop('REDIS_URL', None)
+        else:
+            os.environ['REDIS_URL'] = original_url
+
+
+def test_lease_renewal_is_installed_only_under_the_renewal_guard():
+    """The wiring, over the AST of `app.py`: every `_install_lease_renewal`
+    call site sits inside `if scheduler_leader.renewal_required():`.
+
+    The function-level test above proves `renewal_required()` tells the truth;
+    this one proves the boot block actually asks it. Without it, a future edit
+    that moves the call back out of the guard reintroduces a scheduler that
+    starts and then self-terminates 20 seconds later — visible only as a stray
+    log line in an unrelated test's captured output, which is exactly how it was
+    found.
+    """
+    import ast
+    import pathlib as _pathlib
+
+    import app as app_module
+
+    tree = ast.parse(_pathlib.Path(app_module.__file__).read_text())
+
+    def _is_install_call(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == '_install_lease_renewal')
+
+    def _is_renewal_guard(node):
+        # `scheduler_leader.renewal_required()`
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'renewal_required')
+
+    total = [n for n in ast.walk(tree) if _is_install_call(n)]
+    assert total, 'the boot block no longer installs lease renewal at all'
+    guarded = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If) and _is_renewal_guard(node.test):
+            guarded += [n for n in ast.walk(node) if _is_install_call(n)]
+    assert len(guarded) == len(total), (
+        f'{len(total) - len(guarded)} _install_lease_renewal call site(s) are not '
+        f'under `if scheduler_leader.renewal_required()`; without the guard the '
+        f'no-Redis scheduler shuts itself down on its first renewal tick (FR-JOB-05)'
+    )
 
 
 def test_health_reports_which_instance_owns_the_scheduler():

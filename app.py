@@ -694,6 +694,19 @@ def init_db():
             FOREIGN KEY (break_type) REFERENCES break_types(break_type)
         )
     ''')
+    # FR-ATT-05/CC-05: one Pending Lunch approval per employee per shift date,
+    # enforced by a unique **partial** index, not just an app check. The canonical
+    # schema has had `uq_pending_lunch_approval` since the baseline; the
+    # compatibility shape now carries the same index. PostgreSQL is the only
+    # backend since the Phase-6 decommission, so the "DuckDB cannot build a
+    # partial index" excuse that forced a conditional INSERT for holiday opt-ins
+    # no longer applies: the database itself refuses the duplicate under
+    # concurrency, and the route translates a race into a 409 rather than a 500.
+    if not _is_public_target_schema():
+        conn.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_lunch_approval
+                ON break_approvals (emp_id, break_type, break_date) WHERE status = 'Pending'
+        ''')
 
     # ── Breaks ─────────────────────────────────────────────────────
     conn.execute('''
@@ -10833,19 +10846,30 @@ def break_approvals_api():
     if bt != 'Lunch':
         return jsonify({'error': 'Only Lunch breaks require approval'}), 400
     conn = get_db()
-    if conn.execute(
-        "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND break_date = ? AND status = 'Pending'",
-        [emp_id, bt, _get_shift_date_for_dt(emp_id, datetime.now(), conn)]
-    ).fetchone():
+    try:
+        # The pre-check keeps the friendly 409 for the sequential case; the
+        # partial unique index (FR-ATT-05) is what makes "one Pending per
+        # employee per shift date" true under concurrency, so a race surfaces as
+        # a UniqueViolation on the insert and is translated to the same 409
+        # rather than a 500.
+        if conn.execute(
+            "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND break_date = ? AND status = 'Pending'",
+            [emp_id, bt, _get_shift_date_for_dt(emp_id, datetime.now(), conn)]
+        ).fetchone():
+            return jsonify({'error': 'Pending approval already exists for today'}), 409
+        aid = _next_generated_id(conn, 'break_approvals', 'approval_id')
+        shift_date = _get_shift_date_for_dt(emp_id, datetime.now(), conn)
+        try:
+            conn.execute(
+                "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) VALUES (?, ?, ?, ?, ?, 'Pending')",
+                [aid, emp_id, bt, shift_date, data.get('reason', '')]
+            )
+        except Exception as exc:
+            if 'uq_pending_lunch_approval' in str(exc) or 'unique' in str(exc).lower():
+                return jsonify({'error': 'Pending approval already exists for today'}), 409
+            raise
+    finally:
         conn.close()
-        return jsonify({'error': 'Pending approval already exists for today'}), 409
-    aid = _next_generated_id(conn, 'break_approvals', 'approval_id')
-    shift_date = _get_shift_date_for_dt(emp_id, datetime.now(), conn)
-    conn.execute(
-        "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, reason, status) VALUES (?, ?, ?, ?, ?, 'Pending')",
-        [aid, emp_id, bt, shift_date, data.get('reason', '')]
-    )
-    conn.close()
     audit_log(
         emp_id, 'BREAK_APPROVAL_REQUEST',
         f'Requested approval for a {bt} break on {shift_date}',
@@ -12729,7 +12753,15 @@ if not STARTED:
 
         if scheduler_leader.should_start_scheduler():
             _register_scheduler_jobs(attendance_hour)
-            _install_lease_renewal(scheduler, scheduler_leader)
+            # FR-JOB-05: renew only where a lease was actually taken. On the
+            # no-Redis fallback there is nothing to renew — `renew()` returns
+            # False there — and installing the job anyway would shut the dev/CI
+            # scheduler down on its first tick (~20 s), defeating the very
+            # fallback `should_start_scheduler` just approved. Observed in a
+            # browser-suite run: "Scheduler lease lost ...; shutting down cron
+            # jobs on this instance" in an environment with no REDIS_URL.
+            if scheduler_leader.renewal_required():
+                _install_lease_renewal(scheduler, scheduler_leader)
             scheduler.start()
             STARTED = True
             logger.info("Scheduler started")

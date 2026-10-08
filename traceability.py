@@ -334,10 +334,19 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-ATT-04': ('M', 'R', 'IMPLEMENTED', ('/api/user-breaks',),
                   'Own breaks only, UNIONed with any Active break from another date '
                   'so a forgotten break-end is still visible.'),
-    'FR-ATT-05': ('H', 'C', 'PARTIAL', ('/api/break-approvals',),
-                  'Lunch only, one Pending per employee enforced in the handler. The '
-                  'partial unique index that would enforce it under concurrency exists '
-                  'only in the v2.0 schema.'),
+    'FR-ATT-05': ('H', 'C', 'IMPLEMENTED', ('/api/break-approvals',),
+                  'Lunch only; one Pending per employee per shift date is enforced by a '
+                  'unique **partial** index (`uq_pending_lunch_approval`, predicate '
+                  "`status = 'Pending'`) on *both* schemas, not just an app-level SELECT "
+                  'that two simultaneous requests can both pass. The canonical schema has '
+                  'had the index since the baseline; `init_db` now creates the same index '
+                  'on the compatibility shape (PostgreSQL is the only backend since the '
+                  'Phase-6 decommission, so the "DuckDB cannot build a partial index" '
+                  'limitation that forced conditional INSERTs elsewhere no longer applies), '
+                  'and the route translates a UniqueViolation race into the same 409 '
+                  'instead of a 500. A decided (Approved/Rejected) row frees the slot, '
+                  'because the rule is "one *Pending*" - tests assert the partial-ness in '
+                  'both directions.'),
     'FR-ATT-06': ('H', 'C', 'IMPLEMENTED', ('/api/break-approvals/<int:aid>/approve', '/api/break-approvals/<int:aid>/reject'),
                   'Manager/HR/Admin - or an active delegate of that manager (FR-LEA-08a) - '
                   'may approve, the update is conditional (CC-04), the action is audited '
@@ -943,7 +952,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'falls back to the single-process heuristic and logs the multi-pod '
                   'restriction. The SRS chaos test is implemented literally: three competing '
                   'OS processes race for the lease and exactly one wins, with three distinct '
-                  'identities.'),
+                  'identities. A wiring defect found while verifying the FR-ATT-05 slice: the '
+                  'renewal job was installed unconditionally after should_start_scheduler() - '
+                  'but on the no-Redis fallback renew() correctly returns False (no lease '
+                  'store), so the fallback scheduler shut itself down on its first ~20 s tick '
+                  'and the clause above was untrue in effect while its test passed. The boot '
+                  'block now installs renewal only under scheduler_leader.renewal_required(); '
+                  'a truth-table test and an AST wiring test hold it.'),
 
     # ── FR-ANL / FR-RPT: analytics and reports ──────────────────────────
     'FR-ANL-01': ('M', 'C', 'PARTIAL', ('/api/analytics/headcount', '/api/analytics/leave-trends',
