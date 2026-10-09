@@ -2089,6 +2089,90 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     run("approval-delegations(delegate approves)", delegated_approval)
 
+    # ── FR-USR-10 / FR-USR-04: bulk import + the SRS-named progress path ──────
+    def user_import():
+        """FR-USR-10: GET /api/imports/<job_id> is served and advertised.
+
+        The route is backend-agnostic, but the job row is not: `import_jobs` is an
+        identity-keyed JSONB table on the canonical target, so the queue → progress
+        → on-demand run → completed round trip is what proves the compatibility
+        shim did not leave a column the v2.0 shape rejects. The response must also
+        advertise the SRS path (`auth`'s "Return the upload path the SRS names in
+        the import response"), not only serve it.
+        """
+        stamp = f"{int(date.today().strftime('%m%d'))}{os.getpid() % 10000:04d}"
+        good = f"EMP{stamp}9"
+        csv_body = (
+            "emp_id,name,email,role,department\n"
+            f"{good},Probe Import,{good.lower()}@company.com,Employee,MIS\n"
+            "BAD1,Bad Id,bad-import-probe@company.com,Employee,MIS\n"
+        )
+
+        def drop():
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                ids = [r[0] for r in pc.execute(
+                    "SELECT job_id FROM import_jobs WHERE filename = 'probe-users.csv'"
+                ).fetchall()]
+                for jid in ids:
+                    pc.execute("DELETE FROM audit_log WHERE entity = 'import_jobs' "
+                               "AND entity_id::text = %s", [str(jid)])
+                pc.execute("DELETE FROM import_jobs WHERE filename = 'probe-users.csv'")
+                pc.execute("DELETE FROM notifications WHERE emp_id = %s", [good])
+                pc.execute("DELETE FROM user_sessions WHERE emp_id = %s", [good])
+                pc.execute("DELETE FROM audit_log WHERE emp_id = %s", [good])
+                pc.execute("DELETE FROM users WHERE emp_id = %s", [good])
+
+        drop()
+        try:
+            queued = cl_a.post(
+                "/api/users/import",
+                data={"file": (BytesIO(csv_body.encode()), "probe-users.csv")},
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if queued.status_code != 202:
+                return queued.status_code, f"queue: {queued.get_json()}"
+            body = queued.get_json() or {}
+            job_id = body.get("job_id")
+            if not job_id:
+                return 409, f"no job id: {body}"
+            if body.get("poll") != f"/api/imports/{job_id}":
+                return 409, f"response does not advertise the SRS path: {body.get('poll')}"
+
+            pending = cl_a.get(f"/api/imports/{job_id}")
+            if pending.status_code != 200:
+                return pending.status_code, f"SRS progress path: {pending.get_json()}"
+            if (pending.get_json() or {}).get("status") != "pending":
+                return 409, f"not pending: {pending.get_json()}"
+
+            ran = _post(cl_a, tok_a, f"/api/users/import/{job_id}/run")
+            if ran.status_code != 200:
+                return ran.status_code, f"on-demand run: {ran.get_json()}"
+
+            job = cl_a.get(f"/api/imports/{job_id}").get_json() or {}
+            if job.get("status") != "completed":
+                return 409, f"job did not complete: {job.get('status')}"
+            if job.get("imported") != 1 or job.get("skipped") != 1:
+                return 409, f"counts: imported={job.get('imported')} skipped={job.get('skipped')}"
+            if not job.get("errors"):
+                return 409, "the skipped row's error was not reported"
+
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                canonical = pc.execute(
+                    "SELECT status, imported, skipped FROM import_jobs WHERE job_id = %s",
+                    [job_id],
+                ).fetchone()
+                made = pc.execute(
+                    "SELECT count(*) FROM users WHERE emp_id = %s", [good]).fetchone()[0]
+            if canonical is None or canonical[0] != "completed":
+                return 409, f"canonical import_jobs row: {canonical}"
+            if made != 1:
+                return 409, "the valid row did not create the employee"
+            return 200, "SRS path served + advertised, canonical job row read back"
+        finally:
+            drop()
+
+    run("users(import job + SRS progress path)", user_import)
+
     return out
 
 

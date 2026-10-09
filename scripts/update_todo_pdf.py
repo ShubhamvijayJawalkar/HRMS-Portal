@@ -1398,8 +1398,8 @@ _NEXT_STEPS = {
     # FR-DOC-02 is IMPLEMENTED (object storage + presigned URL for documents)
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads)
     # FR-ONB-04 is IMPLEMENTED (inherits completed FR-DOC-02)
-    'FR-USR-10': 'Return the upload path the SRS names in the import response and raise the '
-                 'per-row error cap from 20 to 50.',
+    # FR-USR-10 is IMPLEMENTED (SRS progress endpoint /api/imports/<job_id> served
+    # and advertised; error cap already 50)
     # ── Medium ─────────────────────────────────────────────────────────
     'FR-ANL-01': 'Add a scheduled job that materialises the dashboard aggregates into a '
                  'table and read from it, keeping the live query as the warm-up fallback.',

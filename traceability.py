@@ -110,11 +110,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-USR-09': ('H', 'C', 'IMPLEMENTED', ('/api/users/<emp_id>/permissions',),
                   'Full replace of the override set, audited with a real before/after '
                   'diff, anti-lockout guard, module mapped into policy.PERMISSION_MODULES.'),
-    'FR-USR-10': ('H', 'C', 'PARTIAL', ('/api/users/import', '/api/users/import/<int:job_id>'),
+    'FR-USR-10': ('H', 'C', 'IMPLEMENTED',
+                  ('/api/users/import', '/api/imports/<int:job_id>'),
                   'CSV via pandas as a background job (202 + job id), per-row '
-                  'validation, {imported, skipped, errors, job_id}. The progress '
-                  'endpoint is /api/users/import/<job_id>, not the /api/imports/... '
-                  'path the SRS names, and errors are capped at 20 rather than 50.'),
+                  'validation, {imported, skipped, errors[:50], job_id}. The SRS '
+                  'progress endpoint GET /api/imports/<job_id> is served and '
+                  'advertised in the response; the older /api/users/import/<id> '
+                  'path stays as an alias. Per-row errors cap at 50.'),
     'FR-USR-11': ('M', 'C', 'IMPLEMENTED', ('/api/dependents', '/api/dependents/<int:did>'),
                   'emp_id always from the session, never the payload; delete is '
                   'scoped by emp_id as well. Create and delete are both audited, '

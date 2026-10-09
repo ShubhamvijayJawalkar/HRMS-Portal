@@ -135,7 +135,8 @@ async function uploadFile(file) {
 async function pollImportJob(jobId, result, progress) {
     let job;
     try {
-        const r = await fetch(`/api/users/import/${jobId}`);
+        // FR-USR-10: poll the SRS-named progress endpoint.
+        const r = await fetch(`/api/imports/${jobId}`);
         if (!r.ok) return;
         job = await r.json();
     } catch (e) { return; }

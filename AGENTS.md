@@ -2818,3 +2818,57 @@ transaction on the compat schema), FR-ATT-15 (M, cache), FR-ATT-07 (L, one proje
 - High-priority open items after this slice: **none** — all High-priority SRS
   requirements are now IMPLEMENTED or PARTIAL with remaining work scoped to
   Medium/Low.
+
+## FR-USR-10: the SRS progress path, and a stale "capped at 20" claim
+- The last High-priority PARTIAL row. Two gaps were named in the matrix note and
+  only **one** was real:
+  - **The progress endpoint was the alias, not the path the SRS names.** FR-USR-10
+    specifies `GET /api/imports/<job_id>`; the route was only
+    `/api/users/import/<job_id>`, and the `poll` field the create response handed
+    back advertised the alias rather than the requirement's path. The SRS-named
+    route is now served (`/api/imports/<int:job_id>` plus the `/api/v1/` form),
+    and the response returns `poll: /api/imports/<job_id>`. The older
+    `/api/users/import/<job_id>` path stays as an alias — a released poller is not
+    something to break under a client, and the alias is covered by a test asserting
+    both paths answer identically.
+  - **"errors are capped at 20 rather than 50" was wrong.** `MAX_RECORDED_ERRORS`
+    has been `50` since the import module's first commit (`git log -S` confirms);
+    the note had never been true. The SRS's `errors[:50]` was already satisfied, so
+    the row's only real gap was the path. The note is corrected rather than the
+    code changed to match it — this is the same failure mode the traceability pass
+    keeps finding, a row that asserts a defect which does not exist.
+- **The table it writes has never been probed.** `import_jobs` is an
+  identity-keyed, JSONB-backed table on the canonical target, and the probe's core
+  write matrix had no import flow at all — so the backend shim that turns the
+  compatibility shape into v2.0 was unverified for this table. A
+  `users(import job + SRS progress path)` flow is now the only place the whole
+  round trip is exercised on `public`: queue via `POST /api/users/import`, assert
+  the response advertises `/api/imports/<id>`, read progress from the SRS path
+  (pending), run the job on demand (`/api/users/import/<id>/run`), then read it
+  back completed with `imported=1 / skipped=1` and a per-row error, and finally
+  read the canonical `import_jobs` row out of the database. It cleans up the job,
+  the throwaway employee, their sessions/notifications and their audit rows in a
+  `finally`, so a failing run does not leak fixtures.
+- The `audit_log.entity_id` type split is handled by casting to text in the
+  cleanup (`entity_id::text = %s`): it is BIGINT on v2.0 and VARCHAR on the
+  compatibility schema, the same trap two earlier slices recorded.
+- Frontend `templates/import_users.html` now polls the SRS path. The list,
+  cancel and run routes stay under `/api/users/import` — they are FR-USR-04's
+  surface, not the progress endpoint FR-USR-10 names.
+- The GET sweep skips parameterized routes without defaults, so the new route does
+  not move the 115 GET count; it is asserted by the write flow instead.
+
+## FR-USR-10 verification
+- New unit test `test_import_progress_is_served_at_the_srs_named_path` (response
+  advertises the SRS path, both paths answer identically, the report shape carries
+  `{imported, skipped, errors, job_id}`), and an assertion in the existing
+  module-denial test that `/api/imports/1` is behind the same `import_users` gate.
+- Matrix moves FR-USR-10 to IMPLEMENTED
+  (**79 IMPLEMENTED / 28 PARTIAL / 5 NOT_STARTED / 1 RETIRED**); its `_NEXT_STEPS`
+  entry is gone (the key-set test forces that).
+- Unit **334 passed / 2 skipped**, browser **23/23**, v2.0 gates on a fresh
+  `alembic`-built database: probe **115/115 GET + 62/62 write** run twice for
+  idempotency with zero residue, CC-01 OK, read-only preflight exit 0 at head
+  `0012_approval_delegations_compat`. Redis session store not re-run (no session
+  code changed).
+- High-priority open items after this slice: **none**.

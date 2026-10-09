@@ -8847,6 +8847,42 @@ def test_user_import_queues_a_job_and_reports_the_outcome(client):
         _cleanup_user_contract_rows('EMP908', 'EMP909', 'EMP910', 'BAD1')
 
 
+def test_import_progress_is_served_at_the_srs_named_path(client):
+    """FR-USR-10 names GET /api/imports/<job_id> as the progress endpoint."""
+    import imports
+
+    _set_admin_session(client, 99885)
+    csv_body = 'emp_id,name,email,role,department\nEMP914,Path Check,emp914@company.com,Employee,MIS\n'
+    try:
+        queued = client.post(
+            '/api/users/import',
+            data={'file': (BytesIO(csv_body.encode()), 'users.csv')},
+            content_type='multipart/form-data',
+        )
+        assert queued.status_code == 202
+        job_id = queued.get_json()['job_id']
+        # The response advertises the SRS-named path, not just the alias.
+        assert queued.get_json()['poll'] == f'/api/imports/{job_id}'
+
+        # Both paths answer identically, so an existing poller is not broken.
+        srs = client.get(f'/api/imports/{job_id}')
+        alias = client.get(f'/api/users/import/{job_id}')
+        assert srs.status_code == 200 and alias.status_code == 200
+        assert srs.get_json() == alias.get_json()
+        assert srs.get_json()['job_id'] == job_id
+        assert client.get('/api/imports/999999').status_code == 404
+
+        imports.dispatch_once()
+        job = client.get(f'/api/imports/{job_id}').get_json()
+        assert job['status'] == 'completed'
+        assert job['imported'] == 1
+        # The [imported, skipped, errors, job_id] report shape the SRS names.
+        assert {'imported', 'skipped', 'errors', 'job_id'} <= set(job)
+    finally:
+        _cleanup_import_job_rows()
+        _cleanup_user_contract_rows('EMP914')
+
+
 def test_import_upload_validation_happens_before_anything_is_queued(client):
     _set_admin_session(client, 99883)
     try:
@@ -8922,6 +8958,8 @@ def test_import_routes_require_an_admin_with_the_module(client):
         ).status_code == 200
         _login_as(client, 'EMP912', 'Admin', 99880)
         assert client.get('/api/users/import').status_code in (302, 403)
+        # The SRS-named progress endpoint (FR-USR-10) is behind the same gate.
+        assert client.get('/api/imports/1').status_code in (302, 403)
         assert client.post(
             '/api/users/import',
             data={'file': (BytesIO(b'emp_id,name,email\nEMP913,X,x@company.com\n'), 'users.csv')},

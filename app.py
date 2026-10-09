@@ -5527,12 +5527,13 @@ def _csv_value(row, key, default=''):
 @admin_required
 @idempotent
 def import_users_csv():
-    """Queue a CSV user import (FR-USR-04).
+    """Queue a CSV user import (FR-USR-04 / FR-USR-10).
 
     The upload is validated (header, size, row count) and stored, a job row is
     recorded and the caller gets ``202`` with the job id. A dispatcher processes
     one job at a time, so a large file no longer holds a web worker open, and
-    the outcome stays inspectable at ``GET /api/users/import/<job_id>``.
+    the outcome stays inspectable at the progress endpoint the SRS names,
+    ``GET /api/imports/<job_id>``.
     """
     if 'file' not in request.files:
         return jsonify({'error': 'No file uploaded'}), 400
@@ -5551,15 +5552,26 @@ def import_users_csv():
         'job_id': job['job_id'],
         'status': job['status'],
         'total_rows': job['total_rows'],
-        'poll': f"/api/users/import/{job['job_id']}",
+        # The SRS names the progress endpoint `GET /api/imports/<job_id>`, so
+        # that is what the response advertises. The older
+        # `/api/users/import/<job_id>` path stays as an alias for existing
+        # pollers rather than being removed under them.
+        'poll': f"/api/imports/{job['job_id']}",
     }), 202
 
 
+@app.route('/api/v1/imports/<int:job_id>', methods=['GET'])
+@app.route('/api/imports/<int:job_id>', methods=['GET'])
 @app.route('/api/v1/users/import/<int:job_id>', methods=['GET'])
 @app.route('/api/users/import/<int:job_id>', methods=['GET'])
 @admin_required
 def import_job_status(job_id):
-    """Progress and outcome of one import job."""
+    """Progress and outcome of one import job.
+
+    FR-USR-10 names this as ``GET /api/imports/<job_id>``; the older
+    ``/api/users/import/<job_id>`` path is kept as an alias so a client that
+    polls the previous URL keeps working.
+    """
     job = imports.get_job(job_id)
     if not job:
         return jsonify({'error': 'Import job not found'}), 404

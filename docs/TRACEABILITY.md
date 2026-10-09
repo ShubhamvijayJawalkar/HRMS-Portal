@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 78 | 69% |
-| `PARTIAL` | 29 | 26% |
+| `IMPLEMENTED` | 79 | 70% |
+| `PARTIAL` | 28 | 25% |
 | `NOT_STARTED` | 5 | 4% |
 | `RETIRED` | 1 | 1% |
 | **total** | **113** | |
 
-### IMPLEMENTED (78)
+### IMPLEMENTED (79)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -110,10 +110,11 @@ rather than quietly invalidating this document.
 | `FR-USR-06a` | H | N | `/api/anonymisation/<int:request_id>/confirm` | Two-person state machine proposed -> confirmed -> applied; the confirmer must be a different user, and only an archived account qualifies. |
 | `FR-USR-07` | H | R | `/api/users/bulk` | All three clauses, and the delegation is the design rather than an implementation detail. The SRS asks for Bulk POST /api/users/bulk {action, emp_ids[]}: SELF EXCLUDED; per-row result reported, and PARTIAL FAILURE DOES NOT FAIL THE BATCH. Every row delegates to _set_user_access_status, the same function the single block/unblock/archive/restore routes call, so the batch has no behaviour of its own to get wrong: it cannot be more permissive about a 409, cannot forget to close sessions, and cannot skip the audit row. Every refusal the single routes make - already archived, archived users must be restored first, already blocked - is inherited per row with the same wording. Self is a per-row FAILURE rather than a silent skip, with the single routes exact 409 message: silently dropping the row would leave an administrator who selected thirty people seeing 29 archived and no reason the thirtieth was different. Status codes state which outcome happened - 200 all succeeded, 207 mixed, 400 none - because a 200 that hid a failure or a 400 that hid twenty successes is the reason the SRS asks for per-row results. The action vocabulary is data (BULK_USER_ACTIONS) mapping each action to its status and allow_login value, because those two decide whether sessions are closed. Validation runs before anything is touched, ids are normalised and blank-filtered up front so [""] gets the same answer as [], and the batch is bounded at 500 so one request cannot hold locks across the directory. The admin UI has a selection column and a bulk bar whose result is rendered as the per-row list rather than a single done, with select-all scoped to the current page and saying so. No schema change and no Alembic revision: the operations already existed and only the batch entry point was missing. |
 | `FR-USR-09` | H | C | `/api/users/<emp_id>/permissions` | Full replace of the override set, audited with a real before/after diff, anti-lockout guard, module mapped into policy.PERMISSION_MODULES. |
+| `FR-USR-10` | H | C | `/api/users/import`<br>`/api/imports/<int:job_id>` | CSV via pandas as a background job (202 + job id), per-row validation, {imported, skipped, errors[:50], job_id}. The SRS progress endpoint GET /api/imports/<job_id> is served and advertised in the response; the older /api/users/import/<id> path stays as an alias. Per-row errors cap at 50. |
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. Create and delete are both audited, because policy.PII_FIELDS classifies dependents as PII - a third party with no statutory retention of their own - and a silent erase of one was the gap the audit pass found. The create also used a bare INSERT INTO dependents VALUES (...), now a named column list. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (29)
+### PARTIAL (28)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -142,7 +143,6 @@ rather than quietly invalidating this document.
 | `FR-TKT-02` | M | R | `/api/tickets` | Create and list with one shared visibility rule in tickets.can_view: owner, assignee, or a role policy.can_view_all admits. The reporter is always the session user, so a ticket cannot be filed in a colleague's name. Still missing: the SRS also lists "matching department" scoping, and Super Admin is not notified of a new ticket. |
 | `FR-USR-02` | M | C | `/api/users`<br>`/api/admin/users/<emp_id>/password` | emp_id/email/role/department validated, case-insensitive email uniqueness, default status Active + allow_login. A 24 h single-use welcome token is issued (credentials.issued) but its only delivery is the outbox, so on a deployment with no SMTP the employee never receives it - which is why an admin-set password (POST /api/admin/users/<emp_id>/password) is the delivery-independent path for both the welcome and the forgotten-password case. It closes every session, clears any FR-AUTH-03 lockout (otherwise the admin action appears to work and the employee is still locked out for 15 minutes), refuses a blocked/archived/inactive target with a 409 that names the action which would help, and requires the current password when the target is the caller - otherwise a hijacked admin SESSION becomes permanent ownership of the account. No password or hash is written to audit_log, which is retained for years. Creating a user no longer reports email_sent: true unconditionally, which on a no-SMTP deployment meant an admin was told the welcome email went out when nothing had been sent. Missing: balances seeded from the grade/location policy rather than the default matrix (leave_policy derives on read instead). |
 | `FR-USR-08` | L | R | `/api/users/<emp_id>` | Missing the meta endpoint, the async CSV export and the last-50 sessions history. The list endpoint carries the pagination meta. |
-| `FR-USR-10` | H | C | `/api/users/import`<br>`/api/users/import/<int:job_id>` | CSV via pandas as a background job (202 + job id), per-row validation, {imported, skipped, errors, job_id}. The progress endpoint is /api/users/import/<job_id>, not the /api/imports/... path the SRS names, and errors are capped at 20 rather than 50. |
 | `FR-USR-12` | L | C | `/api/upload` | Employee uploads go through the same route as admin uploads, so one validation pipeline exists, and it does sniff the content. The file is now persisted to object storage (FR-DOC-02). Still missing: per-category size cap (one global cap applies) and a real malware scanner (only EICAR signature is checked). |
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
