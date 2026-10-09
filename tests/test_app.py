@@ -48,8 +48,27 @@ os.environ.setdefault(
 # value; the MFA routes return 503 without it rather than storing secrets in
 # the clear, so the suite must supply one to exercise them.
 os.environ.setdefault('MFA_ENCRYPTION_KEY', '3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=')
+# FR-PAY-07 / FR-DOC-02: MinIO object storage for payslips and documents.
+os.environ.setdefault('S3_ENDPOINT_URL', '')
+os.environ.setdefault('S3_ACCESS_KEY_ID', 'minioadmin')
+os.environ.setdefault('S3_SECRET_ACCESS_KEY', 'minioadmin')
+os.environ.setdefault('S3_BUCKET', 'hrms')
+os.environ.setdefault('S3_REGION', 'us-east-1')
+os.environ.setdefault('S3_PRESIGNED_EXPIRY', '3600')
 os.environ['SECRET_KEY'] = 'test-secret-key'
 os.environ['FLASK_DEBUG'] = '0'
+
+# Mock S3 for tests using moto (no MinIO container needed).
+# Note: empty S3_ENDPOINT_URL lets boto3 use default endpoints which moto intercepts.
+import moto  # noqa: E402
+
+_mock_s3 = moto.mock_aws()
+_mock_s3.start()
+import boto3  # noqa: E402
+
+_s3 = boto3.client('s3', region_name='us-east-1',
+                   aws_access_key_id='minioadmin', aws_secret_access_key='minioadmin')
+_s3.create_bucket(Bucket='hrms')
 # The app's global "200 per minute" limit is meant for production traffic. A
 # full suite issues thousands of requests in well under a minute, and a 429 on
 # the CSRF-token fetch surfaces much later as a bogus "CSRF token missing or
@@ -76,7 +95,7 @@ os.environ.setdefault('RESET_PASSWORD_RATE_LIMIT', '100000 per minute')
 # inherits FLASK_ENV=production or APP_DB_SCHEMA=public.
 os.environ['APP_DB_SCHEMA'] = 'legacy'
 
-import db_backend
+import db_backend  # noqa: E402
 
 db_backend.reset_schema()
 
@@ -7301,7 +7320,10 @@ def test_document_downloads_are_audited(client):
         finally:
             conn.close()
         assert before == 0
-        assert client.get(f'/api/documents/{doc_id}/download').status_code == 200
+        # Returns 302 redirect to presigned URL (FR-DOC-02); audit still fires
+        resp = client.get(f'/api/documents/{doc_id}/download', follow_redirects=False)
+        assert resp.status_code == 302
+        assert 'Location' in resp.headers
         conn = get_db()
         try:
             after = conn.execute(
@@ -11181,7 +11203,11 @@ def test_document_download_is_owner_or_privileged_only(client):
         assert client.get(f'/api/documents/{did}/download').status_code == 404
         with client.session_transaction() as sess:
             sess.update({'emp_id': owner, 'name': 'Document Owner', 'role': 'Employee', 'department': 'Operations', 'session_id': 99110})
-        assert client.get(f'/api/documents/{did}/download').status_code == 200
+        # Now returns 302 redirect to presigned URL (FR-DOC-02)
+        resp = client.get(f'/api/documents/{did}/download', follow_redirects=False)
+        assert resp.status_code == 302
+        assert 'Location' in resp.headers
+        assert resp.headers['Location'].startswith('http'), resp.headers['Location']
     finally:
         conn = get_db()
         conn.execute('DELETE FROM documents WHERE doc_id = ?', [did])

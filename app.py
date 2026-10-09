@@ -56,6 +56,7 @@ import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_
 import leave_grants  # noqa: E402  # manual leave grants (FR-LEA-07)
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import notifications  # noqa: E402  # per-category notification preferences (FR-NOT-03)
+import object_storage  # noqa: E402  # S3/MinIO object storage (FR-PAY-07, FR-DOC-02)
 import orphan_breaks  # noqa: E402  # auto-close of breaks left Active (FR-AUTH-14/FR-JOB-02)
 import outbox  # noqa: E402
 import passwords  # noqa: E402  # FR-AUTH-10 password policy (length + breach corpus)  # CC-09 transactional outbox (dispatcher job + enqueue helper)
@@ -9093,17 +9094,26 @@ def upload_document():
     if not signatures.get(extension) or b'EICAR-STANDARD-ANTIVIRUS-TEST-FILE' in content:
         return jsonify({'error': 'Document failed content validation'}), 400
     filename = f"{int(datetime.now().timestamp())}_{safe_name}"
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    with open(filepath, 'wb') as handle:
-        handle.write(content)
     fsize = len(content)
     conn = get_db()
     did = _next_generated_id(conn, 'documents', 'doc_id')
+    # Object key for S3/MinIO (FR-DOC-02: persisted to object storage)
+    object_key = f"documents/{emp_id}/{did}/{filename}"
     conn.execute("INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [did, emp_id, safe_name, category, filename, fsize, datetime.now()])
+                 [did, emp_id, safe_name, category, object_key, fsize, datetime.now()])
     conn.close()
+
+    # Upload to object storage
+    try:
+        content_type = {'pdf': 'application/pdf', 'jpg': 'image/jpeg',
+                        'jpeg': 'image/jpeg', 'png': 'image/png'}.get(extension, 'application/octet-stream')
+        object_storage.upload_document(emp_id, did, filename, content, content_type)
+    except object_storage.ObjectStorageError as exc:
+        logger.error("Document upload to object storage failed: %s", exc)
+        return jsonify({'error': 'Document storage unavailable'}), 503
+
     audit_log(emp_id, 'DOCUMENT_UPLOAD', f'Uploaded document {did}', entity='documents', entity_id=did)
-    return jsonify({'message': 'File uploaded', 'id': did, 'path': filename}), 201
+    return jsonify({'message': 'File uploaded', 'id': did, 'path': object_key}), 201
 
 
 @app.route('/api/v1/documents/<int:did>/download')
@@ -9116,18 +9126,22 @@ def download_document(did):
     conn.close()
     if not row or not _can_access_document(actor, row[0]):
         return jsonify({'error': 'Not found'}), 404
-    filepath = os.path.join(UPLOAD_FOLDER, os.path.basename(row[1]))
-    if not os.path.exists(filepath):
-        return jsonify({'error': 'File not found on disk'}), 404
+    original_name = row[2]
+    # Generate presigned URL for object storage (FR-DOC-02)
+    try:
+        presigned_url = object_storage.get_document_presigned_url(row[0], did, original_name)
+    except object_storage.ObjectStorageError as exc:
+        logger.error("Document presigned URL generation failed: %s", exc)
+        return jsonify({'error': 'Document unavailable'}), 503
     # FR-DOC-03: the download is audited. Document *reads* leaving no trail is
     # the one thing that makes a document store hard to reason about after an
     # incident, and the SRS asks for it explicitly.
     audit_log(
         session['emp_id'], 'DOCUMENT_DOWNLOAD',
-        f'Downloaded document {did} ({row[2]})',
+        f'Downloaded document {did} ({original_name})',
         entity='documents', entity_id=did, after={'owner_emp_id': row[0]},
     )
-    return send_file(filepath, as_attachment=True, download_name=row[1])
+    return redirect(presigned_url, code=302)
 
 
 @app.route('/api/v1/documents/<int:did>', methods=['DELETE'])
@@ -9140,20 +9154,25 @@ def delete_document(did):
     if not row or not _can_access_document(actor, row[0], write=True):
         conn.close()
         return jsonify({'error': 'Not found'}), 404
+    emp_id, name, category, object_key = row
     conn.execute("DELETE FROM documents WHERE doc_id = ?", [did])
     conn.close()
-    filepath = os.path.join(UPLOAD_FOLDER, os.path.basename(row[3]))
-    if os.path.exists(filepath):
-        os.remove(filepath)
+    # Delete from object storage (FR-DOC-02)
+    try:
+        object_storage.delete_document_object(emp_id, did, name)
+    except object_storage.ObjectStorageError as exc:
+        logger.error("Document delete from object storage failed: %s", exc)
+        # Log but don't fail the request — the DB row is gone
+        pass
     # Irreversible: the row *and* the file are gone, and a document can be payroll
     # evidence or an identity document. The download of a document was audited
     # (FR-DOC-03) while the deletion was not, which is the wrong way round — reading
     # is reversible by definition and deleting is not.
     audit_log(
         session['emp_id'], 'DOCUMENT_DELETE',
-        f'Deleted document {did} ({row[1]}, {row[2]}) belonging to {row[0]}',
+        f'Deleted document {did} ({name}, {category}) belonging to {emp_id}',
         entity='documents', entity_id=did,
-        before={'name': row[1], 'category': row[2], 'owner_emp_id': row[0]},
+        before={'name': name, 'category': category, 'owner_emp_id': emp_id},
     )
     return jsonify({'message': 'Document deleted'}), 200
 
@@ -9182,6 +9201,15 @@ SMTP_USE_SSL = None if _SSL_FLAG is None else _SSL_FLAG.strip().lower() in ('1',
 #: Without this the dispatcher stalls on delivery and every subsequent event backs
 #: up behind it — a mail outage turning into an application outage.
 SMTP_TIMEOUT_SECONDS = float(os.getenv('SMTP_TIMEOUT_SECONDS', '15'))
+
+
+# ── Object Storage (S3/MinIO) — FR-PAY-07, FR-DOC-02 ─────────────────
+S3_ENDPOINT_URL = os.getenv('S3_ENDPOINT_URL')
+S3_ACCESS_KEY_ID = os.getenv('S3_ACCESS_KEY_ID')
+S3_SECRET_ACCESS_KEY = os.getenv('S3_SECRET_ACCESS_KEY')
+S3_BUCKET = os.getenv('S3_BUCKET', 'hrms')
+S3_REGION = os.getenv('S3_REGION', 'us-east-1')
+S3_PRESIGNED_EXPIRY = int(os.getenv('S3_PRESIGNED_EXPIRY', '3600'))
 
 
 def _notification_email_wanted(conn, emp_id, category):
@@ -9509,13 +9537,16 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 
 
 def generate_payslip_pdf(run_id, emp_id):
+    """Generate a payslip PDF and upload to object storage.
+    Returns the object key on success, None if payslip not found.
+    """
     conn = get_db()
     row = conn.execute(
         "SELECT p.item_id, r.month, r.year, p.emp_id, u.name, u.department, u.designation, p.gross_salary, p.deductions_total, p.net_salary, p.pf, p.esi, p.pt FROM payroll_items p JOIN payroll_runs r ON p.run_id = r.run_id JOIN users u ON p.emp_id = u.emp_id WHERE p.run_id = ? AND p.emp_id = ?",
         [run_id, emp_id]
     ).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return None
 
     buf = BytesIO()
@@ -9556,12 +9587,15 @@ def generate_payslip_pdf(run_id, emp_id):
 
     doc.build(elements)
     buf.seek(0)
+    pdf_bytes = buf.read()
 
-    conn = get_db()
+    # Upload to object storage (FR-PAY-07: PDF stored in object storage)
+    object_key = object_storage.upload_payslip(run_id, emp_id, pdf_bytes)
+
     conn.execute("UPDATE payroll_items SET payslip_generated = 1 WHERE run_id = ? AND emp_id = ?", [run_id, emp_id])
     conn.close()
 
-    return buf
+    return object_key
 
 
 @app.route('/api/v1/payroll-runs/<int:rid>/payslip-pdf/<emp_id>')
@@ -9578,10 +9612,16 @@ def payslip_pdf(rid, emp_id):
         return jsonify({'error': 'Not found'}), 404
     if run[0] != 'Finalized':
         return jsonify({'error': 'Payslips are available only after payroll finalization'}), 409
-    pdf = generate_payslip_pdf(rid, emp_id)
-    if not pdf:
-        return jsonify({'error': 'Not found'}), 404
-    return send_file(pdf, mimetype='application/pdf', as_attachment=True, download_name=f'payslip_{emp_id}_{rid}.pdf')
+
+    # Generate presigned URL for object storage (FR-PAY-07)
+    try:
+        presigned_url = object_storage.get_payslip_presigned_url(rid, emp_id)
+    except object_storage.ObjectStorageError as exc:
+        logger.error("Payslip presigned URL generation failed: %s", exc)
+        return jsonify({'error': 'Payslip unavailable'}), 503
+
+    # Redirect to presigned URL — works for both browser and API clients
+    return redirect(presigned_url, code=302)
 
 
 @app.route('/api/v1/payroll-runs/<int:rid>/bank-file')

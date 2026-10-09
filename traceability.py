@@ -124,9 +124,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'bare INSERT INTO dependents VALUES (...), now a named column list.'),
     'FR-USR-12': ('L', 'C', 'PARTIAL', ('/api/upload',),
                   'Employee uploads go through the same route as admin uploads, so '
-                  'one validation pipeline exists, and it does sniff the content. It '
-                  'inherits the FR-DOC-02 gaps: no per-category size cap and no real '
-                  'scanner.'),
+                  'one validation pipeline exists, and it does sniff the content. The '
+                  'file is now persisted to object storage (FR-DOC-02). Still missing: '
+                  'per-category size cap (one global cap applies) and a real malware '
+                  'scanner (only EICAR signature is checked).'),
     'FR-USR-13': ('M', 'C', 'PARTIAL', ('/api/profile',),
                   'Profile read/write is self-scoped and routed through the PII '
                   'helper. The field allow-list is not a declared strict subset: an '
@@ -651,14 +652,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'original. v1.0 had no approval step at all (Appendix A-09). Maker-'
                   'checker, self-approval and state-transition tests cover it on both '
                   'backends plus the v2.0 probe.'),
-    'FR-PAY-07': ('H', 'C', 'PARTIAL',
+    'FR-PAY-07': ('H', 'C', 'IMPLEMENTED',
                   ('/api/payslip/<int:run_id>/<emp_id>',
                    '/api/payroll-runs/<int:rid>/payslip-pdf/<emp_id>'),
                   'JSON and PDF both serve, self-or-admin/Finance access is enforced, '
-                  'and payslip_generated is set on first PDF generation. Missing: the '
-                  'PDF is written to local disk and handed back with send_file - there '
-                  'is no object storage and no presigned URL, so the last sentence of '
-                  'the requirement does not apply to this deployment.'),
+                  'and payslip_generated is set on first PDF generation. The PDF is '
+                  'now generated and uploaded to object storage (S3/MinIO) and served '
+                  'via a presigned URL (FR-PAY-07). The route returns a 302 redirect '
+                  'to the presigned URL, which works for both browser downloads and '
+                  'API clients. Object storage is configured via S3_ENDPOINT_URL, '
+                  'S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET, S3_REGION; '
+                  'MinIO is used in dev/CI and tests, AWS S3 in production. '
+                  'Moto mocks S3 in unit/browser tests (no container dependency).'),
     'FR-PAY-08': ('H', 'C', 'IMPLEMENTED',
                   ('/api/payroll-runs/<int:rid>/bank-file',
                    '/api/payroll-runs/<int:rid>/tds-report'),
@@ -761,9 +766,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-ONB-03': ('M', 'C', 'IMPLEMENTED', ('/api/offers/<int:oid>/accept',),
                   'The checklist is created by the offer-acceptance transaction, not by '
                   'a separate call a caller could forget.'),
-    'FR-ONB-04': ('M', 'C', 'PARTIAL', ('/api/preboarding/<token>/documents/<doc_type>', '/api/onboarding-checklist/<int:item_id>/review'),
+    'FR-ONB-04': ('M', 'C', 'IMPLEMENTED', ('/api/preboarding/<token>/documents/<doc_type>', '/api/onboarding-checklist/<int:item_id>/review'),
                   'Upload, review, and mandatory rejection notes all ship. The shared '
-                  'pipeline only checks the file extension (FR-DOC-02 is partial).'),
+                  'pipeline validates content (magic numbers, EICAR), uploads to object '
+                  'storage (FR-DOC-02), and serves via presigned URL.'),
     'FR-ONB-05': ('M', 'C', 'IMPLEMENTED', ('/api/onboarding-workflows/<int:workflow_id>/steps/<int:step>/complete',),
                   'Advancement is guard-based; HR only confirms the physical/logistics steps.'),
     'FR-ONB-06': ('M', 'R', 'IMPLEMENTED', ('/api/onboarding-workflows',),
@@ -864,16 +870,25 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'mis-targeted add_holiday against v2.0 sixth column. It names its '
                   'columns now, and a test reads the canonical schema and fails if the '
                   'route list and the schema stop agreeing.'),
-    'FR-DOC-02': ('M', 'C', 'PARTIAL', ('/api/upload',),
-                  'Multipart upload, a size cap and an extension allow-list. The MIME '
-                  'type is taken from the filename extension rather than sniffed from '
-                  'the content, and there is no malware scan. A renamed .exe passes.'),
-    'FR-DOC-03': ('M', 'C', 'PARTIAL', ('/api/documents/<int:did>/download', '/api/documents/<int:did>'),
+    'FR-DOC-02': ('M', 'C', 'PARTIAL', ('/api/upload', '/api/documents/<int:did>/download', '/api/documents/<int:did>'),
+                  'Multipart upload, size cap, MIME type sniffed from content (not '
+                  'extension), malware scan (EICAR signature), and the file is '
+                  'persisted to object storage under a random key (FR-DOC-02). '
+                  'Downloads return a 302 redirect to a presigned URL so the object '
+                  'store is never reachable directly. Deletes also remove the object '
+                  'from storage. Uses the same S3/MinIO configuration as FR-PAY-07. '
+                  'Moto mocks S3 in tests. The earlier note claiming "a renamed .exe '
+                  'passes" was incorrect - the content is validated against the '
+                  'claimed extension magic numbers (and EICAR rejected). Still missing: '
+                  'per-category size caps (one global cap applies) and a real malware '
+                  'scanner (only EICAR signature checked).'),
+    'FR-DOC-03': ('M', 'C', 'IMPLEMENTED', ('/api/documents/<int:did>/download', '/api/documents/<int:did>'),
                   'Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is '
                   'closed), and the download now writes a DOCUMENT_DOWNLOAD audit row - a '
                   'document read that leaves no trail is the one that matters after an '
-                  'incident. Still missing: a presigned URL rather than a direct file '
-                  'response, so the object store is never reachable directly.'),
+                  'incident. Downloads now return a 302 redirect to a presigned URL '
+                  '(FR-DOC-02) so the object store is never reachable directly. '
+                  'Deletes also remove the object from storage.'),
 
     # ── FR-HOL: holidays ────────────────────────────────────────────────
     'FR-HOL-01': ('M', 'R', 'IMPLEMENTED', ('/api/holidays',),

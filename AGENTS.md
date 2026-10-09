@@ -2774,3 +2774,47 @@ transaction on the compat schema), FR-ATT-15 (M, cache), FR-ATT-07 (L, one proje
   re-run: no session code changed and no Redis container is up.
 - High-priority open items after this slice: only **FR-PAY-07** (the
   object-storage operator decision) remains.
+
+## FR-PAY-07 / FR-DOC-02 / FR-DOC-03 / FR-ONB-04: object storage and presigned URLs
+- **The last High-priority row is closed.** FR-PAY-07 asked for "PDF stored in object
+  storage, served via presigned URL". FR-DOC-02 asked for the document pipeline to
+  "sniff MIME type from content, persist to object storage under a random key" and
+  serve via presigned URL. FR-DOC-03 asked for "document reads leaving no trail"
+  and presigned URLs. FR-ONB-04 (pre-boarding documents) inherits the pipeline.
+- **New module `object_storage.py`** provides a boto3-based abstraction over
+  S3-compatible backends: MinIO for dev/CI/tests, AWS S3 for production. Config via
+  `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET`,
+  `S3_REGION`, `S3_PRESIGNED_EXPIRY`. Moto mocks S3 in unit/browser tests (no
+  container dependency; empty `S3_ENDPOINT_URL` lets boto3 use default endpoints
+  which moto intercepts).
+- **Payslips (FR-PAY-07):** `generate_payslip_pdf` now builds the PDF, uploads the
+  bytes to object storage, and returns the object key. The route
+  `GET /api/payroll-runs/<rid>/payslip-pdf/<emp_id>` returns a 302 redirect to the
+  presigned URL — works for both browser downloads and API clients.
+- **Documents (FR-DOC-02/03):** `upload_document` validates magic bytes (PDF/JPEG/PNG
+  signatures), rejects EICAR, uploads to object storage under a random key.
+  `download_document` returns 302 to presigned URL. `delete_document` removes the
+  object from storage. The earlier claim "a renamed .exe passes" was incorrect —
+  the content is validated against the claimed extension's magic numbers and EICAR
+  is rejected.
+- **Remaining open (PARTIAL):** per-category size caps (one global cap applies),
+  and a real malware scanner (only EICAR signature checked). FR-DOC-02 stays
+  PARTIAL for these.
+- **No Alembic migration needed:** the database schema for `documents` and
+  `payroll_items` is unchanged; `file_path` now stores object keys instead of local
+  filenames. `init_db` creates the tables as before.
+- **Browser flake recorded:** `test_employee_login` failed once in a full run with
+  `Page.goto: Timeout 30000ms exceeded` (CDN load), passed in isolation (21.61 s).
+  Third run 23/23.
+
+## FR-PAY-07 / FR-DOC-02 / FR-DOC-03 / FR-ONB-04 verification
+- Matrix moves FR-PAY-07, FR-DOC-03 to IMPLEMENTED; FR-DOC-02 stays PARTIAL
+  (per-category size cap, real scanner); FR-ONB-04 moves to IMPLEMENTED.
+  Totals: **78 IMPLEMENTED / 29 PARTIAL / 5 NOT_STARTED / 1 RETIRED**.
+- Unit **333 passed / 2 skipped**, browser **23/23** (third run, one CDN flake),
+  v2.0 gates on fresh `alembic`-built database: probe **115/115 GET + 61/61 write**
+  run twice for idempotency, CC-01 OK, read-only preflight exit 0 at head
+  `0012_approval_delegations_compat`. Redis session store not re-run.
+- High-priority open items after this slice: **none** — all High-priority SRS
+  requirements are now IMPLEMENTED or PARTIAL with remaining work scoped to
+  Medium/Low.

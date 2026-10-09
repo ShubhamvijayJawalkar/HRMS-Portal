@@ -21,9 +21,29 @@ os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
 # FR-AUTH-11: encrypts authenticator secrets at rest. Fixed non-production
 # value; MFA returns 503 without it rather than storing secrets in the clear.
 os.environ.setdefault('MFA_ENCRYPTION_KEY', '3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=')
+# FR-PAY-07 / FR-DOC-02: MinIO object storage for payslips and documents.
+# Tests run against mocked S3 via moto (no MinIO container needed).
+os.environ.setdefault('S3_ENDPOINT_URL', '')
+os.environ.setdefault('S3_ACCESS_KEY_ID', 'minioadmin')
+os.environ.setdefault('S3_SECRET_ACCESS_KEY', 'minioadmin')
+os.environ.setdefault('S3_BUCKET', 'hrms')
+os.environ.setdefault('S3_REGION', 'us-east-1')
+os.environ.setdefault('S3_PRESIGNED_EXPIRY', '3600')
+
+# Mock S3 for tests using moto
+import moto  # noqa: E402
+
+_mock_s3 = moto.mock_aws()
+_mock_s3.start()
+import boto3  # noqa: E402
+
+_s3 = boto3.client('s3', region_name='us-east-1',
+                   aws_access_key_id='minioadmin', aws_secret_access_key='minioadmin')
+_s3.create_bucket(Bucket='hrms')
+
 os.environ['APP_DB_SCHEMA'] = 'legacy'
 
-import db_backend
+import db_backend  # noqa: E402
 
 db_backend.reset_schema()
 

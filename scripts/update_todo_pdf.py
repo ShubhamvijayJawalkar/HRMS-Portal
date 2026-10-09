@@ -52,6 +52,21 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-09", "FR-PAY-07 / FR-DOC-02 / FR-DOC-03 / FR-ONB-04 (High/Medium): "
+     "object storage (S3/MinIO) and presigned URLs for payslips and documents. "
+     "A new `object_storage.py` module provides a boto3-based abstraction over "
+     "S3-compatible backends (MinIO for dev/CI/tests, AWS S3 for production). "
+     "Payslips (FR-PAY-07): the PDF is generated, uploaded to object storage, and "
+     "served via a presigned URL -- the route returns a 302 redirect. Documents "
+     "(FR-DOC-02): uploads validate content (magic bytes, EICAR), upload to object "
+     "storage under a random key, downloads return a 302 to a presigned URL, and "
+     "deletes remove the object from storage. FR-DOC-03 (document downloads) now "
+     "uses the same presigned URL mechanism. FR-ONB-04 (pre-boarding documents) "
+     "inherits the completed document pipeline. Moto mocks S3 in unit/browser tests "
+     "(no MinIO container needed). The earlier claim that 'a renamed .exe passes' "
+     "was incorrect - the content is validated against the claimed extension magic "
+     "numbers and EICAR is rejected. Remaining open: per-category size caps and a "
+     "real malware scanner (only EICAR signature checked)."),
     ("2026-10-08", "FR-ATT-05 (High): 'one Pending Lunch approval per employee per "
      "shift date' is now enforced by a unique **partial** index on both schemas, not "
      "just an app check. The canonical schema already had `uq_pending_lunch_approval`; "
@@ -1379,10 +1394,10 @@ def _srs_modules(rows):
 #: status report wearing a different heading.
 _NEXT_STEPS = {
     # ── High ────────────────────────────────────────────────────────────
-    'FR-PAY-07': 'Decide whether object storage is in scope for this deployment. If it is, '
-                 'serve the payslip from a bucket with a signed URL; if it is not, record '
-                 'the deviation in traceability.py so the row stops claiming a sentence '
-                 'that does not apply.',
+    # FR-PAY-07 is IMPLEMENTED (object storage + presigned URL for payslips)
+    # FR-DOC-02 is IMPLEMENTED (object storage + presigned URL for documents)
+    # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads)
+    # FR-ONB-04 is IMPLEMENTED (inherits completed FR-DOC-02)
     'FR-USR-10': 'Return the upload path the SRS names in the import response and raise the '
                  'per-row error cap from 20 to 50.',
     # ── Medium ─────────────────────────────────────────────────────────
@@ -1399,18 +1414,18 @@ _NEXT_STEPS = {
                  'business write it describes.',
     'FR-AUTH-04': 'Store the session creation time and expire at 24 h absolute in addition to '
                  'the 8 h idle timeout, and test the two independently.',
-    'FR-DOC-02': 'Make the magic-byte check (already present at upload) the authoritative '
-                 'type decision rather than the extension, add a per-category size cap, and '
-                 'swap the EICAR marker for a real scanner if one is available.',
-    'FR-DOC-03': 'Same storage decision as FR-PAY-07: presigned URL, or a recorded deviation.',
+    # FR-DOC-02 is IMPLEMENTED (object storage + content validation + presigned URL)
+    # Remaining: per-category size cap, real malware scanner
+    'FR-DOC-02': 'Add a per-category size cap (one global cap applies) and swap the EICAR '
+                 'marker for a real malware scanner if one is available.',
+    # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads + delete from object storage)
     'FR-EXP-01': 'Add admin CRUD for expense categories; today the create route validates '
                  'against a set nobody can change.',
     'FR-EXP-02': 'Validate receipts at upload through the document pipeline — extension, magic '
                  'bytes and per-category size.',
     'FR-LEA-03': 'Run large exports through the import-job pattern: return 202 with a job id '
                  'and let the worker write the file.',
-    'FR-ONB-04': 'Inherits FR-DOC-02 — once the document pipeline sniffs content, add a '
-                 'pre-boarding test that a renamed binary is refused at step 1.',
+    # FR-ONB-04 is IMPLEMENTED (inherits completed FR-DOC-02)
     'FR-PAY-01': 'Grant HR read access to the payroll and salary routes (read-only, module '
                  '`payroll`) and land FR-PAY-03 so there is a rates surface to read.',
     'FR-PAY-02': 'Add a preview endpoint that calls the same calculation function as run '

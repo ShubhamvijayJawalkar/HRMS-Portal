@@ -25,6 +25,23 @@ services:
       timeout: 3s
       retries: 12
 
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - hrms-minio:/data
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   # Expand/contract migrations run once before the web process starts.
   migrate:
     build:
@@ -81,6 +98,13 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       EMAIL_FROM: ${EMAIL_FROM:-noreply@hrms.com}
       SMTP_TIMEOUT_SECONDS: ${SMTP_TIMEOUT_SECONDS:-15}
+      # Object storage (MinIO for FR-PAY-07 payslips, FR-DOC-02 documents)
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-hrms}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_PRESIGNED_EXPIRY: ${S3_PRESIGNED_EXPIRY:-3600}
       # Rate limits (SRS §10 / FR-AUTH-01). Per-employee once authenticated,
       # per-address while anonymous; 200/min is the shift-start burst target.
       DEFAULT_RATE_LIMIT: ${DEFAULT_RATE_LIMIT:-600 per minute}
@@ -106,5 +130,6 @@ services:
 volumes:
   hrms-postgres:
   hrms-redis:
+  hrms-minio:
   hrms-data:
   hrms-uploads:
