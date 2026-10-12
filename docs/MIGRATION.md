@@ -886,7 +886,9 @@ The matrix moves FR-EXP-03 to IMPLEMENTED (48 IMPLEMENTED / 43 PARTIAL /
 12 NOT_STARTED / 1 RETIRED). It also corrects itself: the previous claim that
 FR-DOC-02 validated the extension rather than the content was wrong — the upload
 route does sniff the magic number and reject EICAR — so FR-DOC-02, FR-USR-12 and
-FR-ONB-04 now name the real gaps (per-category size cap, no real scanner).
+FR-ONB-04 then named the real gaps. Those gaps are now closed: see §14.13 for
+category caps, fail-closed ClamAV scanning and the shared pre-boarding
+object-storage pipeline.
 
 Validation: **143 DuckDB unit tests passed / 6 skipped**, **148 PostgreSQL unit
 tests passed / 1 skipped** (also with Redis), **21 Playwright tests passed on
@@ -1410,6 +1412,42 @@ table instead: the requested leave-trend window is parameterised, and one table
 and refresh path work on both the compatibility and v2.0 schema shapes. The
 The cutover preflight expected head is subsequently advanced by each migration;
 after FR-ATT-01 it is `0014_break_type_config`.
+
+## FR-DOC-02 / FR-USR-12 / FR-ONB-04 — document validation and scanning
+
+Every authenticated `/api/upload` and signed pre-boarding document upload uses
+the same `document_security.validate_document_upload()` path. It checks the
+allowed extension against the file signature and declared MIME, applies a
+category limit, rejects the EICAR test marker, then sends the bytes to ClamAV
+using its length-framed `INSTREAM` protocol before any file or document row is
+persisted. If ClamAV is missing, unreachable, times out or returns an invalid
+response, the upload fails with 503; a positive malware result is refused with
+400. Configure `CLAMD_HOST`, `CLAMD_PORT` (default 3310) and
+`CLAMD_TIMEOUT_SECONDS` (default 15). The production Compose stack runs a
+private ClamAV service and waits for its health check before starting HRMS.
+
+The category policy is: payslips, salary slips, bank details and offer letters
+5 MiB; identity and address proofs 10 MiB; education and certification 15 MiB;
+Other and unlisted categories 20 MiB. The existing 50 MiB HTTP request ceiling
+remains as an outer bound. These explicit values are application policy because
+the SRS requires per-category limits but supplies no figures; `document_security`
+is the single place to revise them.
+
+Pre-boarding uploads previously wrote files to the local `uploads/` directory
+despite the traceability note claiming they used object storage. They now store
+through the same S3/MinIO adapter as employee uploads. Document object keys are
+192-bit random tokens, independent of employee id, database id and filename;
+the private bucket is only exposed through the existing audited presigned
+download route. No schema migration is needed because `documents.file_path`
+already stores the object key.
+
+Unit tests use a fake local clamd endpoint to verify INSTREAM framing and clean
+versus infected results, assert missing-scanner refusal and per-category
+thresholds, and use moto for private object-storage round trips. Browser and
+unit fixtures replace only the external scanner transport with a clean result;
+the scanner protocol and negative outcomes are independently tested. Validation:
+unit suite **350 passed / 2 skipped**, browser suite **23/23**, Ruff and compile
+checks passed, and both base and local-override Compose configurations validate.
 
 ## FR-ATT-01 — configurable break types
 

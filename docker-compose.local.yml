@@ -18,3 +18,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-hrms}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@host.docker.internal:5432/${POSTGRES_DB:-hrms}
       REDIS_URL: redis://host.docker.internal:6379/0
+      CLAMD_HOST: host.docker.internal
+
+  clamav:
+    ports:
+      - "127.0.0.1:3310:3310"

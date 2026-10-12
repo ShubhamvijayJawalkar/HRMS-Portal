@@ -49,6 +49,7 @@ import analytics  # noqa: E402  # materialised analytics snapshots (FR-ANL-01)
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
 import dashboard_stats as dashboard_stats_cache  # noqa: E402  # cached admin counters (FR-ATT-15)
 import delegations  # noqa: E402  # approval delegation for a date range (FR-LEA-08a)
+import document_security  # noqa: E402  # shared MIME/size/malware validation (FR-DOC-02)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
 import holiday_calendar  # noqa: E402  # holiday calendar maintenance (FR-HOL-01/02)
@@ -7130,7 +7131,7 @@ def upload_preboarding_document(token, doc_type):
     if doc_type not in ONBOARDING_REQUIRED_DOCS:
         return jsonify({'error': 'Unknown required document type'}), 400
     conn = get_db()
-    stored_path = None
+    stored_key = None
     try:
         row = _workflow_for_token(conn, token)
         if row[9] or row[5] == 'Completed':
@@ -7145,54 +7146,46 @@ def upload_preboarding_document(token, doc_type):
         if uploaded is None or not uploaded.filename:
             raise LifecycleError(400, 'A real document file is required')
         filename = secure_filename(uploaded.filename)
-        extension = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
-        if extension not in ('pdf', 'jpg', 'jpeg', 'png'):
-            raise LifecycleError(400, 'Only PDF, JPG, JPEG and PNG documents are accepted')
+        limit = document_security.category_limit_bytes(doc_type)
         uploaded.stream.seek(0)
-        content = uploaded.stream.read(10 * 1024 * 1024 + 1)
+        content = uploaded.stream.read(limit + 1)
         size = len(content)
-        if size <= 0 or size > 10 * 1024 * 1024:
-            raise LifecycleError(400, 'Document must be between 1 byte and 10 MB')
-        signatures = {
-            'pdf': content.startswith(b'%PDF-'),
-            'jpg': content.startswith(b'\xff\xd8\xff'),
-            'jpeg': content.startswith(b'\xff\xd8\xff'),
-            'png': content.startswith(b'\x89PNG\r\n\x1a\n'),
-        }
-        if not signatures.get(extension):
-            raise LifecycleError(400, 'Document content does not match its extension')
-        declared_type = (uploaded.mimetype or '').lower()
-        allowed_types = {
-            'pdf': ('application/pdf', 'application/octet-stream'),
-            'jpg': ('image/jpeg',), 'jpeg': ('image/jpeg',), 'png': ('image/png',),
-        }
-        if declared_type and declared_type not in allowed_types[extension]:
-            raise LifecycleError(400, 'Document MIME type does not match its extension')
-        if b'EICAR-STANDARD-ANTIVIRUS-TEST-FILE' in content:
-            raise LifecycleError(400, 'Document failed the malware safety check')
-        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-        stored_name = f'preboarding_{row[0]}_{secrets.token_hex(8)}_{filename}'
-        stored_path = os.path.join(UPLOAD_FOLDER, stored_name)
-        with open(stored_path, 'wb') as handle:
-            handle.write(content)
+        try:
+            content_type = document_security.validate_document_upload(
+                filename, doc_type, content, uploaded.mimetype
+            )
+        except document_security.DocumentUploadError as exc:
+            raise LifecycleError(exc.status_code, str(exc)) from exc
         name, file_size = filename, size
         now = datetime.now()
+        doc_id = _next_generated_id(conn, 'documents', 'doc_id')
+        stored_key = object_storage.upload_document(
+            row[1], doc_id, filename, content, content_type
+        )
         conn.execute(
             "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            [_next_generated_id(conn, 'documents', 'doc_id'), row[1], name, doc_type,
-             stored_name if stored_path else None, file_size, now],
+            [doc_id, row[1], name, doc_type, stored_key, file_size, now],
         )
         conn.execute(
             "UPDATE onboarding_checklist SET status = 'Uploaded', uploaded_at = ?, reviewed_by = NULL, review_note = NULL, reviewed_at = NULL "
             "WHERE item_id = ?", [now, item[0]]
         )
     except LifecycleError as exc:
-        if stored_path and os.path.exists(stored_path):
-            os.remove(stored_path)
+        if stored_key:
+            try:
+                object_storage.delete_document_object(stored_key)
+            except object_storage.ObjectStorageError:
+                logger.exception("Could not remove rejected preboarding document object")
         return _lifecycle_error_payload(exc), exc.status_code
+    except object_storage.ObjectStorageError as exc:
+        logger.warning('preboarding object storage failed: %s', exc)
+        return jsonify({'error': 'Document storage unavailable'}), 503
     except Exception as exc:
-        if stored_path and os.path.exists(stored_path):
-            os.remove(stored_path)
+        if stored_key:
+            try:
+                object_storage.delete_document_object(stored_key)
+            except object_storage.ObjectStorageError:
+                logger.exception("Could not remove failed preboarding document object")
         logger.warning('preboarding upload failed: %s', exc)
         return jsonify({'error': 'Failed to store document'}), 500
     finally:
@@ -9278,37 +9271,44 @@ def upload_document():
     safe_name = secure_filename(f.filename)
     if not safe_name:
         return jsonify({'error': 'Invalid filename'}), 400
-    extension = safe_name.rsplit('.', 1)[-1].lower() if '.' in safe_name else ''
-    if extension not in ('pdf', 'jpg', 'jpeg', 'png'):
-        return jsonify({'error': 'Only PDF, JPG, JPEG and PNG documents are accepted'}), 400
+    limit = document_security.category_limit_bytes(category)
     f.stream.seek(0)
-    content = f.stream.read(app.config['MAX_CONTENT_LENGTH'] + 1)
-    if not content or len(content) > app.config['MAX_CONTENT_LENGTH']:
-        return jsonify({'error': 'Document is empty or too large'}), 413
-    signatures = {
-        'pdf': content.startswith(b'%PDF-'), 'jpg': content.startswith(b'\xff\xd8\xff'),
-        'jpeg': content.startswith(b'\xff\xd8\xff'), 'png': content.startswith(b'\x89PNG\r\n\x1a\n'),
-    }
-    if not signatures.get(extension) or b'EICAR-STANDARD-ANTIVIRUS-TEST-FILE' in content:
-        return jsonify({'error': 'Document failed content validation'}), 400
-    filename = f"{int(datetime.now().timestamp())}_{safe_name}"
+    content = f.stream.read(limit + 1)
+    try:
+        content_type = document_security.validate_document_upload(
+            safe_name, category, content, f.mimetype
+        )
+    except document_security.DocumentUploadError as exc:
+        return jsonify({'error': str(exc)}), exc.status_code
     fsize = len(content)
     conn = get_db()
     did = _next_generated_id(conn, 'documents', 'doc_id')
-    # Object key for S3/MinIO (FR-DOC-02: persisted to object storage)
-    object_key = f"documents/{emp_id}/{did}/{filename}"
-    conn.execute("INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                 [did, emp_id, safe_name, category, object_key, fsize, datetime.now()])
     conn.close()
 
-    # Upload to object storage
     try:
-        content_type = {'pdf': 'application/pdf', 'jpg': 'image/jpeg',
-                        'jpeg': 'image/jpeg', 'png': 'image/png'}.get(extension, 'application/octet-stream')
-        object_storage.upload_document(emp_id, did, filename, content, content_type)
+        object_key = object_storage.upload_document(
+            emp_id, did, safe_name, content, content_type
+        )
     except object_storage.ObjectStorageError as exc:
         logger.error("Document upload to object storage failed: %s", exc)
         return jsonify({'error': 'Document storage unavailable'}), 503
+
+    try:
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT INTO documents (doc_id, emp_id, name, category, file_path, file_size, uploaded_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [did, emp_id, safe_name, category, object_key, fsize, datetime.now()],
+            )
+        finally:
+            conn.close()
+    except Exception:
+        try:
+            object_storage.delete_document_object(object_key)
+        except object_storage.ObjectStorageError:
+            logger.exception("Could not remove orphaned document object %s", object_key)
+        raise
 
     audit_log(emp_id, 'DOCUMENT_UPLOAD', f'Uploaded document {did}', entity='documents', entity_id=did)
     return jsonify({'message': 'File uploaded', 'id': did, 'path': object_key}), 201
@@ -9327,7 +9327,7 @@ def download_document(did):
     original_name = row[2]
     # Generate presigned URL for object storage (FR-DOC-02)
     try:
-        presigned_url = object_storage.get_document_presigned_url(row[0], did, original_name)
+        presigned_url = object_storage.get_document_presigned_url(row[1], original_name)
     except object_storage.ObjectStorageError as exc:
         logger.error("Document presigned URL generation failed: %s", exc)
         return jsonify({'error': 'Document unavailable'}), 503
@@ -9357,7 +9357,7 @@ def delete_document(did):
     conn.close()
     # Delete from object storage (FR-DOC-02)
     try:
-        object_storage.delete_document_object(emp_id, did, name)
+        object_storage.delete_document_object(object_key)
     except object_storage.ObjectStorageError as exc:
         logger.error("Document delete from object storage failed: %s", exc)
         # Log but don't fail the request — the DB row is gone

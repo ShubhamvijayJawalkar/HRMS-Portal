@@ -124,12 +124,11 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'party with no statutory retention of their own - and a silent erase '
                   'of one was the gap the audit pass found. The create also used a '
                   'bare INSERT INTO dependents VALUES (...), now a named column list.'),
-    'FR-USR-12': ('L', 'C', 'PARTIAL', ('/api/upload',),
-                  'Employee uploads go through the same route as admin uploads, so '
-                  'one validation pipeline exists, and it does sniff the content. The '
-                  'file is now persisted to object storage (FR-DOC-02). Still missing: '
-                  'per-category size cap (one global cap applies) and a real malware '
-                  'scanner (only EICAR signature is checked).'),
+    'FR-USR-12': ('L', 'C', 'IMPLEMENTED', ('/api/upload',),
+                  'Employee uploads use the shared content/MIME, per-category size, '
+                  'and ClamAV validation pipeline before the file is stored under an '
+                  'opaque object key. Scanner absence, timeout, or errors refuse the '
+                  'upload rather than skipping inspection.'),
     'FR-USR-13': ('M', 'C', 'PARTIAL', ('/api/profile',),
                   'Profile read/write is self-scoped and routed through the PII '
                   'helper. The field allow-list is not a declared strict subset: an '
@@ -883,18 +882,20 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'mis-targeted add_holiday against v2.0 sixth column. It names its '
                   'columns now, and a test reads the canonical schema and fails if the '
                   'route list and the schema stop agreeing.'),
-    'FR-DOC-02': ('M', 'C', 'PARTIAL', ('/api/upload', '/api/documents/<int:did>/download', '/api/documents/<int:did>'),
-                  'Multipart upload, size cap, MIME type sniffed from content (not '
-                  'extension), malware scan (EICAR signature), and the file is '
-                  'persisted to object storage under a random key (FR-DOC-02). '
+    'FR-DOC-02': ('M', 'C', 'IMPLEMENTED', ('/api/upload', '/api/preboarding/<token>/documents/<doc_type>', '/api/documents/<int:did>/download', '/api/documents/<int:did>'),
+                  'Multipart and pre-boarding uploads validate the content signature '
+                  'and declared MIME, enforce category limits (Payslip/Offer Letter '
+                  '5 MiB; identity/bank/address 5-10 MiB; Education/Certification '
+                  '15 MiB; Other or unmapped categories 20 MiB), then scan with '
+                  'ClamAV INSTREAM before persistence. Scanner absence, timeout, or '
+                  'errors fail closed. Files use opaque random object keys; pre-boarding '
+                  'documents use the same private object storage and presigned download '
+                  'path as other documents. '
                   'Downloads return a 302 redirect to a presigned URL so the object '
                   'store is never reachable directly. Deletes also remove the object '
                   'from storage. Uses the same S3/MinIO configuration as FR-PAY-07. '
-                  'Moto mocks S3 in tests. The earlier note claiming "a renamed .exe '
-                  'passes" was incorrect - the content is validated against the '
-                  'claimed extension magic numbers (and EICAR rejected). Still missing: '
-                  'per-category size caps (one global cap applies) and a real malware '
-                  'scanner (only EICAR signature checked).'),
+                  'Moto mocks S3 in tests; a local ClamAV INSTREAM server test verifies '
+                  'the protocol, infected-file rejection, and missing-scanner failure.'),
     'FR-DOC-03': ('M', 'C', 'IMPLEMENTED', ('/api/documents/<int:did>/download', '/api/documents/<int:did>'),
                   'Owner or HR/Admin for download, Admin-only delete (the v1.0 hole is '
                   'closed), and the download now writes a DOCUMENT_DOWNLOAD audit row - a '

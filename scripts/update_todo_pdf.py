@@ -52,6 +52,22 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-12", "FR-DOC-02 / FR-USR-12 / FR-ONB-04 (Medium/Low): every "
+     "employee and pre-boarding document upload now shares content-signature and "
+     "declared-MIME checks, per-category caps, and a real ClamAV INSTREAM scan. "
+     "Caps are 5 MiB for payslips, salary slips, bank details and offer letters; "
+     "10 MiB for identity/address proofs; 15 MiB for education and certification; "
+     "20 MiB for Other and unlisted categories. The existing 50 MiB HTTP ceiling "
+     "remains. A missing, timed-out or erroring scanner refuses the upload; the "
+     "production Compose stack now includes a private ClamAV service and waits for "
+     "its health check. Pre-boarding files were still local despite the previous "
+     "matrix claim, so they now use the same private object store and presigned "
+     "download path. Main document keys are opaque 192-bit random values rather "
+     "than employee ids, sequence ids and filenames. Tests exercise the INSTREAM "
+     "framing, clean/infected/unavailable outcomes, all category caps, upload "
+     "refusal, random-key persistence and download lookup. Unit suite: 350 passed "
+     "/ 2 skipped; browser suite: 23/23; lint, compile and both Compose configs "
+     "passed."),
     ("2026-10-12", "FR-AUTH-04 (Medium): authenticated sessions now have an "
      "immutable 24-hour absolute deadline, checked before protected requests; "
      "expiry closes the attendance row, writes `SESSION_EXPIRED`, clears the "
@@ -156,8 +172,9 @@ UPDATE_LOG = [
      "inherits the completed document pipeline. Moto mocks S3 in unit/browser tests "
      "(no MinIO container needed). The earlier claim that 'a renamed .exe passes' "
      "was incorrect - the content is validated against the claimed extension magic "
-     "numbers and EICAR is rejected. Remaining open: per-category size caps and a "
-     "real malware scanner (only EICAR signature checked)."),
+     "numbers and EICAR is rejected. A later FR-DOC-02 slice completed the "
+     "per-category size policy, integrated fail-closed ClamAV scanning and moved "
+     "pre-boarding documents into the shared object-storage path."),
     ("2026-10-08", "FR-ATT-05 (High): 'one Pending Lunch approval per employee per "
      "shift date' is now enforced by a unique **partial** index on both schemas, not "
      "just an app check. The canonical schema already had `uq_pending_lunch_approval`; "
@@ -1492,10 +1509,6 @@ _NEXT_STEPS = {
     # FR-USR-10 is IMPLEMENTED (SRS progress endpoint /api/imports/<job_id> served
     # and advertised; error cap already 50)
     # ── Medium ─────────────────────────────────────────────────────────
-    # FR-DOC-02 is IMPLEMENTED (object storage + content validation + presigned URL)
-    # Remaining: per-category size cap, real malware scanner
-    'FR-DOC-02': 'Add a per-category size cap (one global cap applies) and swap the EICAR '
-                 'marker for a real malware scanner if one is available.',
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads + delete from object storage)
     'FR-EXP-01': 'Add admin CRUD for expense categories; today the create route validates '
                  'against a set nobody can change.',
@@ -1539,8 +1552,6 @@ _NEXT_STEPS = {
                  'audit row the SRS names.',
     'FR-USR-08': 'Add the metadata endpoint and the async CSV export, and render the last 50 '
                  'sessions on the admin user detail.',
-    'FR-USR-12': 'Inherits FR-DOC-02 — add a test that an oversized or non-image upload is '
-                 'refused here as well.',
     # ── Stretch ─────────────────────────────────────────────────────────
     'FR-ANL-02': 'Land FR-ANL-04 first, then store each computed score alongside the weights '
                  'that produced it.',
@@ -1583,10 +1594,10 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "346 passed, 2 skipped; includes independent 8-hour idle and 24-hour absolute session expiry assertions"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "350 passed, 2 skipped; includes ClamAV protocol/fail-closed and category-cap checks plus 8-hour idle and 24-hour absolute session expiry"),
     ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "Full unit suite not rerun with REDIS_URL; dedicated session-store suite reverified after the transaction retrofit"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "11 passed, including absolute-expiry Redis-key revocation; all skip cleanly with REDIS_URL unset"),
-    ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "23 passed after the session-timeout changes"),
+    ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "23 passed; includes the shared pre-boarding document upload flow"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "temporary PostgreSQL 17 public schema", "OK - 51 identity + 5 natural primary keys; sequences ahead of data"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "temporary PostgreSQL 17 public schema", "Expected head 0014_break_type_config; schema-only disposable database, not production data"),
     ("SRS extraction (scripts/extract_srs_spec.py --check)", "HRMS_SRS_v2.0.pdf", "113 requirements, no duplicates, srs_spec.py byte-identical to the PDF"),

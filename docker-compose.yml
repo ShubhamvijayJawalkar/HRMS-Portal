@@ -42,6 +42,16 @@ services:
       timeout: 5s
       retries: 12
 
+  clamav:
+    image: ${CLAMAV_IMAGE:-clamav/clamav:1.4}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping=1:5", "--no-summary", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
   # Expand/contract migrations run once before the web process starts.
   migrate:
     build:
@@ -105,6 +115,9 @@ services:
       S3_BUCKET: ${S3_BUCKET:-hrms}
       S3_REGION: ${S3_REGION:-us-east-1}
       S3_PRESIGNED_EXPIRY: ${S3_PRESIGNED_EXPIRY:-3600}
+      CLAMD_HOST: ${CLAMD_HOST:-clamav}
+      CLAMD_PORT: ${CLAMD_PORT:-3310}
+      CLAMD_TIMEOUT_SECONDS: ${CLAMD_TIMEOUT_SECONDS:-15}
       # Rate limits (SRS §10 / FR-AUTH-01). Per-employee once authenticated,
       # per-address while anonymous; 200/min is the shift-start burst target.
       DEFAULT_RATE_LIMIT: ${DEFAULT_RATE_LIMIT:-600 per minute}
@@ -118,6 +131,8 @@ services:
       migrate:
         condition: service_completed_successfully
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:

@@ -56,6 +56,7 @@ import pytest  # noqa: E402
 from playwright.sync_api import TimeoutError as PlaywrightTimeout  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
+import document_security  # noqa: E402
 from app import app, get_db  # noqa: E402
 
 BASE_URL = 'http://localhost:8787'
@@ -125,6 +126,8 @@ def _login(page, emp_id='EMP001', password='pass123'):
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
+    scanner = document_security.clamav_scanner.scan_bytes
+    document_security.clamav_scanner.scan_bytes = lambda _content: None
     # Threaded, unconditionally. This was conditional only because DuckDB
     # attaches a database file once per process, so two overlapping requests
     # raised "Unique file handle conflict" and the server had to be
@@ -138,6 +141,7 @@ def server():
     t.start()
     time.sleep(2)
     yield
+    document_security.clamav_scanner.scan_bytes = scanner
 
 @pytest.fixture(scope='session')
 def browser():

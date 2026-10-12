@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 from typing import BinaryIO, Optional
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -119,11 +120,17 @@ class _ObjectStorage:
                 except ClientError as create_exc:
                     raise ObjectStorageError(
                         f"Failed to create bucket {self._bucket}: {create_exc}"
-                    )
+                    ) from create_exc
+                except BotoCoreError as create_exc:
+                    raise ObjectStorageError(
+                        f"Failed to create bucket {self._bucket}: {create_exc}"
+                    ) from create_exc
             elif code == '403':
                 raise ObjectStorageError(f"Access denied to bucket {self._bucket}")
             else:
                 raise ObjectStorageError(f"Bucket check failed: {exc}")
+        except BotoCoreError as exc:
+            raise ObjectStorageError(f"Bucket check failed: {exc}") from exc
 
     def upload_bytes(
         self,
@@ -146,8 +153,8 @@ class _ObjectStorage:
             )
             logger.debug("Uploaded object: s3://%s/%s (%d bytes)", self._bucket, key, len(data))
             return key
-        except ClientError as exc:
-            raise ObjectStorageError(f"Upload failed: {exc}")
+        except BotoCoreError as exc:
+            raise ObjectStorageError(f"Upload failed: {exc}") from exc
 
     def upload_fileobj(
         self,
@@ -273,9 +280,11 @@ def get_payslip_presigned_url(run_id: int, emp_id: str, expires_in: int = 3600) 
     )
 
 
-def upload_document(emp_id: str, doc_id: int, filename: str, content: bytes, content_type: str) -> str:
-    """Upload a document to object storage. Returns the object key."""
-    key = f"documents/{emp_id}/{doc_id}/{filename}"
+def upload_document(
+    emp_id: str, doc_id: int, filename: str, content: bytes, content_type: str
+) -> str:
+    """Upload a document under an opaque random key and return that key."""
+    key = f"documents/{secrets.token_hex(24)}"
     return _storage.upload_bytes(
         key,
         content,
@@ -284,17 +293,17 @@ def upload_document(emp_id: str, doc_id: int, filename: str, content: bytes, con
     )
 
 
-def get_document_presigned_url(emp_id: str, doc_id: int, filename: str, expires_in: int = 3600) -> str:
+def get_document_presigned_url(
+    object_key: str, filename: str, expires_in: int = 3600
+) -> str:
     """Get a presigned URL for a document."""
-    key = f"documents/{emp_id}/{doc_id}/{filename}"
     return _storage.generate_presigned_url(
-        key,
+        object_key,
         expires_in=expires_in,
         response_content_disposition=f'attachment; filename="{filename}"',
     )
 
 
-def delete_document_object(emp_id: str, doc_id: int, filename: str) -> bool:
+def delete_document_object(object_key: str) -> bool:
     """Delete a document from object storage."""
-    key = f"documents/{emp_id}/{doc_id}/{filename}"
-    return _storage.delete_object(key)
+    return _storage.delete_object(object_key)

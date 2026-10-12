@@ -109,6 +109,7 @@ db_backend.reset_schema()
 import pyotp  # noqa: E402
 import pytest  # noqa: E402
 
+import document_security  # noqa: E402
 import lockout  # noqa: E402
 import mfa  # noqa: E402
 from app import (  # noqa: E402
@@ -166,9 +167,10 @@ def _attach_csrf(c):
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     app.config['TESTING'] = True
     app.config['SERVER_NAME'] = 'localhost'
+    monkeypatch.setattr(document_security.clamav_scanner, 'scan_bytes', lambda _content: None)
     with app.test_client() as c:
         _attach_csrf(c)
         with app.app_context():
@@ -7567,6 +7569,167 @@ def test_document_downloads_are_audited(client):
             conn.close()
 
 
+def test_document_size_policy_and_scanner_errors(monkeypatch):
+    assert document_security.category_limit_bytes('Payslip') == 5 * document_security.MIB
+    assert document_security.category_limit_bytes('ID Proof') == 10 * document_security.MIB
+    assert document_security.category_limit_bytes('Education') == 15 * document_security.MIB
+    assert document_security.category_limit_bytes('unmapped') == 20 * document_security.MIB
+
+    scanned = []
+    monkeypatch.setattr(
+        document_security.clamav_scanner, 'scan_bytes',
+        lambda content: scanned.append(content),
+    )
+    too_large = b'%PDF-' + b'x' * (5 * document_security.MIB)
+    with pytest.raises(document_security.DocumentUploadError) as exc:
+        document_security.validate_document_upload('payslip.pdf', 'Payslip', too_large)
+    assert exc.value.status_code == 413
+    assert scanned == []
+
+    with pytest.raises(document_security.DocumentUploadError) as exc:
+        document_security.validate_document_upload(
+            'id.pdf', 'ID Proof', b'%PDF-1.7\nvalid', 'image/png',
+        )
+    assert exc.value.status_code == 400
+    assert scanned == []
+
+    clean = b'%PDF-1.7\nvalid'
+    assert document_security.validate_document_upload(
+        'id.pdf', 'ID Proof', clean, 'application/pdf',
+    ) == 'application/pdf'
+    assert scanned == [clean]
+
+    def infected(_content):
+        raise document_security.clamav_scanner.MalwareDetected('test signature')
+
+    def unavailable(_content):
+        raise document_security.clamav_scanner.ScannerError('offline')
+
+    monkeypatch.setattr(document_security.clamav_scanner, 'scan_bytes', infected)
+    with pytest.raises(document_security.DocumentUploadError) as exc:
+        document_security.validate_document_upload('id.pdf', 'ID Proof', clean)
+    assert exc.value.status_code == 400
+
+    monkeypatch.setattr(document_security.clamav_scanner, 'scan_bytes', unavailable)
+    with pytest.raises(document_security.DocumentUploadError) as exc:
+        document_security.validate_document_upload('id.pdf', 'ID Proof', clean)
+    assert exc.value.status_code == 503
+
+
+def test_clamav_scanner_uses_instream_and_fails_closed(monkeypatch):
+    import socket
+    import struct
+    import threading
+
+    def serve(response, result):
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        result['port'] = listener.getsockname()[1]
+
+        def receive_exact(connection, size):
+            chunks = bytearray()
+            while len(chunks) < size:
+                chunks.extend(connection.recv(size - len(chunks)))
+            return bytes(chunks)
+
+        def run():
+            with listener:
+                connection, _ = listener.accept()
+                with connection:
+                    result['command'] = receive_exact(connection, len(b'zINSTREAM\0'))
+                    content = bytearray()
+                    while True:
+                        size = struct.unpack('!I', receive_exact(connection, 4))[0]
+                        if not size:
+                            break
+                        content.extend(receive_exact(connection, size))
+                    result['content'] = bytes(content)
+                    connection.sendall(response)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        return thread
+
+    import clamav_scanner
+
+    clean_result = {}
+    clean_server = serve(b'stream: OK\0', clean_result)
+    monkeypatch.setenv('CLAMD_HOST', '127.0.0.1')
+    monkeypatch.setenv('CLAMD_PORT', str(clean_result['port']))
+    monkeypatch.setenv('CLAMD_TIMEOUT_SECONDS', '2')
+    payload = b'%PDF-1.7\nscan me'
+    clamav_scanner.scan_bytes(payload)
+    clean_server.join(timeout=2)
+    assert clean_result['command'] == b'zINSTREAM\0'
+    assert clean_result['content'] == payload
+
+    infected_result = {}
+    infected_server = serve(b'stream: Eicar-Test-Signature FOUND\0', infected_result)
+    monkeypatch.setenv('CLAMD_PORT', str(infected_result['port']))
+    with pytest.raises(clamav_scanner.MalwareDetected):
+        clamav_scanner.scan_bytes(payload)
+    infected_server.join(timeout=2)
+
+    error_result = {}
+    error_server = serve(b'stream: ERROR\0', error_result)
+    monkeypatch.setenv('CLAMD_PORT', str(error_result['port']))
+    with pytest.raises(clamav_scanner.ScannerError):
+        clamav_scanner.scan_bytes(payload)
+    error_server.join(timeout=2)
+
+    monkeypatch.delenv('CLAMD_HOST')
+    with pytest.raises(clamav_scanner.ScannerError):
+        clamav_scanner.scan_bytes(payload)
+
+
+def test_document_upload_fails_closed_without_scanner(client, monkeypatch):
+    _set_admin_session(client, 99807)
+
+    def unavailable(_content):
+        raise document_security.clamav_scanner.ScannerError('offline')
+
+    monkeypatch.setattr(document_security.clamav_scanner, 'scan_bytes', unavailable)
+    response = client.post('/api/upload', data={
+        'file': (BytesIO(b'%PDF-1.7\nsample'), 'sample.pdf', 'application/pdf'),
+        'category': 'Payslip',
+    })
+    assert response.status_code == 503
+    assert 'scanner unavailable' in response.get_json()['error'].lower()
+
+
+def test_document_upload_stores_an_opaque_object_key(client):
+    import object_storage
+
+    _set_admin_session(client, 99808)
+    response = client.post('/api/upload', data={
+        'file': (BytesIO(b'%PDF-1.7\nsample payslip'), 'salary.pdf', 'application/pdf'),
+        'category': 'Payslip',
+    })
+    assert response.status_code == 201, response.get_json()
+    doc_id = response.get_json()['id']
+    conn = get_db()
+    row = conn.execute(
+        'SELECT emp_id, name, file_path FROM documents WHERE doc_id = ?', [doc_id],
+    ).fetchone()
+    conn.close()
+    try:
+        assert row[0] == 'EMP001'
+        assert row[2].startswith('documents/')
+        assert 'EMP001' not in row[2] and 'salary.pdf' not in row[2]
+        assert object_storage.get_storage().object_exists(row[2])
+        downloaded = client.get(
+            f'/api/documents/{doc_id}/download', follow_redirects=False,
+        )
+        assert downloaded.status_code == 302
+        assert row[2] in downloaded.location
+    finally:
+        object_storage.delete_document_object(row[2])
+        conn = get_db()
+        conn.execute('DELETE FROM documents WHERE doc_id = ?', [doc_id])
+        conn.close()
+
+
 # ── FR-LEA-05 cancellation: the route did not exist ──────────────────────
 
 def _future_leave(client, days=3, reason='trip'):
@@ -11606,6 +11769,8 @@ def test_ats_rejects_direct_hired_and_acceptance_creates_onboarding(client):
 
 
 def test_preboarding_token_upload_review_and_guarded_steps(client):
+    import object_storage
+
     _idem_session(client, 99101)
     candidate_id = _lifecycle_candidate(client, f'onb-{gen_id()}@example.com')
     offer_id = _lifecycle_offer(client, candidate_id, 'onboarding')
@@ -11618,6 +11783,16 @@ def test_preboarding_token_upload_review_and_guarded_steps(client):
         f'/api/preboarding/{token}/documents/ID%20Proof',
         data={'file': (BytesIO(b'%PDF-1.4\nprobe'), 'id.pdf', 'application/pdf')},
     ).status_code == 201
+    conn = get_db()
+    try:
+        file_path = conn.execute(
+            'SELECT file_path FROM documents WHERE emp_id = ? ORDER BY doc_id DESC LIMIT 1',
+            [accepted['emp_id']],
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert file_path.startswith('documents/')
+    assert object_storage.get_storage().object_exists(file_path)
     assert client.post(f'/api/preboarding/{token}/submit').status_code == 200
     conn = get_db()
     items = conn.execute('SELECT item_id, doc_type FROM onboarding_checklist WHERE workflow_id = ?', [accepted['workflow_id']]).fetchall()
