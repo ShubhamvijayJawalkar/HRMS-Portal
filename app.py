@@ -45,7 +45,9 @@ from security import (
 
 load_dotenv()
 
+import analytics  # noqa: E402  # materialised analytics snapshots (FR-ANL-01)
 import anonymise  # noqa: E402  # two-person anonymisation (FR-USR)
+import dashboard_stats as dashboard_stats_cache  # noqa: E402  # cached admin counters (FR-ATT-15)
 import delegations  # noqa: E402  # approval delegation for a date range (FR-LEA-08a)
 import expenses  # noqa: E402  # expense claim state machine (FR-EXP-03)
 import goals  # noqa: E402  # goal ownership + rating rules (FR-PERF-01)
@@ -261,7 +263,7 @@ STARTED = False
 # ══════════════════════════════════════════════════════════════════════
 
 def get_db():
-    """A connection to the PostgreSQL backend.
+    """A PostgreSQL connection, request-scoped inside mutating requests.
 
     DuckDB was the original runtime and was removed at the Phase-6 decommission,
     so this no longer branches. What the branch *was* hiding is worth recording:
@@ -272,7 +274,9 @@ def get_db():
     a file only once per process, so a concurrent second connect raised
     "Unique file handle conflict" — which is why the browser suite had to run the
     dev server single-threaded on that backend. PostgreSQL has no such
-    constraint, so the suite is threaded again.
+    constraint, so the suite is threaded again. Outside a request transaction
+    this returns a fresh autocommit connection; within one it returns a
+    savepoint scope on the request's shared transaction.
     """
     import db_backend
     return db_backend.connect()
@@ -676,9 +680,33 @@ def init_db():
         CREATE TABLE IF NOT EXISTS break_types (
             break_type VARCHAR PRIMARY KEY,
             daily_limit_minutes INTEGER,
-            description VARCHAR
+            description VARCHAR,
+            location VARCHAR,
+            requires_approval INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    for column, definition in (
+        ('location', 'VARCHAR'),
+        ('requires_approval', 'INTEGER NOT NULL DEFAULT 0'),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE break_types ADD COLUMN {column} {definition}")
+        except Exception:
+            pass
+    if _is_public_target_schema():
+        conn.execute(
+            "UPDATE break_types SET requires_approval = TRUE "
+            "WHERE LOWER(break_type) = 'lunch' AND requires_approval = FALSE"
+        )
+    else:
+        conn.execute(
+            "UPDATE break_types SET requires_approval = 1 "
+            "WHERE LOWER(break_type) = 'lunch' AND requires_approval = 0"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_break_types_name_ci "
+            "ON break_types (LOWER(break_type))"
+        )
 
     # ── Break Approvals ───────────────────────────────────────────
     conn.execute('''
@@ -731,6 +759,13 @@ def init_db():
             FOREIGN KEY (break_type) REFERENCES break_types(break_type)
         )
     ''')
+    # Mirror the canonical partial index so a concurrent start cannot leave two
+    # active breaks for one employee on the compatibility schema.
+    if not _is_public_target_schema():
+        conn.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_one_active_break
+                ON breaks (emp_id) WHERE status = 'Active'
+        ''')
 
     # ── Audit Log (new) ────────────────────────────────────────────
     conn.execute('''
@@ -1629,6 +1664,18 @@ def init_db():
         )
     ''')
 
+    # ── Materialised analytics snapshots (FR-ANL-01) ──────────────
+    # The compatibility shape. v2.0 `public` owns this table with a JSONB
+    # payload via Alembic `0013_analytics_snapshots`, so
+    # `CREATE TABLE IF NOT EXISTS` is a no-op there.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS analytics_snapshots (
+            metric VARCHAR(64) PRIMARY KEY,
+            payload TEXT,
+            computed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # ── Seed Data ──────────────────────────────────────────────────
     pwd_hash = hash_password('pass123')
     result = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -1720,10 +1767,12 @@ def init_db():
     result = conn.execute("SELECT COUNT(*) FROM break_types").fetchone()[0]
     if result == 0:
         conn.executemany(
-            "INSERT INTO break_types VALUES (?, ?, ?)",
-            [('Tea', 15, 'Tea Break - 15 minutes'),
-             ('Lunch', 60, 'Lunch Break - 1 hour'),
-             ('Personal', 30, 'Personal Break - 30 minutes')]
+            "INSERT INTO break_types "
+            "(break_type, daily_limit_minutes, description, location, requires_approval) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [('Tea', 15, 'Tea Break - 15 minutes', None, 0),
+             ('Lunch', 60, 'Lunch Break - 1 hour', None, 1),
+             ('Personal', 30, 'Personal Break - 30 minutes', None, 0)]
         )
 
     # ── Seed Leave Balance ─────────────────────────────────────────
@@ -2077,55 +2126,67 @@ if os.getenv('FLASK_ENV') == 'production':
 # ══════════════════════════════════════════════════════════════════════
 
 def audit_log(emp_id, action, details=None, *, actor=None, entity=None, entity_id=None, before=None, after=None):
-    """Write an audit trail row (v2.0 shape: actor/entity/entity_id/before/after/request_id).
+    """Write an audit row through the transactional outbox.
 
     CC-13: every request gets a trace ``request_id`` (honours an inbound
     ``X-Request-ID`` header so gateways can correlate; otherwise a fresh
     ``req-`` token is minted per request). ``actor`` defaults to the session
-    user's name. ``before``/``after`` accept dicts and are stored as JSON.
+    user's name. ``before``/``after`` accept dicts and are stored as JSON. For
+    mutating requests, the outbox event and materialized audit row share the
+    request transaction with the business write.
     """
-    conn = None
-    try:
-        conn = get_db()
+    in_request = has_request_context()
+    if actor is None:
+        actor = (session.get('name') or session.get('emp_id') or emp_id) if in_request else 'SYSTEM'
+    request_id = getattr(g, '_hrms_request_id', None) if in_request else None
+    if request_id is None:
+        request_id = (
+            request.headers.get('X-Request-ID') or f"req-{secrets.token_hex(8)}"
+        ) if in_request else f"job-{secrets.token_hex(8)}"
+        if in_request:
+            g._hrms_request_id = request_id
+
+    def _json(value):
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            return json.dumps(value, default=str)
+        return str(value) if not isinstance(value, str) else value
+
+    with outbox.transaction() as conn:
         log_id = (
             _next_generated_id(conn, 'audit_log', 'log_id')
             if _is_public_target_schema()
             else int(datetime.now().timestamp() * 1_000_000) % 2_147_483_647
         )
-        # Background jobs (scheduler threads) have no request context, so the
-        # actor and the request metadata must degrade instead of raising: an
-        # audit row that is silently dropped is worse than one without a
-        # request id, and `except` below used to swallow exactly that.
-        in_request = has_request_context()
-        if actor is None:
-            actor = (session.get('name') or session.get('emp_id') or emp_id) if in_request else 'SYSTEM'
-        request_id = getattr(g, '_hrms_request_id', None) if in_request else None
-        if request_id is None:
-            request_id = (
-                request.headers.get('X-Request-ID') or f"req-{secrets.token_hex(8)}"
-            ) if in_request else f"job-{secrets.token_hex(8)}"
-            g._hrms_request_id = request_id
+        audit_payload = {
+            'log_id': log_id,
+            'emp_id': emp_id,
+            'actor': actor,
+            'action': action,
+            'entity': entity,
+            'entity_id': entity_id,
+            'details': details,
+            'before': _json(before),
+            'after': _json(after),
+            'ip_address': request.remote_addr if in_request else None,
+            'request_id': request_id,
+            'created_at': datetime.now().isoformat(),
+        }
+        _persist_audit_payload(conn, audit_payload)
+        if in_request:
+            g.setdefault('_hrms_queued_audits', []).append(audit_payload)
+        return log_id
 
-        def _json(v):
-            if v is None:
-                return None
-            if isinstance(v, dict):
-                return json.dumps(v, default=str)
-            return str(v) if not isinstance(v, str) else v
 
-        conn.execute(
-            'INSERT INTO audit_log (log_id, emp_id, actor, action, entity, entity_id, details, '
-            '"before", "after", ip_address, request_id, created_at) '
-            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [log_id, emp_id, actor, action, entity, entity_id, details,
-             _json(before), _json(after),
-             request.remote_addr if in_request else None, request_id, datetime.now()]
-        )
-    except Exception as e:
-        logger.warning("audit_log failed: %s", e)
-    finally:
-        if conn:
-            conn.close()
+def _persist_audit_payload(conn, audit_payload):
+    event_id = outbox.enqueue(
+        conn, 'audit.recorded', 'audit_log',
+        str(audit_payload['log_id']), audit_payload,
+    )
+    if event_id is None:
+        raise RuntimeError('audit outbox is unavailable')
+    outbox.dispatch_event(conn, event_id)
 
 
 def parse_date(date_string, default=None):
@@ -2379,6 +2440,29 @@ def _attendance_employee_location(emp_id, target_date, conn):
         return None
 
 
+def _break_employee_location(emp_id, target_date, conn):
+    """Resolve the effective policy location on either schema shape."""
+    row = conn.execute(
+        "SELECT location FROM leave_policy_assignments "
+        "WHERE emp_id = ? AND effective_from <= ? "
+        "AND (effective_to IS NULL OR effective_to >= ?) "
+        "ORDER BY effective_from DESC LIMIT 1",
+        [emp_id, target_date, target_date],
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _break_type_for_employee(emp_id, break_type, conn, target_date=None):
+    """Resolve a configured break type only when its location applies."""
+    location = _break_employee_location(emp_id, target_date or datetime.now().date(), conn)
+    return conn.execute(
+        "SELECT daily_limit_minutes, requires_approval, location "
+        "FROM break_types WHERE break_type = ? "
+        "AND (location IS NULL OR location = '' OR LOWER(location) = LOWER(?))",
+        [break_type, location or ''],
+    ).fetchone()
+
+
 def _is_attendance_holiday(emp_id, target_date, conn):
     """National holidays, plus location-matched optional holidays with opt-in."""
     if _shift_model():
@@ -2626,6 +2710,8 @@ _ROUTE_MODULES = {
     'live_monitoring': 'breaks', 'get_break_summary': 'breaks',
     'get_disposed_breaks': 'breaks', 'admin_breaks': 'breaks',
     'admin_dispose_break': 'breaks', 'approve_break': 'breaks', 'reject_break': 'breaks',
+    'create_break_type': 'breaks', 'update_break_type': 'breaks',
+    'delete_break_type': 'breaks',
     # ATS
     'admin_jobs': 'jobs', 'jobs_api': 'jobs', 'close_job': 'jobs',
     'job_detail': 'jobs', 'recruitment_pipeline': 'jobs',
@@ -2655,6 +2741,7 @@ _ROUTE_MODULES = {
     'admin_analytics': 'analytics', 'analytics_headcount': 'analytics',
     'analytics_leave_trends': 'analytics', 'analytics_attrition': 'analytics',
     'analytics_expense_summary': 'analytics', 'analytics_performance': 'analytics',
+    'analytics_refresh': 'analytics',
     'audit_page': 'audit', 'get_audit_log': 'audit',
     'admin_reports': 'reports', 'get_reports': 'reports', 'export_report': 'reports',
     'export_report_pdf': 'reports', 'get_department_summary': 'reports',
@@ -5086,16 +5173,25 @@ def get_notifications():
 @app.route('/api/notifications/read', methods=['POST'])
 @login_required
 def mark_notifications_read():
-    # Deliberately unaudited, and one of only two exemptions on the FR-AUD-01
-    # known-gap list. It is a read receipt on the caller's **own** notifications: a
-    # self-service action with no forensic value, and auditing it would write a row
-    # per click for as long as the table exists. The SRS's "every mutating action"
-    # is not a reason to log a user clearing their own badge — a row here would be
-    # noise that makes the real entries harder to find, which is the opposite of what
-    # an audit trail is for.
+    emp_id = session['emp_id']
     conn = get_db()
-    conn.execute("UPDATE notifications SET is_read = 1 WHERE emp_id = ?", [session['emp_id']])
-    conn.close()
+    try:
+        unread = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE emp_id = ? AND is_read = 0",
+            [emp_id],
+        ).fetchone()[0]
+        updated = conn.execute(
+            "UPDATE notifications SET is_read = 1 WHERE emp_id = ? AND is_read = 0",
+            [emp_id],
+        )
+        changed = max(0, int(getattr(updated, 'rowcount', unread)))
+    finally:
+        conn.close()
+    audit_log(
+        emp_id, 'NOTIFICATIONS_READ', f'Marked {changed} notification(s) read',
+        entity='notifications', entity_id=emp_id,
+        before={'unread': unread}, after={'unread': max(0, unread - changed)},
+    )
     return jsonify({'message': 'Marked read'}), 200
 
 
@@ -5674,6 +5770,75 @@ def run_import_dispatch():
         return imports.dispatch_once()
     except Exception as exc:
         logger.warning('import dispatch failed: %s', exc)
+        return None
+
+
+def run_analytics_refresh():
+    """Scheduler job: materialise the analytics snapshots (FR-ANL-01)."""
+    conn = get_db()
+    try:
+        return analytics.refresh(conn)
+    except Exception as exc:
+        logger.warning('analytics refresh failed: %s', exc)
+        return None
+    finally:
+        conn.close()
+
+
+def _dashboard_stats_cache_key():
+    return dashboard_stats_cache.cache_key(os.getenv('APP_DB_SCHEMA', 'legacy'))
+
+
+def _compute_dashboard_stats():
+    conn = get_db()
+    try:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE role = 'Employee'"
+        ).fetchone()[0]
+        shift_starts = [
+            _get_shift_start_dt(emp_id, conn)
+            for (emp_id,) in conn.execute(
+                "SELECT emp_id FROM users WHERE role = 'Employee'"
+            ).fetchall()
+        ]
+        shift_date = min(shift_starts).date() if shift_starts else datetime.now().date()
+        logged_in_today = conn.execute(
+            "SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE session_date = ?",
+            [shift_date],
+        ).fetchone()[0]
+        on_break = conn.execute(
+            "SELECT COUNT(DISTINCT emp_id) FROM breaks "
+            "WHERE status = 'Active' AND break_date = ?",
+            [shift_date],
+        ).fetchone()[0]
+        blocked = conn.execute(
+            "SELECT COUNT(*) FROM users WHERE status = 'Blocked'"
+        ).fetchone()[0]
+        pending_leaves = conn.execute(
+            "SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'"
+        ).fetchone()[0]
+        return {
+            'total': total,
+            'logged_in_today': logged_in_today,
+            'on_break': on_break,
+            'blocked': blocked,
+            'pending_leaves': pending_leaves,
+            # Keep the originally shipped names for the current admin dashboard.
+            'total_employees': total,
+            'blocked_users': blocked,
+        }
+    finally:
+        conn.close()
+
+
+def run_dashboard_stats_refresh():
+    """Refresh the short-lived dashboard counters from the scheduler worker."""
+    try:
+        return dashboard_stats_cache.refresh(
+            _dashboard_stats_cache_key(), _compute_dashboard_stats
+        )
+    except Exception as exc:
+        logger.warning('dashboard stats refresh failed: %s', exc)
         return None
 
 
@@ -9467,11 +9632,13 @@ def admin_analytics():
 @app.route('/api/analytics/headcount')
 @admin_required
 def analytics_headcount():
+    # FR-ANL-01: served from the scheduled snapshot, carrying its "as of" time.
     conn = get_db()
-    total = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'Employee'").fetchone()[0]
-    dept = conn.execute("SELECT department, COUNT(*) FROM users WHERE role = 'Employee' AND department IS NOT NULL GROUP BY department ORDER BY COUNT(*) DESC").fetchall()
-    conn.close()
-    return jsonify({'total': total, 'by_department': [{'dept': r[0], 'count': r[1]} for r in dept]}), 200
+    try:
+        payload, as_of, source = analytics.serve('headcount', conn)
+    finally:
+        conn.close()
+    return jsonify({**payload, 'as_of': as_of.isoformat(), 'source': source}), 200
 
 
 @app.route('/api/v1/analytics/leave-trends')
@@ -9480,14 +9647,11 @@ def analytics_headcount():
 def analytics_leave_trends():
     months = request.args.get('months', 6, type=int)
     conn = get_db()
-    rows = conn.execute(f"""
-        SELECT strftime('%Y-%m', start_date) as month, leave_type, COUNT(*) as cnt
-        FROM leave_requests WHERE status = 'Approved'
-        AND start_date >= date('now', '-{months} months')
-        GROUP BY month, leave_type ORDER BY month
-    """).fetchall()
-    conn.close()
-    return jsonify([{'month': r[0], 'type': r[1], 'count': r[2]} for r in rows]), 200
+    try:
+        payload, as_of, source = analytics.serve('leave-trends', conn, months=months)
+    finally:
+        conn.close()
+    return jsonify({**payload, 'as_of': as_of.isoformat(), 'source': source}), 200
 
 
 @app.route('/api/v1/analytics/attrition-risk')
@@ -9515,11 +9679,11 @@ def analytics_attrition():
 @admin_required
 def analytics_expense_summary():
     conn = get_db()
-    total = conn.execute("SELECT COALESCE(SUM(amount),0) FROM expense_claims WHERE status IN ('Approved','Paid')").fetchone()[0]
-    by_cat = conn.execute("SELECT e.name, COALESCE(SUM(c.amount),0) FROM expense_claims c JOIN expense_categories e ON c.cat_id = e.cat_id WHERE c.status IN ('Approved','Paid') GROUP BY e.name ORDER BY SUM(c.amount) DESC").fetchall()
-    pending = conn.execute("SELECT COUNT(*) FROM expense_claims WHERE status = 'Pending'").fetchone()[0]
-    conn.close()
-    return jsonify({'total': float(total), 'by_category': [{'cat': r[0], 'amount': float(r[1])} for r in by_cat], 'pending_claims': pending}), 200
+    try:
+        payload, as_of, source = analytics.serve('expense-summary', conn)
+    finally:
+        conn.close()
+    return jsonify({**payload, 'as_of': as_of.isoformat(), 'source': source}), 200
 
 
 @app.route('/api/v1/analytics/performance-summary')
@@ -9527,15 +9691,35 @@ def analytics_expense_summary():
 @hr_or_admin_required
 def analytics_performance():
     conn = get_db()
-    avg_rating = conn.execute("SELECT COALESCE(AVG(overall_rating),0) FROM performance_reviews WHERE status = 'Submitted'").fetchone()[0]
-    by_dept = conn.execute("""
-        SELECT u.department, COALESCE(AVG(r.overall_rating),0)
-        FROM performance_reviews r JOIN users u ON r.emp_id = u.emp_id
-        WHERE r.status = 'Submitted' AND u.department IS NOT NULL
-        GROUP BY u.department ORDER BY AVG(r.overall_rating) DESC
-    """).fetchall()
-    conn.close()
-    return jsonify({'avg_rating': round(float(avg_rating), 2), 'by_department': [{'dept': r[0], 'avg': round(float(r[1]), 2)} for r in by_dept]}), 200
+    try:
+        payload, as_of, source = analytics.serve('performance-summary', conn)
+    finally:
+        conn.close()
+    return jsonify({**payload, 'as_of': as_of.isoformat(), 'source': source}), 200
+
+
+@app.route('/api/v1/analytics/refresh', methods=['POST'])
+@app.route('/api/analytics/refresh', methods=['POST'])
+@admin_required
+def analytics_refresh():
+    """Recompute every snapshot now (FR-ANL-01).
+
+    The same operation the scheduled job runs, exposed so an operator (or a test)
+    can warm the snapshots without waiting for the tick. Safe to run twice: the
+    upsert replaces each metric's stored payload.
+    """
+    conn = get_db()
+    try:
+        result = analytics.refresh(conn)
+    finally:
+        conn.close()
+    payload = {metric: when.isoformat() for metric, when in result.items()}
+    audit_log(
+        session['emp_id'], 'ANALYTICS_REFRESH',
+        'Refreshed analytics snapshots: ' + ', '.join(sorted(result)),
+        entity='analytics_snapshots', entity_id=None, after=payload,
+    )
+    return jsonify({'refreshed': payload}), 200
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -10756,52 +10940,66 @@ def start_break():
     emp_id = session['emp_id']
     if not break_type:
         return jsonify({'error': 'Break type required'}), 400
-    conn = get_db()
-    user = conn.execute("SELECT allow_breaks FROM users WHERE emp_id = ?", [emp_id]).fetchone()
-    if user and not user[0]:
-        conn.close()
-        return jsonify({'error': 'Breaks not allowed'}), 403
-    shift_start_dt = _get_shift_start_dt(emp_id, conn)
-    bt = conn.execute("SELECT daily_limit_minutes FROM break_types WHERE break_type = ?", [break_type]).fetchone()
-    if not bt:
-        conn.close()
-        return jsonify({'error': 'Invalid break type'}), 400
-    limit = bt[0]
-    if limit:
-        today_total = conn.execute(
-            "SELECT COALESCE(SUM(duration_minutes), 0) FROM breaks WHERE emp_id = ? AND break_type = ? AND start_time >= ? AND status = 'Completed'",
-            [emp_id, break_type, shift_start_dt]
-        ).fetchone()[0]
-        if today_total >= limit:
-            conn.close()
-            return jsonify({'error': f'Daily limit of {limit} min reached for {break_type}'}), 400
-    if break_type == 'Lunch':
-        pending = conn.execute(
-            "SELECT 1 FROM break_approvals WHERE emp_id = ? AND break_type = ? AND created_at >= ? AND status = 'Pending'",
-            [emp_id, break_type, shift_start_dt]
-        ).fetchone()
-        if not pending:
-            conn.close()
-            return jsonify({'error': 'Lunch break requires manager approval'}), 403
-    active = conn.execute(
-        "SELECT break_id FROM breaks WHERE emp_id = ? AND status = 'Active'", [emp_id]
-    ).fetchone()
-    if active:
-        conn.execute(
-            "UPDATE breaks SET end_time = ?, status = 'Completed' WHERE break_id = ?",
-            [datetime.now(), active[0]]
-        )
-        conn.commit()
-    break_id = _next_generated_id(conn, 'breaks', 'break_id')
-    now = datetime.now()
-    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
-    shift_date = _get_shift_date_for_dt(emp_id, now, conn)
-    conn.execute(
-        "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) "
-        "VALUES (?, ?, ?, ?, ?, 'Active')",
-        [break_id, emp_id, break_type, utc_now, shift_date],
-    )
-    conn.close()
+    import db_backend
+
+    try:
+        with db_backend.transaction() as conn:
+            user = conn.execute(
+                "SELECT allow_breaks FROM users WHERE emp_id = ?", [emp_id]
+            ).fetchone()
+            if user and not user[0]:
+                return jsonify({'error': 'Breaks not allowed'}), 403
+            shift_start_dt = _get_shift_start_dt(emp_id, conn)
+            bt = _break_type_for_employee(emp_id, break_type, conn)
+            if not bt:
+                return jsonify({'error': 'Invalid break type'}), 400
+            limit = bt[0]
+            if limit:
+                today_total = conn.execute(
+                    "SELECT COALESCE(SUM(duration_minutes), 0) FROM breaks "
+                    "WHERE emp_id = ? AND break_type = ? AND start_time >= ? "
+                    "AND status = 'Completed'",
+                    [emp_id, break_type, shift_start_dt],
+                ).fetchone()[0]
+                if today_total >= limit:
+                    return jsonify({
+                        'error': f'Daily limit of {limit} min reached for {break_type}',
+                    }), 400
+            if bt[1]:
+                approved = conn.execute(
+                    "SELECT 1 FROM break_approvals WHERE emp_id = ? "
+                    "AND break_type = ? AND created_at >= ? AND status = 'Approved'",
+                    [emp_id, break_type, shift_start_dt],
+                ).fetchone()
+                if not approved:
+                    return jsonify({
+                        'error': f'{break_type} break requires manager approval',
+                    }), 403
+            active = conn.execute(
+                "SELECT break_id FROM breaks WHERE emp_id = ? AND status = 'Active'",
+                [emp_id],
+            ).fetchone()
+            now = datetime.now()
+            if active:
+                conn.execute(
+                    "UPDATE breaks SET end_time = ?, status = 'Completed' "
+                    "WHERE break_id = ? AND status = 'Active'",
+                    [now, active[0]],
+                )
+            break_id = _next_generated_id(conn, 'breaks', 'break_id')
+            utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+            shift_date = _get_shift_date_for_dt(emp_id, now, conn)
+            conn.execute(
+                "INSERT INTO breaks "
+                "(break_id, emp_id, break_type, start_time, break_date, status) "
+                "VALUES (?, ?, ?, ?, ?, 'Active')",
+                [break_id, emp_id, break_type, utc_now, shift_date],
+            )
+    except Exception as exc:
+        if 'uq_one_active_break' in str(exc):
+            return jsonify({'error': 'An active break already exists'}), 409
+        raise
+
     # A break start is the origin of an attendance record that feeds payroll, and the
     # auto-end above silently closes a previous one, so both halves are recorded.
     audit_log(
@@ -10895,10 +11093,16 @@ def break_approvals_api():
 
     data = request.get_json(silent=True) or {}
     bt = data.get('break_type')
-    if bt != 'Lunch':
-        return jsonify({'error': 'Only Lunch breaks require approval'}), 400
+    if not isinstance(bt, str) or not bt.strip():
+        return jsonify({'error': 'Break type required'}), 400
+    bt = bt.strip()
     conn = get_db()
     try:
+        configured = _break_type_for_employee(emp_id, bt, conn)
+        if not configured:
+            return jsonify({'error': 'Invalid break type for your location'}), 400
+        if not configured[1]:
+            return jsonify({'error': f'{bt} breaks do not require approval'}), 400
         # The pre-check keeps the friendly 409 for the sequential case; the
         # partial unique index (FR-ATT-05) is what makes "one Pending per
         # employee per shift date" true under concurrency, so a race surfaces as
@@ -10929,7 +11133,7 @@ def break_approvals_api():
         after={'emp_id': emp_id, 'break_type': bt, 'break_date': str(shift_date),
                'status': 'Pending'},
     )
-    return jsonify({'message': 'Lunch break approval requested', 'approval_id': aid}), 201
+    return jsonify({'message': f'{bt} break approval requested', 'approval_id': aid}), 201
 
 
 def _review_break_approval(aid, decision):
@@ -11017,11 +11221,199 @@ def reject_break(aid):
 @login_required
 def get_break_types():
     conn = get_db()
-    types = conn.execute("SELECT break_type, daily_limit_minutes, description FROM break_types").fetchall()
-    conn.close()
+    try:
+        actor = policy.current_actor(conn)
+        if request.args.get('all') == '1':
+            if not policy.can_view_all(actor, 'breaks', conn=conn):
+                return jsonify({'error': 'Not authorized to view all break types'}), 403
+            rows = conn.execute(
+                "SELECT break_type, daily_limit_minutes, description, "
+                "requires_approval, location FROM break_types "
+                "ORDER BY CASE LOWER(break_type) WHEN 'tea' THEN 0 "
+                "WHEN 'lunch' THEN 1 WHEN 'personal' THEN 2 ELSE 3 END, "
+                "LOWER(break_type)"
+            ).fetchall()
+        else:
+            location = _break_employee_location(
+                session['emp_id'], datetime.now().date(), conn
+            )
+            rows = conn.execute(
+                "SELECT break_type, daily_limit_minutes, description, "
+                "requires_approval, location FROM break_types "
+                "WHERE location IS NULL OR location = '' OR LOWER(location) = LOWER(?) "
+                "ORDER BY CASE LOWER(break_type) WHEN 'tea' THEN 0 "
+                "WHEN 'lunch' THEN 1 WHEN 'personal' THEN 2 ELSE 3 END, "
+                "LOWER(break_type)",
+                [location or ''],
+            ).fetchall()
+    finally:
+        conn.close()
     return jsonify([{
-        'break_type': t[0], 'daily_limit_minutes': t[1], 'description': t[2]
-    } for t in types]), 200
+        'break_type': row[0], 'daily_limit_minutes': row[1],
+        'description': row[2], 'requires_approval': bool(row[3]),
+        'location': row[4] or None,
+    } for row in rows]), 200
+
+
+def _break_type_payload(data, current=None):
+    allowed = {'break_type', 'daily_limit_minutes', 'description', 'location', 'requires_approval'}
+    unknown = set(data) - allowed
+    if unknown:
+        return None, f'Unknown fields: {", ".join(sorted(unknown))}'
+    current = current or {}
+    name = data.get('break_type', current.get('break_type'))
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 64:
+        return None, 'break_type must be a non-empty string of at most 64 characters'
+    name = name.strip()
+    if current and name != current['break_type']:
+        return None, 'break_type cannot be changed; create a new type instead'
+
+    limit = data.get('daily_limit_minutes', current.get('daily_limit_minutes'))
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+        return None, 'daily_limit_minutes must be a positive integer or null'
+    description = data.get('description', current.get('description'))
+    if description is not None and not isinstance(description, str):
+        return None, 'description must be a string or null'
+
+    location = data.get('location', current.get('location'))
+    if location is not None:
+        if not isinstance(location, str) or len(location.strip()) > 100:
+            return None, 'location must be a string of at most 100 characters or null'
+        location = location.strip() or None
+
+    approval = data.get(
+        'requires_approval',
+        current.get('requires_approval', name.casefold() == 'lunch'),
+    )
+    if not isinstance(approval, bool):
+        return None, 'requires_approval must be a boolean'
+    return {
+        'break_type': name,
+        'daily_limit_minutes': limit,
+        'description': description,
+        'location': location,
+        'requires_approval': int(approval),
+    }, None
+
+
+@app.route('/api/break-types', methods=['POST'])
+@admin_required
+def create_break_type():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    values, error = _break_type_payload(data)
+    if error:
+        return jsonify({'error': error}), 400
+
+    conn = get_db()
+    try:
+        if conn.execute(
+            "SELECT 1 FROM break_types WHERE LOWER(break_type) = LOWER(?)",
+            [values['break_type']],
+        ).fetchone():
+            return jsonify({'error': 'Break type already exists'}), 409
+        conn.execute(
+            "INSERT INTO break_types "
+            "(break_type, daily_limit_minutes, description, location, requires_approval) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [values['break_type'], values['daily_limit_minutes'], values['description'],
+             values['location'], values['requires_approval']],
+        )
+    except Exception as exc:
+        if 'uq_break_types_name_ci' in str(exc) or 'unique' in str(exc).lower():
+            return jsonify({'error': 'Break type already exists'}), 409
+        raise
+    finally:
+        conn.close()
+
+    audit_log(
+        session['emp_id'], 'BREAK_TYPE_CREATE',
+        f'Created break type {values["break_type"]}',
+        entity='break_types', entity_id=None,
+        after={**values, 'requires_approval': bool(values['requires_approval'])},
+    )
+    return jsonify({'break_type': {**values, 'requires_approval': bool(values['requires_approval'])}}), 201
+
+
+@app.route('/api/break-types/<break_type>', methods=['PUT'])
+@admin_required
+def update_break_type(break_type):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    if 'break_type' in data:
+        return jsonify({'error': 'break_type cannot be changed; create a new type instead'}), 400
+
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT break_type, daily_limit_minutes, description, "
+            "requires_approval, location FROM break_types WHERE break_type = ?",
+            [break_type],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Break type not found'}), 404
+        current = {
+            'break_type': row[0], 'daily_limit_minutes': row[1],
+            'description': row[2], 'requires_approval': bool(row[3]),
+            'location': row[4],
+        }
+        values, error = _break_type_payload(data, current)
+        if error:
+            return jsonify({'error': error}), 400
+        conn.execute(
+            "UPDATE break_types SET daily_limit_minutes = ?, description = ?, "
+            "location = ?, requires_approval = ? WHERE break_type = ?",
+            [values['daily_limit_minutes'], values['description'], values['location'],
+             values['requires_approval'], break_type],
+        )
+    finally:
+        conn.close()
+
+    after = {**values, 'requires_approval': bool(values['requires_approval'])}
+    audit_log(
+        session['emp_id'], 'BREAK_TYPE_UPDATE',
+        f'Updated break type {break_type}',
+        entity='break_types', entity_id=None,
+        before=current, after=after,
+    )
+    return jsonify({'break_type': after}), 200
+
+
+@app.route('/api/break-types/<break_type>', methods=['DELETE'])
+@admin_required
+def delete_break_type(break_type):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT break_type, daily_limit_minutes, description, "
+            "requires_approval, location FROM break_types WHERE break_type = ?",
+            [break_type],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Break type not found'}), 404
+        referenced = conn.execute(
+            "SELECT 1 FROM breaks WHERE break_type = ? "
+            "UNION ALL SELECT 1 FROM break_approvals WHERE break_type = ? LIMIT 1",
+            [break_type, break_type],
+        ).fetchone()
+        if referenced:
+            return jsonify({'error': 'Break type is referenced by existing break records'}), 409
+        conn.execute("DELETE FROM break_types WHERE break_type = ?", [break_type])
+    finally:
+        conn.close()
+
+    before = {
+        'break_type': row[0], 'daily_limit_minutes': row[1], 'description': row[2],
+        'requires_approval': bool(row[3]), 'location': row[4],
+    }
+    audit_log(
+        session['emp_id'], 'BREAK_TYPE_DELETE',
+        f'Deleted break type {break_type}',
+        entity='break_types', entity_id=None, before=before,
+    )
+    return jsonify({'message': 'Break type deleted'}), 200
 
 
 @app.route('/api/login-hours')
@@ -11344,30 +11736,9 @@ def get_disposed_breaks():
 @admin_required
 
 def get_dashboard_stats():
-    conn = get_db()
-    now = datetime.now()
-    total = conn.execute("SELECT COUNT(*) FROM users WHERE role = 'Employee'").fetchone()[0]
-    all_employees = conn.execute("SELECT emp_id FROM users WHERE role = 'Employee'").fetchall()
-    shift_starts = []
-    for (eid,) in all_employees:
-        shift_starts.append(_get_shift_start_dt(eid, conn))
-    shift_date = min(shift_starts).date() if shift_starts else now.date()
-    logged_in_today = conn.execute(
-        "SELECT COUNT(DISTINCT emp_id) FROM user_sessions WHERE session_date = ?",
-        [shift_date]
-    ).fetchone()[0]
-    on_break = conn.execute(
-        "SELECT COUNT(DISTINCT emp_id) FROM breaks WHERE status = 'Active' AND break_date = ?",
-        [shift_date]
-    ).fetchone()[0]
-    blocked = conn.execute("SELECT COUNT(*) FROM users WHERE status = 'Blocked'").fetchone()[0]
-    pending_leaves = conn.execute("SELECT COUNT(*) FROM leave_requests WHERE status = 'Pending'").fetchone()[0]
-    conn.close()
-    return jsonify({
-        'total_employees': total, 'logged_in_today': logged_in_today,
-        'on_break': on_break, 'blocked_users': blocked,
-        'pending_leaves': pending_leaves
-    }), 200
+    return jsonify(dashboard_stats_cache.get(
+        _dashboard_stats_cache_key(), _compute_dashboard_stats,
+    )), 200
 
 
 @app.route('/api/admin/breaks')
@@ -12592,6 +12963,40 @@ def set_security_headers(response):
     return response
 
 
+class _RollbackWriteRequest(Exception):
+    """Sentinel used to roll back a failed HTTP write without masking its response."""
+
+
+@app.before_request
+def _begin_write_request_transaction():
+    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+        return None
+    manager = outbox.transaction()
+    manager.__enter__()
+    g._hrms_write_transaction = manager
+    return None
+
+
+@app.after_request
+def _finish_write_request_transaction(response):
+    manager = g.pop('_hrms_write_transaction', None)
+    if manager is None:
+        return response
+    audit_rows = g.pop('_hrms_queued_audits', [])
+    if response.status_code >= 400 and request.endpoint != 'login':
+        rollback = _RollbackWriteRequest()
+        try:
+            manager.__exit__(_RollbackWriteRequest, rollback, None)
+        except _RollbackWriteRequest:
+            pass
+        for audit_payload in audit_rows:
+            with outbox.transaction() as conn:
+                _persist_audit_payload(conn, audit_payload)
+    else:
+        manager.__exit__(None, None, None)
+    return response
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  CSRF TOKEN
 # ══════════════════════════════════════════════════════════════════════
@@ -12636,7 +13041,8 @@ def cleanup_expired_tokens():
     """
     try:
         with app.app_context():
-            _run_hourly_maintenance()
+            with outbox.transaction():
+                _run_hourly_maintenance()
     except Exception as exc:
         logger.warning('hourly maintenance failed: %s', exc)
 
@@ -12707,6 +13113,21 @@ def _register_scheduler_jobs(attendance_hour=2):
     scheduler.add_job(
         run_import_dispatch, 'interval', seconds=15,
         id='import-dispatch', replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # FR-ANL-01: materialise the dashboard aggregates so the analytics routes read
+    # a snapshot instead of recomputing four aggregates per request. MAX_AGE in
+    # analytics.py is 45 min, deliberately longer than this 30 min tick so a
+    # normally-running deployment always reads a snapshot.
+    scheduler.add_job(
+        run_analytics_refresh, 'interval', minutes=30,
+        id='analytics-refresh', replace_existing=True, coalesce=True, max_instances=1,
+    )
+    # FR-ATT-15: refresh these shared counters before the 15-second Redis TTL
+    # expires so repeated dashboard polls never recompute them per request.
+    scheduler.add_job(
+        run_dashboard_stats_refresh, 'interval', seconds=10,
+        id='dashboard-stats-refresh', replace_existing=True,
+        coalesce=True, max_instances=1,
     )
     scheduler.add_job(
         run_attendance_finalization,

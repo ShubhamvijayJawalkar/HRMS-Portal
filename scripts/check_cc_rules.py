@@ -32,6 +32,7 @@ NATURAL_KEYS = {
     ("users", "emp_id"),               # business key (employee id)
     ("break_types", "break_type"),     # business key (break type name)
     ("idempotency_keys", "key"),       # CC-07: caller-supplied idempotency key
+    ("analytics_snapshots", "metric"), # one materialised row per named metric
     ("alembic_version", "version_num"),# Alembic bookkeeping
 }
 

@@ -8,6 +8,8 @@ import textwrap
 from datetime import date, datetime, timedelta
 from io import BytesIO
 
+import psycopg
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # ── The SRS requirement ids, in SRS document order, with their stable serials ──
@@ -483,14 +485,17 @@ def test_cc01_surrogate_keys_are_identity():
         "WHERE t.relkind = 'r'"
     ).fetchall()
 
-    natural = {('users', 'emp_id'), ('break_types', 'break_type'), ('idempotency_keys', 'key')}
+    natural = {
+        ('users', 'emp_id'), ('break_types', 'break_type'),
+        ('idempotency_keys', 'key'), ('analytics_snapshots', 'metric'),
+    }
     framework = {'alembic_version'}
     bad = [
         (t, c) for t, c, ident in rows
         if ident not in ('a', 'd') and (t, c) not in natural and t not in framework
     ]
     assert not bad, f'non-identity surrogate PKs: {bad}'
-    assert len(rows) >= 49, f'expected the 49-table target schema, found {len(rows)} PKs'
+    assert len(rows) >= 49, f'expected at least 49 target primary keys, found {len(rows)}'
 
     # Explicit legacy IDs are still used by compatibility routes. The public
     # service must advance every identity sequence after such writes.
@@ -616,6 +621,72 @@ def test_outbox_enqueue_and_dispatch_delivers_with_side_effect():
     conn.close()
     assert row[0] == 'delivered'
     assert count >= 1  # handler side effect ran
+
+
+def test_audit_row_is_materialized_by_outbox_and_shares_business_transaction():
+    import outbox
+    from app import audit_log
+
+    marker = f'AUDIT_ATOMIC_{gen_id()}'
+    with outbox.transaction():
+        borrowed = get_db()
+        borrowed.execute(
+            "INSERT INTO notifications (notification_id, emp_id, type, message, created_at) "
+            "VALUES (?, 'EMP001', 'AUDIT_ATOMIC', ?, ?)",
+            [gen_id(), marker, datetime.now()],
+        )
+        borrowed.close()
+        log_id = audit_log(
+            'EMP001', marker, 'atomicity probe',
+            entity='notifications', entity_id=marker,
+        )
+
+    conn = get_db()
+    try:
+        audit = conn.execute(
+            "SELECT action, entity_id FROM audit_log WHERE log_id = ?", [log_id]
+        ).fetchone()
+        event = conn.execute(
+            "SELECT event_type, status FROM outbox_events "
+            "WHERE aggregate = 'audit_log' AND aggregate_id = ?",
+            [str(log_id)],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert audit == (marker, marker)
+    assert event == ('audit.recorded', 'delivered')
+
+    rolled_back = f'{marker}_ROLLBACK'
+    with pytest.raises(RuntimeError, match='rollback audit together'):
+        with outbox.transaction():
+            borrowed = get_db()
+            borrowed.execute(
+                "INSERT INTO notifications (notification_id, emp_id, type, message, created_at) "
+                "VALUES (?, 'EMP001', 'AUDIT_ATOMIC', ?, ?)",
+                [gen_id(), rolled_back, datetime.now()],
+            )
+            borrowed.close()
+            audit_log(
+                'EMP001', rolled_back, 'rollback probe',
+                entity='notifications', entity_id=rolled_back,
+            )
+            raise RuntimeError('rollback audit together')
+
+    conn = get_db()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE message = ?", [rolled_back]
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = ?", [rolled_back]
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM outbox_events WHERE aggregate = 'audit_log' "
+            "AND payload LIKE ?",
+            [f'%{rolled_back}%'],
+        ).fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_outbox_unknown_event_backoffs_then_dead_letters():
@@ -1630,8 +1701,9 @@ def test_regularization_uses_the_same_delegation_and_actor_rule(client):
         }).status_code == 201
 
         _login_as(client, 'EMP978', 'Employee', 99752)
+        request_date = _next_working_day(date.today().replace(day=1))
         made = client.post('/api/regularization', json={
-            'date': _working_day(21).isoformat(), 'reason': 'delegation test'})
+            'date': request_date.isoformat(), 'reason': 'delegation test'})
         assert made.status_code == 201, made.get_json()
         rid = made.get_json()['id']
 
@@ -1641,8 +1713,10 @@ def test_regularization_uses_the_same_delegation_and_actor_rule(client):
         assert [r['emp_id'] for r in queue.get_json()] == ['EMP978'], queue.get_json()
 
         # The filters FR-REG-01 names all parse and apply.
-        filtered = client.get(f'/api/regularization?status=Pending&month={date.today().month}'
-                              f'&year={date.today().year}&pending_my_approval=1')
+        filtered = client.get(
+            f'/api/regularization?status=Pending&month={request_date.month}'
+            f'&year={request_date.year}&pending_my_approval=1'
+        )
         assert filtered.status_code == 200
         assert [r['id'] for r in filtered.get_json()] == [rid]
 
@@ -2049,11 +2123,50 @@ def test_document_and_dependent_creation_is_audited(client):
     )
     assert recorded['queued'] is True, recorded
 
-    # Marking your own notifications read stays deliberately unaudited.
-    assert 'mark_notifications_read' in KNOWN_UNAUDITED_MUTATIONS, (
-        'the read-receipt exemption needs a reason in this list too, not just a '
-        'deliberate omission'
-    )
+def test_marking_notifications_read_is_audited(client):
+    from app import add_notification
+
+    _set_admin_session(client, 99163)
+    conn = get_db()
+    try:
+        previous_read_states = conn.execute(
+            "SELECT notification_id, is_read FROM notifications WHERE emp_id = 'EMP001'"
+        ).fetchall()
+    finally:
+        conn.close()
+    add_notification('EMP001', 'AUDIT_READ_PROBE', 'read-receipt audit probe')
+    try:
+        response = client.post('/api/notifications/read')
+        assert response.status_code == 200, response.get_json()
+        conn = get_db()
+        unread = conn.execute(
+            "SELECT COUNT(*) FROM notifications WHERE emp_id = 'EMP001' AND is_read = 0"
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT action, entity, entity_id, \"before\", \"after\" "
+            "FROM audit_log WHERE action = 'NOTIFICATIONS_READ' "
+            "ORDER BY log_id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert unread == 0
+        assert row is not None
+        assert row[:3] == ('NOTIFICATIONS_READ', 'notifications', 'EMP001')
+        assert json.loads(row[3])['unread'] >= 1
+        assert json.loads(row[4])['unread'] == 0
+    finally:
+        conn = get_db()
+        try:
+            for notification_id, is_read in previous_read_states:
+                conn.execute(
+                    "UPDATE notifications SET is_read = ? WHERE notification_id = ?",
+                    [is_read, notification_id],
+                )
+            conn.execute(
+                "DELETE FROM notifications WHERE emp_id = 'EMP001' "
+                "AND type = 'AUDIT_READ_PROBE'"
+            )
+        finally:
+            conn.close()
 
 
 def test_holiday_creation_is_audited(client):
@@ -3318,7 +3431,7 @@ def test_a_break_left_active_is_auto_closed_after_twelve_hours():
         'the SRS says 12 hours; this is the number the whole requirement turns on'
     )
 
-    _cleanup_user_contract_rows('EMP980')
+    _cleanup_user_contract_rows('EMP980', 'EMP981')
     ph = hash_password('pass123')
     conn = get_db()
     try:
@@ -3326,17 +3439,22 @@ def test_a_break_left_active_is_auto_closed_after_twelve_hours():
             "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
             "department) VALUES ('EMP980', 'Forgetful', 'emp980@company.com', 'Employee', "
             "?, 'Active', 1, 'MIS')", [ph])
+        conn.execute(
+            "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
+            "department) VALUES ('EMP981', 'Forgotten logout', 'emp981@company.com', "
+            "'Employee', ?, 'Active', 1, 'MIS')", [ph])
         stale = datetime.now() - timedelta(hours=13)
         fresh = datetime.now() - timedelta(hours=1)
-        # Allocated up front and incremented: the helper reads max(break_id), so calling
-        # it inside the loop before a commit returns the same value twice.
+        # Each employee can have only one active row (uq_one_active_break), so use
+        # separate employees to prove the stale row closes while a fresh one stays open.
         next_id = _next_test_break_id()
-        for when in (stale, fresh):
+        for offset, (emp_id, when) in enumerate(
+            (('EMP980', stale), ('EMP981', fresh))
+        ):
             conn.execute(
                 "INSERT INTO breaks (break_id, emp_id, break_type, start_time, "
-                "break_date, status) VALUES (?, 'EMP980', 'Lunch', ?, ?, 'Active')",
-                [next_id, when, when.date()])
-            next_id += 1
+                "break_date, status) VALUES (?, ?, 'Lunch', ?, ?, 'Active')",
+                [next_id + offset, emp_id, when, when.date()])
         conn.commit()
     finally:
         conn.close()
@@ -3348,11 +3466,11 @@ def test_a_break_left_active_is_auto_closed_after_twelve_hours():
     try:
         rows = conn.execute(
             "SELECT status, end_time, duration_minutes, ended_reason FROM breaks "
-            "WHERE emp_id = 'EMP980' ORDER BY start_time").fetchall()
+            "WHERE emp_id IN ('EMP980', 'EMP981') ORDER BY emp_id").fetchall()
     finally:
         conn.close()
     assert len(rows) == 2, rows
-    closed, still_open = rows[0], rows[1]
+    closed, still_open = rows
     assert closed[0] == 'Orphaned', closed
     assert closed[1] is not None, 'an orphaned break was closed with no end_time'
     # The canonical schema documents exactly this vocabulary on `ended_reason`
@@ -3362,7 +3480,7 @@ def test_a_break_left_active_is_auto_closed_after_twelve_hours():
     assert still_open[0] == 'Active', (
         f'a break only 1 hour old was auto-closed: {still_open}'
     )
-    _cleanup_user_contract_rows('EMP980')
+    _cleanup_user_contract_rows('EMP980', 'EMP981')
 
 
 def test_an_orphaned_break_is_never_recorded_as_twelve_hours():
@@ -3461,6 +3579,10 @@ def test_the_hourly_job_audits_and_notifies_an_auto_closed_break():
     conn = get_db()
     try:
         conn.execute(
+            "DELETE FROM audit_log WHERE action = 'BREAK_AUTO_CLOSED' "
+            "AND details LIKE '%EMP983%'"
+        )
+        conn.execute(
             "INSERT INTO users (emp_id, name, email, role, password, status, allow_login, "
             "department) VALUES ('EMP983', 'Audited Break', 'emp983@company.com', "
             "'Employee', ?, 'Active', 1, 'MIS')", [hash_password('pass123')])
@@ -3479,7 +3601,7 @@ def test_the_hourly_job_audits_and_notifies_an_auto_closed_break():
     try:
         audits = conn.execute(
             "SELECT actor, action, details, before, after FROM audit_log "
-            "WHERE action = 'BREAK_AUTO_CLOSED'").fetchall()
+            "WHERE action = 'BREAK_AUTO_CLOSED' AND details LIKE '%EMP983%'").fetchall()
         notes = conn.execute(
             "SELECT message FROM notifications WHERE emp_id = 'EMP983' "
             "AND type = 'BREAK_AUTO_CLOSED'").fetchall()
@@ -4949,29 +5071,11 @@ def test_one_shift_length_rule_serves_the_summary_and_payroll():
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
-#: action"; it is not true yet, and this list is the honest statement of the gap.
+#: action"; keep the empty set asserted so a future handler cannot silently evade it.
 #:
-#: This is a **ratchet**, not a target. It asserts the unaudited set is a *subset* of
-#: this list, so it fails if a new mutating route is added without an audit row, and
-#: it does not fail if one of these is fixed — fixing an entry means deleting it here,
-#: which shows up in the diff. Encoding the known gap is the point: the previous
-#: state had no test either way, and the absence of a test read as "nothing to
-#: check", which is how an unevidenced IMPLEMENTED row survived.
-KNOWN_UNAUDITED_MUTATIONS = {
-    # Every mutating handler now writes an audit row except one, and that one is a
-    # deliberate exemption rather than an oversight.
-    #
-    # `mark_notifications_read` is a read receipt on the caller's **own**
-    # notifications. Auditing it would write a row per click for the life of the
-    # table, and noise that makes the real entries harder to find is the opposite of
-    # what an audit trail is for. The SRS's "every mutating action" is a reason to
-    # record decisions about the business, not to log a user clearing their own badge.
-    #
-    # It is kept in this list rather than deleted so the exemption stays *visible*
-    # and reviewed: a name here is a claim someone has to re-justify, whereas an
-    # absence is indistinguishable from having been forgotten.
-    'mark_notifications_read',
-}
+#: This ratchet requires the unaudited set to remain empty. The read-receipt
+#: exemption is gone: it records one aggregate change without notification contents.
+KNOWN_UNAUDITED_MUTATIONS = set()
 
 
 def _mutating_handlers_without_an_audit_row():
@@ -10088,6 +10192,81 @@ def test_dashboard_stats_requires_admin(client):
         sess['session_id'] = 99996
     resp = client.get('/api/dashboard-stats')
     assert resp.status_code == 200
+    data = resp.get_json()
+    assert {
+        'total', 'logged_in_today', 'on_break', 'blocked', 'pending_leaves',
+    } <= data.keys()
+    assert data['total_employees'] == data['total']
+    assert data['blocked_users'] == data['blocked']
+
+
+def test_dashboard_stats_cache_is_shared_and_worker_refreshes(monkeypatch):
+    import dashboard_stats as cache
+
+    class FakeRedis:
+        def __init__(self):
+            self.values = {}
+            self.ttls = {}
+
+        def get(self, key):
+            return self.values.get(key)
+
+        def setex(self, key, ttl, value):
+            self.values[key] = value
+            self.ttls[key] = ttl
+
+    client = FakeRedis()
+    monkeypatch.setattr(cache, '_redis_client', lambda: client)
+    key = cache.cache_key(f'test-{int(datetime.now().timestamp() * 1_000_000)}')
+    calls = []
+
+    def compute():
+        calls.append(1)
+        return {'total': len(calls)}
+
+    first = cache.get(key, compute)
+    second = cache.get(key, compute)
+    assert first == second == {'total': 1}
+    assert len(calls) == 1
+    assert client.ttls[key] == 15 == cache.TTL_SECONDS
+
+    refreshed = cache.refresh(key, lambda: {'total': 2})
+    assert refreshed == {'total': 2}
+    assert cache.get(key, lambda: {'total': 3}) == {'total': 2}
+    assert len(calls) == 1
+    assert client.ttls[key] == 15
+
+
+def test_dashboard_stats_memory_fallback_observes_fixed_ttl(monkeypatch):
+    import dashboard_stats as cache
+
+    monkeypatch.setattr(cache, '_redis_client', lambda: None)
+    clock = [0.0]
+    monkeypatch.setattr(cache, '_monotonic', lambda: clock[0])
+    key = cache.cache_key(f'fallback-{int(datetime.now().timestamp() * 1_000_000)}')
+    calls = []
+
+    def compute():
+        calls.append(1)
+        return {'total': len(calls)}
+
+    assert cache.get(key, compute) == {'total': 1}
+    clock[0] = 10
+    assert cache.get(key, compute) == {'total': 1}
+    clock[0] = 16
+    assert cache.get(key, compute) == {'total': 2}
+    assert len(calls) == 2
+
+
+def test_dashboard_stats_refresh_worker_is_scheduled():
+    import app as app_module
+
+    app_module._register_scheduler_jobs(2)
+    job = app_module.scheduler.get_job('dashboard-stats-refresh')
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 10
+    assert job.max_instances == 1
+    assert job.coalesce is True
 
 
 def test_export_report(client):
@@ -10810,6 +10989,280 @@ def test_attendance_nightly_scheduler_job_registered():
     assert job is not None
     assert job.max_instances == 1
     assert job.coalesce is True
+
+
+def test_analytics_snapshots_refresh_and_serve(client):
+    import analytics
+
+    conn = get_db()
+    try:
+        refreshed = analytics.refresh(conn)
+        assert set(refreshed) == set(analytics.METRICS)
+
+        for metric in analytics.METRICS:
+            payload, as_of, source = analytics.serve(metric, conn)
+            assert as_of == refreshed[metric]
+            assert source == 'snapshot'
+            assert isinstance(payload, dict)
+
+        conn.execute(
+            "UPDATE analytics_snapshots SET computed_at = ? WHERE metric = ?",
+            [datetime.now() - timedelta(hours=1), 'headcount'],
+        )
+        payload, as_of, source = analytics.serve('headcount', conn)
+        assert source == 'live'
+        assert payload['total'] >= 0
+        assert as_of > datetime.now() - timedelta(minutes=1)
+    finally:
+        conn.execute("DELETE FROM analytics_snapshots")
+        conn.close()
+
+
+def test_analytics_manual_refresh_is_admin_only_and_scheduled(client):
+    import app as app_module
+
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+    response = client.post('/api/analytics/refresh')
+    assert response.status_code == 200
+    assert set(response.get_json()['refreshed']) == {
+        'headcount', 'leave-trends', 'expense-summary', 'performance-summary',
+    }
+    headcount = client.get('/api/analytics/headcount')
+    assert headcount.status_code == 200
+    assert headcount.get_json()['source'] == 'snapshot'
+    assert headcount.get_json()['as_of']
+
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP002'
+        sess['name'] = 'Employee'
+        sess['role'] = 'Employee'
+    assert client.post('/api/analytics/refresh').status_code == 403
+
+    app_module._register_scheduler_jobs(2)
+    job = app_module.scheduler.get_job('analytics-refresh')
+    assert job is not None
+    assert job.trigger.interval.total_seconds() == 30 * 60
+    assert job.max_instances == 1
+    assert job.coalesce is True
+
+
+def test_break_type_configuration_crud_location_and_approval(client):
+    from app import _next_generated_id, get_db
+
+    break_type = f'ProbeBreak{int(datetime.now().timestamp() * 1_000_000)}'
+    today = datetime.now().date()
+    assignment_id = None
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+
+    try:
+        defaults = client.get('/api/break-types?all=1')
+        assert defaults.status_code == 200
+        configured_defaults = defaults.get_json()
+        assert configured_defaults[0]['break_type'] == 'Tea'
+        lunch = next(item for item in configured_defaults if item['break_type'] == 'Lunch')
+        assert lunch['daily_limit_minutes'] == 60
+        assert lunch['requires_approval'] is True
+
+        created = client.post('/api/break-types', json={
+            'break_type': break_type,
+            'daily_limit_minutes': 20,
+            'description': 'FR-ATT-01 test type',
+            'location': 'Pune',
+            'requires_approval': True,
+        })
+        assert created.status_code == 201
+        assert created.get_json()['break_type']['requires_approval'] is True
+        assert client.post('/api/break-types', json={
+            'break_type': break_type.lower(),
+            'daily_limit_minutes': 20,
+        }).status_code == 409
+        assert client.post('/api/break-types', json={
+            'break_type': break_type + 'BadFlag',
+            'daily_limit_minutes': 20,
+            'requires_approval': 1,
+        }).status_code == 400
+
+        updated = client.put(f'/api/break-types/{break_type}', json={
+            'daily_limit_minutes': 25,
+        })
+        assert updated.status_code == 200
+        assert updated.get_json()['break_type']['daily_limit_minutes'] == 25
+        assert updated.get_json()['break_type']['requires_approval'] is True
+
+        conn = get_db()
+        try:
+            assignment_id = _next_generated_id(
+                conn, 'leave_policy_assignments', 'assignment_id'
+            )
+            conn.execute(
+                "INSERT INTO leave_policy_assignments "
+                "(assignment_id, emp_id, location, effective_from) VALUES (?, ?, ?, ?)",
+                [assignment_id, 'EMP002', 'Pune', today],
+            )
+        finally:
+            conn.close()
+
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP002'
+            sess['name'] = 'Employee'
+            sess['role'] = 'Employee'
+        assert client.post('/api/break-types', json={
+            'break_type': break_type + 'Unauthorized',
+            'daily_limit_minutes': 15,
+        }).status_code == 403
+        visible = client.get('/api/break-types').get_json()
+        assert any(item['break_type'] == break_type for item in visible)
+        assert client.get('/api/break-types?all=1').status_code == 403
+
+        request = client.post('/api/break-approvals', json={
+            'break_type': break_type,
+            'reason': 'FR-ATT-01 configured approval',
+        })
+        assert request.status_code == 201
+        approval_id = request.get_json()['approval_id']
+        assert client.post('/api/start-break', json={
+            'break_type': break_type,
+        }).status_code == 403
+
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE break_approvals SET status = 'Approved' WHERE approval_id = ?",
+                [approval_id],
+            )
+        finally:
+            conn.close()
+        assert client.post('/api/start-break', json={
+            'break_type': break_type,
+        }).status_code == 201
+
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP001'
+            sess['name'] = 'Admin'
+            sess['role'] = 'Admin'
+        assert client.delete(f'/api/break-types/{break_type}').status_code == 409
+
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE leave_policy_assignments SET location = 'Other' "
+                "WHERE assignment_id = ?",
+                [assignment_id],
+            )
+        finally:
+            conn.close()
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP002'
+            sess['name'] = 'Employee'
+            sess['role'] = 'Employee'
+        assert not any(
+            item['break_type'] == break_type
+            for item in client.get('/api/break-types').get_json()
+        )
+    finally:
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM breaks WHERE break_type = ?", [break_type])
+            conn.execute("DELETE FROM break_approvals WHERE break_type = ?", [break_type])
+            conn.execute("DELETE FROM break_types WHERE break_type = ?", [break_type])
+            if assignment_id is not None:
+                conn.execute(
+                    "DELETE FROM leave_policy_assignments WHERE assignment_id = ?",
+                    [assignment_id],
+                )
+            conn.execute(
+                "DELETE FROM audit_log WHERE details LIKE ?",
+                [f'%{break_type}%'],
+            )
+        finally:
+            conn.close()
+
+
+def test_start_break_rolls_back_auto_end_and_uses_active_break_index(
+    client, monkeypatch,
+):
+    import app as app_module
+    from app import _next_generated_id, get_db
+
+    break_type = f'AtomicBreak{int(datetime.now().timestamp() * 1_000_000)}'
+    active_id = None
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+    try:
+        created = client.post('/api/break-types', json={
+            'break_type': break_type,
+            'daily_limit_minutes': 90,
+            'requires_approval': False,
+        })
+        assert created.status_code == 201
+
+        conn = get_db()
+        try:
+            active_id = _next_generated_id(conn, 'breaks', 'break_id')
+            conn.execute(
+                "INSERT INTO breaks "
+                "(break_id, emp_id, break_type, start_time, break_date, status) "
+                "VALUES (?, 'EMP002', ?, ?, ?, 'Active')",
+                [active_id, break_type, datetime.now() - timedelta(minutes=5),
+                 datetime.now().date()],
+            )
+        finally:
+            conn.close()
+
+        original_next_id = app_module._next_generated_id
+        monkeypatch.setattr(
+            app_module,
+            '_next_generated_id',
+            lambda db, table, column: (
+                active_id if table == 'breaks'
+                else original_next_id(db, table, column)
+            ),
+        )
+        with client.session_transaction() as sess:
+            sess['emp_id'] = 'EMP002'
+            sess['name'] = 'Employee'
+            sess['role'] = 'Employee'
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            client.post('/api/start-break', json={'break_type': break_type})
+
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT status, end_time FROM breaks WHERE break_id = ?", [active_id]
+            ).fetchone()
+            assert row == ('Active', None)
+            with pytest.raises(psycopg.errors.UniqueViolation) as duplicate:
+                conn.execute(
+                    "INSERT INTO breaks "
+                    "(break_id, emp_id, break_type, start_time, break_date, status) "
+                    "VALUES (?, 'EMP002', ?, ?, ?, 'Active')",
+                    [active_id + 1, break_type, datetime.now(), datetime.now().date()],
+                )
+            assert 'uq_one_active_break' in str(duplicate.value)
+        finally:
+            conn.close()
+    finally:
+        conn = get_db()
+        try:
+            if active_id is not None:
+                conn.execute("DELETE FROM breaks WHERE break_id = ?", [active_id])
+                conn.execute(
+                    "DELETE FROM breaks WHERE emp_id = 'EMP002' "
+                    "AND break_type = ?",
+                    [break_type],
+                )
+            conn.execute("DELETE FROM break_types WHERE break_type = ?", [break_type])
+            conn.execute("DELETE FROM audit_log WHERE details LIKE ?", [f'%{break_type}%'])
+        finally:
+            conn.close()
 
 
 # ── Service-layer rewrite inc 2 (shifts: users.columns ⇄ shift_assignments) ──

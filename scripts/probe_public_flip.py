@@ -638,6 +638,111 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         out["login-EMP001"] = ("FAIL", f"login status={lc_a}")
         return out
     out["login-EMP001"] = ("OK", "status=200")
+
+    def break_type_configuration():
+        name = f"ProbeBreak{os.getpid()}"
+        try:
+            created = _post(cl_a, tok_a, "/api/break-types", {
+                "break_type": name,
+                "daily_limit_minutes": 18,
+                "description": "public configuration probe",
+                "location": "Probe Location",
+                "requires_approval": True,
+            })
+            if created.status_code != 201:
+                return 409, f"create status={created.status_code}"
+            with psycopg.connect(pg_dsn) as pc:
+                audit = pc.execute(
+                    "SELECT o.status, a.action FROM outbox_events o "
+                    "JOIN audit_log a ON a.log_id::text = o.aggregate_id "
+                    "WHERE o.event_type = 'audit.recorded' AND a.action = %s "
+                    "AND a.details LIKE %s ORDER BY a.log_id DESC LIMIT 1",
+                    ("BREAK_TYPE_CREATE", f"%{name}%"),
+                ).fetchone()
+            if audit != ("delivered", "BREAK_TYPE_CREATE"):
+                return 409, f"audit record was not materialised by the outbox: {audit}"
+            updated = cl_a.put(
+                f"/api/break-types/{name}",
+                json={"daily_limit_minutes": 24},
+                headers={"X-CSRF-Token": tok_a},
+            )
+            body = updated.get_json() or {}
+            config = body.get("break_type", {})
+            if (updated.status_code != 200
+                    or config.get("daily_limit_minutes") != 24
+                    or config.get("requires_approval") is not True
+                    or config.get("location") != "Probe Location"):
+                return 409, f"update status={updated.status_code}, config={config}"
+            with psycopg.connect(pg_dsn) as pc:
+                stored = pc.execute(
+                    "SELECT daily_limit_minutes, requires_approval, location "
+                    "FROM break_types WHERE break_type = %s",
+                    (name,),
+                ).fetchone()
+            if stored != (24, True, "Probe Location"):
+                return 409, f"canonical configuration row={stored}"
+            deleted = cl_a.delete(
+                f"/api/break-types/{name}",
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if deleted.status_code != 200:
+                return 409, f"delete status={deleted.status_code}"
+            return 200
+        finally:
+            with psycopg.connect(pg_dsn) as pc:
+                pc.execute(
+                    "DELETE FROM breaks WHERE break_type = %s",
+                    (name,),
+                )
+                pc.execute(
+                    "DELETE FROM break_approvals WHERE break_type = %s",
+                    (name,),
+                )
+                pc.execute("DELETE FROM break_types WHERE break_type = %s", (name,))
+    run("break-types(location + approval config)", break_type_configuration)
+
+    def analytics_snapshots():
+        expected = {
+            "headcount", "leave-trends", "expense-summary", "performance-summary",
+        }
+        response = _post(cl_a, tok_a, "/api/analytics/refresh")
+        body = response.get_json() or {}
+        if response.status_code != 200 or set(body.get("refreshed", {})) != expected:
+            return 409, f"refresh status={response.status_code}, metrics={sorted(body.get('refreshed', {}))}"
+        snapshot = cl_a.get("/api/analytics/headcount")
+        served = snapshot.get_json() or {}
+        if snapshot.status_code != 200 or served.get("source") != "snapshot" or not served.get("as_of"):
+            return 409, "headcount was not served from a timestamped snapshot"
+        with psycopg.connect(pg_dsn) as pc:
+            rows = pc.execute(
+                "SELECT metric, payload IS NOT NULL, computed_at IS NOT NULL "
+                "FROM analytics_snapshots"
+            ).fetchall()
+        if {r[0] for r in rows} != expected or not all(r[1] and r[2] for r in rows):
+            return 409, "canonical JSONB snapshot rows are missing or incomplete"
+        return 200
+    run("analytics(scheduled snapshots)", analytics_snapshots)
+
+    def dashboard_stats_cache():
+        from app import app as flask_app
+        from app import run_dashboard_stats_refresh
+
+        with flask_app.app_context():
+            refreshed = run_dashboard_stats_refresh()
+        response = cl_a.get("/api/dashboard-stats")
+        payload = response.get_json() or {}
+        stable = {
+            "total", "logged_in_today", "on_break", "blocked", "pending_leaves",
+        }
+        if response.status_code != 200 or not stable <= payload.keys():
+            return 409, f"status={response.status_code}, missing={sorted(stable - payload.keys())}"
+        if payload != refreshed:
+            return 409, "dashboard route did not serve the worker-refreshed cache value"
+        if payload.get("total_employees") != payload["total"] or payload.get("blocked_users") != payload["blocked"]:
+            return 409, "legacy dashboard aliases do not match the stable SRS keys"
+        return 200
+    run("dashboard-stats(cache worker + stable keys)", dashboard_stats_cache)
+
     cl_f, tok_f, lc_f = _login(app_mod, dsn, "EMP003")
     if lc_f != 200:
         out["login-EMP003"] = ("FAIL", f"login status={lc_f}")

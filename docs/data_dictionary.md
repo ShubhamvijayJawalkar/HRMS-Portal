@@ -198,13 +198,15 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 - Retention class: **transactional**
 - Primary key: `break_type`
-- Unique indexes: none
+- Unique indexes: `uq_break_types_name_ci` ((lower(break_type)))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
 | `break_type` | character varying | N | `` |  |
 | `daily_limit_minutes` | integer | Y | `` |  |
 | `description` | character varying | Y | `` |  |
+| `location` | character varying | Y | `` |  |
+| `requires_approval` | boolean | N | `false` |  |
 
 ## `breaks`
 

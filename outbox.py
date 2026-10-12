@@ -3,11 +3,15 @@
 Business writes that have downstream side effects (payroll finalisation,
 offer issuance/acceptance, onboarding credentials) enqueue a ``pending``
 ``outbox_events`` row on the *same* connection, inside an explicit transaction,
-so the
-business change and its event commit atomically (see ``outbox.transaction``).
+so the business change and its event commit atomically (see
+``outbox.transaction``). Mutating HTTP requests provide that transaction scope
+for existing autocommit-style routes, and audit rows are materialized from an
+``audit.recorded`` event in the same transaction.
 A dispatcher later reads due ``pending`` events, applies the registered
 handler, and marks them ``delivered`` — or, on failure, advances ``attempts``
 with exponential backoff and finally ``dead_letter`` after ``MAX_ATTEMPTS``.
+Audit records are the synchronous exception: their outbox handler materializes
+the row within the business transaction, keeping existing reads immediate.
 
 Backend notes
 -------------
@@ -72,7 +76,7 @@ def enqueue(conn, event_type: str, aggregate=None, aggregate_id=None, payload=No
         if _is_public_target_schema() else gen_id()
     )
     now = datetime.now()
-    payload_json = json.dumps(payload) if payload is not None else None
+    payload_json = json.dumps(payload, default=str) if payload is not None else None
     conn.execute(
         "INSERT INTO outbox_events (event_id, event_type, aggregate, aggregate_id, payload, status, next_attempt_at, created_at) "
         "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
@@ -356,6 +360,33 @@ def _handle_notification_email(conn, row) -> bool:
         return False
 
 
+def _handle_audit_recorded(conn, row) -> bool:
+    """Materialise an audit row from its transactional outbox event."""
+    payload = _payload(row) or {}
+    required = {
+        "log_id", "emp_id", "actor", "action", "entity", "entity_id",
+        "details", "before", "after", "ip_address", "request_id", "created_at",
+    }
+    if not required <= payload.keys():
+        raise ValueError(
+            f"audit.recorded payload is missing fields: {sorted(required - payload.keys())}"
+        )
+    created_at = datetime.fromisoformat(payload["created_at"])
+    conn.execute(
+        'INSERT INTO audit_log (log_id, emp_id, actor, action, entity, entity_id, details, '
+        '"before", "after", ip_address, request_id, created_at) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+        'ON CONFLICT (log_id) DO NOTHING',
+        [
+            payload["log_id"], payload["emp_id"], payload["actor"], payload["action"],
+            payload["entity"], payload["entity_id"], payload["details"],
+            payload["before"], payload["after"], payload["ip_address"],
+            payload["request_id"], created_at,
+        ],
+    )
+    return True
+
+
 HANDLERS = {
     'payroll.finalized': _handle_payroll_finalized,
     'offer.created': _handle_offer_created,
@@ -364,6 +395,7 @@ HANDLERS = {
     'credentials.issued': _handle_credentials_issued,
     'password.reset': _handle_password_reset,
     'notification.email': _handle_notification_email,
+    'audit.recorded': _handle_audit_recorded,
 }
 
 
@@ -403,7 +435,9 @@ def dispatch_once(conn, limit: int = 20, now=None) -> dict:
                 logger.warning('outbox handler %s raised: %s', event_type, exc)
         if ok:
             conn.execute(
-                "UPDATE outbox_events SET status = 'delivered', delivered_at = ? WHERE event_id = ?",
+                "UPDATE outbox_events SET status = 'delivered', delivered_at = ?, "
+                "payload = CASE WHEN event_type = 'audit.recorded' THEN NULL ELSE payload END "
+                "WHERE event_id = ?",
                 [datetime.now(), event_id],
             )
             stats['delivered'] += 1
@@ -422,6 +456,35 @@ def dispatch_once(conn, limit: int = 20, now=None) -> dict:
             )
             stats['failed'] += 1
     return stats
+
+
+def dispatch_event(conn, event_id: int) -> None:
+    """Process one newly enqueued event inside the caller's transaction.
+
+    Audit rows use this synchronous path so the audit table remains immediately
+    readable while both the outbox event and business write commit atomically.
+    Any failure propagates and causes the enclosing transaction to roll back.
+    """
+    row = conn.execute(
+        "SELECT event_id, event_type, aggregate, aggregate_id, payload, attempts, status "
+        "FROM outbox_events WHERE event_id = ?",
+        [event_id],
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"outbox event {event_id} disappeared before dispatch")
+    if row[6] == "delivered":
+        return
+    handler = HANDLERS.get(row[1])
+    if handler is None:
+        raise RuntimeError(f"outbox event {event_id} has no handler for {row[1]!r}")
+    if not handler(conn, row[:6]):
+        raise RuntimeError(f"outbox handler {row[1]!r} failed for event {event_id}")
+    conn.execute(
+        "UPDATE outbox_events SET status = 'delivered', delivered_at = ?, "
+        "payload = CASE WHEN event_type = 'audit.recorded' THEN NULL ELSE payload END "
+        "WHERE event_id = ?",
+        [datetime.now(), event_id],
+    )
 
 
 def run_dispatch(limit: int = 50) -> dict:

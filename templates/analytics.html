@@ -109,7 +109,8 @@ async function loadHeadcount() {
 }
 async function loadLeaveTrends() {
     const r = await fetch('/api/analytics/leave-trends');
-    const data = await r.json();
+    const resp = await r.json();
+    const data = Array.isArray(resp) ? resp : (resp.trends || []);
     const months = [...new Set(data.map(x => x.month))].sort();
     const types = [...new Set(data.map(x => x.type))];
     const datasets = types.map((t, i) => ({

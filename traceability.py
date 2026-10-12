@@ -316,17 +316,22 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'duration is a guess and they are the only party who knows when they '
                   'came back - FR-ATT-16 admin disposal is how a wrong record is '
                   'corrected, and an employee never told cannot ask.'),
-    'FR-ATT-01': ('M', 'C', 'PARTIAL', ('/api/break-types',),
-                  'The three seeded types with their limits ship and Lunch requires '
-                  'approval. The read endpoint exposes no per-location '
-                  'configuration and there is no CRUD route, so the types are '
-                  'configurable only by editing rows.'),
-    'FR-ATT-02': ('M', 'C', 'PARTIAL', ('/api/start-break',),
-                  'allow_breaks and the daily quota are enforced, the Lunch approval '
-                  'is required, an existing Active break is auto-ended, and the write '
-                  'is idempotent. The "one transaction" and "partial unique index" '
-                  'parts are not met on the compatibility schema: the auto-end plus '
-                  'insert is two statements, and only v2.0 carries the index.'),
+    'FR-ATT-01': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/break-types', '/api/break-types/<break_type>'),
+                  'Admins can create, partially update and delete break types; names '
+                  'are case-insensitively unique and referenced types cannot be deleted. '
+                  'Lunch is seeded with requires_approval; that flag is configurable '
+                  'and enforced before a break can start. Optional location scope is '
+                  'resolved from the employee’s effective leave-policy assignment. '
+                  'Names remain globally unique to preserve the existing natural key '
+                  'and foreign keys, so the same type cannot have independent rows at '
+                  'multiple locations.'),
+    'FR-ATT-02': ('M', 'C', 'IMPLEMENTED', ('/api/start-break',),
+                  'allow_breaks, the daily quota and configured approval are enforced. '
+                  'Auto-ending an existing break and inserting its replacement share '
+                  'one transaction; uq_one_active_break is a partial unique index on '
+                  'both the canonical and compatibility schemas, so concurrent starts '
+                  'cannot leave multiple Active rows.'),
     'FR-ATT-03': ('M', 'R', 'IMPLEMENTED', ('/api/end-break/<int:break_id>',),
                   'Ownership checked against the session employee, duration computed '
                   'from the timestamps, action audited. The audit half was missing while '
@@ -407,10 +412,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-ATT-12': ('L', 'R', 'IMPLEMENTED', ('/api/live-monitoring',), 'Active-break monitoring.'),
     'FR-ATT-13': ('L', 'R', 'IMPLEMENTED', ('/api/break-summary',), 'Per-employee counts and minutes.'),
     'FR-ATT-14': ('L', 'R', 'IMPLEMENTED', ('/api/disposed-breaks',), 'Last hour.'),
-    'FR-ATT-15': ('M', 'C', 'PARTIAL', ('/api/dashboard-stats',),
-                  'The five keys are stable. They are recomputed per request, with no '
-                  'Redis 15 s cache and no worker refresh, so the cost grows with the '
-                  'employee count.'),
+    'FR-ATT-15': ('M', 'C', 'IMPLEMENTED', ('/api/dashboard-stats',),
+                  'The stable SRS keys are served from a Redis cache with a 15-second '
+                  'TTL, refreshed by a 10-second scheduler worker. Cache misses warm '
+                  'the entry once rather than stampeding concurrent requests; a local '
+                  'short-lived fallback preserves operation when Redis is not configured. '
+                  'The existing total_employees/blocked_users aliases remain for the '
+                  'current dashboard consumer.'),
     'FR-ATT-16': ('H', 'R', 'IMPLEMENTED', ('/api/admin/breaks', '/api/admin/dispose-break/<int:break_id>'),
                   'One console call for active/disposed/summary; dispose ends any Active '
                   'break with an audited reason. Neither half existed: the route neither '
@@ -978,11 +986,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'a truth-table test and an AST wiring test hold it.'),
 
     # ── FR-ANL / FR-RPT: analytics and reports ──────────────────────────
-    'FR-ANL-01': ('M', 'C', 'PARTIAL', ('/api/analytics/headcount', '/api/analytics/leave-trends',
-                                          '/api/analytics/expense-summary', '/api/analytics/performance-summary'),
-                  'All four metrics ship and match the v1.0 figures. They are computed '
-                  'live per request, not served from materialized views refreshed on a '
-                  'schedule.'),
+    'FR-ANL-01': ('M', 'C', 'IMPLEMENTED', ('/api/analytics/headcount', '/api/analytics/leave-trends',
+                                              '/api/analytics/expense-summary', '/api/analytics/performance-summary',
+                                              '/api/analytics/refresh'),
+                  'All four metrics are refreshed every 30 minutes and served from '
+                  'analytics_snapshots with an as_of timestamp. Reads warm a missing '
+                  'or stale snapshot. A keyed JSON snapshot table is used instead of '
+                  'native materialized views because leave trends accept a months '
+                  'window and both schema shapes share the same refresh path.'),
     'FR-ANL-02': ('S', 'C', 'PARTIAL', ('/api/analytics/attrition-risk',),
                   'The four factors are all present. The weights are hard-coded rather '
                   'than configuration (FR-ANL-04), and the score is not versioned.'),
@@ -998,32 +1009,21 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'async job for ranges beyond a month or 200 employees.'),
 
     # ── FR-AUD: audit ───────────────────────────────────────────────────
-    'FR-AUD-01': ('M', 'C', 'PARTIAL', ('/api/audit-log',),
-                  'actor/action/entity/entity_id/before/after/ip/request_id/created_at, '
-                  'written from a scheduler thread without raising (which it used to, and its '
-                  'own except swallowed it, so those rows never existed), and the log is never '
-                  'purged by the application. Every mutating handler now writes an audit row '
-                  '**except one deliberate exemption**, so the SRS "every mutating action" holds '
-                  'in substance; the row stays PARTIAL only because the SRS also asks for the '
-                  'row to be written *via the transactional outbox* (CC-09) and audit_log() '
-                  'writes straight to the table. The exemption is mark_notifications_read - a '
-                  'read receipt on the caller own notifications, where a row per click would be '
-                  'noise that makes the real entries harder to find. Getting here took three '
-                  'grouped passes and fixed a great deal on the way: regularization '
-                  'approve/reject returned 200 whatever happened (including {"message": '
-                  '"Rejected"} for a request still Approved) and audited nothing; document '
-                  '*deletion* wrote no row while document *download* did, which is backwards '
-                  'since deleting removes the row and the file; deleting a dependent erased '
-                  'policy-classified PII with no trail; the break lifecycle claimed auditing '
-                  'that did not exist, an unconditional approve, and an admin dispose with '
-                  'neither a reason nor a row; returning an asset updated unconditionally and '
-                  'answered 200 whether or not it returned anything. Two of those were the '
-                  'same always-200 lie in unrelated routes. A ratchet test holds the position: '
-                  'it fails if a new mutating route skips the audit log, and fails if the '
-                  'exemption is removed or a fixed handler left behind on the list. A second '
-                  'test reads db/postgres_schema.sql and fails if a route insert stops matching '
-                  'the canonical columns - three bare INSERT INTO <table> VALUES (...) were '
-                  'fixed on the way.'),
+    'FR-AUD-01': ('M', 'C', 'IMPLEMENTED', ('/api/audit-log',),
+                  'Every mutating request is wrapped in a request-scoped transaction. '
+                  'get_db() borrows a savepoint on that connection, and audit_log() '
+                  'enqueues audit.recorded and materializes it through the outbox handler '
+                  'in the same transaction as the business write. Failed write responses '
+                  'roll the business transaction back; attempted audit rows are then '
+                  're-enqueued independently. Login 401s still commit the failed-attempt '
+                  'lockout state. Background maintenance and import completion also join '
+                  'their business-state transition to the audit event. All mutating routes '
+                  'are audited, including an aggregate notification-read receipt; the AST '
+                  'ratchet requires the unaudited set to remain empty. The app never purges '
+                  'audit history. Historical gaps fixed while establishing the ratchet '
+                  'included unaudited document/dependent deletion, unaudited break actions, '
+                  'unconditional asset returns, and regularization decisions that claimed '
+                  'success regardless of the persisted state.'),
 }
 
 

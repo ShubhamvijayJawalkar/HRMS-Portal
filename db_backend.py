@@ -9,8 +9,9 @@ against:
   a literal ``%`` in the SQL then also becomes ``%%``, as psycopg requires)
 * ``strftime('<f>', col)`` -> ``to_char(col, '<pg-f>')``  (DuckDB-only fn)
 * ``PRAGMA ...`` statements -> no-op
-* every statement autocommits (parity with ``duckdb.connect``), so errors
-  never poison the connection and ``commit()`` is a no-op
+* statements autocommit outside a transaction (parity with
+  ``duckdb.connect``); explicit and request-scoped transactions use real
+  PostgreSQL transactions with savepoints for borrowed connections
 * naive ``TIMESTAMP`` columns round-trip naive ``datetime`` objects, and
   DECIMAL/REAL/DATE/INTEGER map to the same Python types DuckDB returns
 
@@ -41,7 +42,9 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import psycopg
 from psycopg.rows import tuple_row
@@ -55,6 +58,9 @@ DEFAULT_DATABASE_URL = os.getenv(
 DEFAULT_SCHEMA = "legacy"
 
 _SCHEMA_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CURRENT_TRANSACTION: ContextVar["DuckDBCompatConnection | None"] = ContextVar(
+    "hrms_db_transaction", default=None
+)
 
 # DuckDB strftime() specifier -> PostgreSQL to_char() template.
 # app.py only uses %Y, %m and the combined %Y-%m; the rest map canonically.
@@ -403,9 +409,9 @@ def translate(sql: str, params, schema: str | None = None) -> str:
 class DuckDBCompatConnection:
     """DuckDB-drop-in wrapper around a psycopg connection.
 
-    ``autocommit=True`` (the default, DuckDB parity) makes every statement
-    immediately durable and ``commit()`` a swallow no-op; ``autocommit=False``
-    drives the CC-09 outbox transaction, where commit/rollback really apply.
+    ``autocommit=True`` (the default, DuckDB parity) makes each statement
+    immediately durable outside a transaction; ``autocommit=False`` drives
+    explicit or request-scoped transactions, where commit/rollback apply.
     """
 
     def __init__(self, pg_conn: "psycopg.Connection", autocommit: bool = True):
@@ -453,12 +459,61 @@ class DuckDBCompatConnection:
         self._conn.close()
 
 
+class _BorrowedTransactionConnection:
+    """A closable savepoint scope over the request's shared transaction."""
+
+    def __init__(self, conn: DuckDBCompatConnection):
+        self._conn = conn
+        self._savepoint = f"hrms_sp_{secrets.token_hex(8)}"
+        self._active = True
+        conn.execute(f"SAVEPOINT {self._savepoint}")
+
+    def execute(self, sql, params=None):
+        try:
+            return self._conn.execute(sql, params)
+        except Exception:
+            self.rollback()
+            raise
+
+    def executemany(self, sql, seq_of_params):
+        try:
+            return self._conn.executemany(sql, seq_of_params)
+        except Exception:
+            self.rollback()
+            raise
+
+    def _finish(self, commit: bool):
+        if not self._active:
+            return
+        if commit:
+            self._conn.execute(f"RELEASE SAVEPOINT {self._savepoint}")
+        else:
+            self._conn.execute(f"ROLLBACK TO SAVEPOINT {self._savepoint}")
+            self._conn.execute(f"RELEASE SAVEPOINT {self._savepoint}")
+        self._active = False
+
+    def commit(self):
+        self._finish(True)
+
+    def rollback(self):
+        self._finish(False)
+
+    def close(self):
+        self._finish(True)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
 def connect():
     """Open a new autocommit connection pointed at the app schema.
 
     Mirrors ``get_db()`` semantics: a fresh connection per call, schema
     ensured to exist.
     """
+    current = _CURRENT_TRANSACTION.get()
+    if current is not None:
+        return _BorrowedTransactionConnection(current)
     schema = app_schema()
     if not _SCHEMA_RE.fullmatch(schema):
         raise ValueError(f"invalid APP_DB_SCHEMA {schema!r}")
@@ -481,6 +536,19 @@ def transaction():
     The connection is a :class:`DuckDBCompatConnection`, so the app's
     DuckDB-flavoured SQL still translates/rewrites inside the transaction.
     """
+    current = _CURRENT_TRANSACTION.get()
+    if current is not None:
+        savepoint = f"hrms_tx_{secrets.token_hex(8)}"
+        current.execute(f"SAVEPOINT {savepoint}")
+        try:
+            yield current
+            current.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception:
+            current.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            current.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+        return
+
     schema = app_schema()
     if not _SCHEMA_RE.fullmatch(schema):
         raise ValueError(f"invalid APP_DB_SCHEMA {schema!r}")
@@ -492,6 +560,7 @@ def transaction():
         conn.close()
         raise
     dc = DuckDBCompatConnection(conn, autocommit=False)
+    token = _CURRENT_TRANSACTION.set(dc)
     try:
         yield dc
         dc.commit()
@@ -499,6 +568,7 @@ def transaction():
         dc.rollback()
         raise
     finally:
+        _CURRENT_TRANSACTION.reset(token)
         conn.close()
 
 

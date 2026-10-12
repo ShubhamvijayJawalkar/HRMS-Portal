@@ -26,6 +26,8 @@ import json
 import os
 from datetime import datetime, timedelta
 
+import outbox
+
 # A directory import is a maintenance task, not a bulk data feed: the caps keep
 # one upload from exhausting a worker or the disk.
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024      # 5 MB
@@ -385,7 +387,15 @@ def _process(job_id, path):
     """Import one row at a time, recording progress as it goes."""
     import pandas as pd
 
-    from app import UserValidationError, _csv_value, _validate_user_payload, app, audit_log, get_db, hash_password
+    from app import (
+        UserValidationError,
+        _csv_value,
+        _validate_user_payload,
+        app,
+        audit_log,
+        get_db,
+        hash_password,
+    )
 
     conn = get_db()
     password = hash_password('pass123')
@@ -435,28 +445,33 @@ def _process(job_id, path):
             processed += 1
             if processed % 25 == 0:
                 _progress(job_id, processed, imported, skipped)
-        conn.execute(
-            "UPDATE import_jobs SET status = 'completed', processed_rows = ?, imported = ?, "
-            "skipped = ?, error_summary = ?, finished_at = ? WHERE job_id = ?",
-            [processed, imported, skipped, json.dumps(errors), datetime.now(), job_id],
-        )
-        job = _read_job(conn, job_id)
     finally:
         conn.close()
+
+    with app.app_context():
+        # The completion state and its audit event are one CC-09 unit. If audit
+        # materialization fails, the job remains retryable rather than completed
+        # without a record of what it imported.
+        with outbox.transaction() as completion_conn:
+            completion_conn.execute(
+                "UPDATE import_jobs SET status = 'completed', processed_rows = ?, imported = ?, "
+                "skipped = ?, error_summary = ?, finished_at = ? WHERE job_id = ?",
+                [processed, imported, skipped, json.dumps(errors), datetime.now(), job_id],
+            )
+            summary = _read_job(completion_conn, job_id) or {}
+            audit_log(
+                summary.get('created_by') or 'SYSTEM',
+                'USER_IMPORT_COMPLETED',
+                f"CSV import {job_id}: {imported} imported, {skipped} skipped",
+                actor=f"SYSTEM:import-job#{job_id}",
+                entity='import_jobs',
+                entity_id=job_id,
+                after={
+                    'imported': imported,
+                    'skipped': skipped,
+                    'total_rows': summary.get('total_rows'),
+                },
+            )
+
     # The upload held every employee id and address: do not leave it on disk.
     _discard_file(path)
-    summary = job or {}
-    with app.app_context():
-        audit_log(
-            summary.get('created_by') or 'SYSTEM',
-            'USER_IMPORT_COMPLETED',
-            f"CSV import {job_id}: {imported} imported, {skipped} skipped",
-            actor=f"SYSTEM:import-job#{job_id}",
-            entity='import_jobs',
-            entity_id=job_id,
-            after={
-                'imported': imported,
-                'skipped': skipped,
-                'total_rows': summary.get('total_rows'),
-            },
-        )

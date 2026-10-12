@@ -38,6 +38,7 @@ _NATURAL_KEYS = {
     ("users", "emp_id"),
     ("break_types", "break_type"),
     ("idempotency_keys", "key"),
+    ("analytics_snapshots", "metric"),
     ("alembic_version", "version_num"),
 }
 _REQUIRED_PUBLIC_TABLES = {
@@ -51,10 +52,12 @@ _REQUIRED_PUBLIC_TABLES = {
     "offboarding_workflow",
     "offboarding_approvals",
     "offboarding_settlements",
+    "break_types",
     "payroll_runs",
     "payroll_items",
     "attendance_days",
     "outbox_events",
+    "analytics_snapshots",
 }
 _COMMON_TABLES = (
     "users",
@@ -196,6 +199,22 @@ def _run(args: argparse.Namespace) -> int:
         missing = sorted(_REQUIRED_PUBLIC_TABLES - public_tables)
         if missing:
             failures.append(f"public missing required tables: {', '.join(missing)}")
+        if "break_types" in public_tables:
+            break_type_columns = {
+                row[0] for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = 'break_types'",
+                    (target,),
+                ).fetchall()
+            }
+            missing_break_type_columns = {
+                "location", "requires_approval",
+            } - break_type_columns
+            if missing_break_type_columns:
+                failures.append(
+                    "public.break_types missing required columns: "
+                    + ", ".join(sorted(missing_break_type_columns))
+                )
         if public["alembic_version"] != args.expected_head:
             failures.append(
                 f"public Alembic version is {public['alembic_version']!r}; "
@@ -276,7 +295,7 @@ def main() -> int:
     parser.add_argument("--legacy-schema", default="legacy", help="fallback schema to compare")
     parser.add_argument(
         "--expected-head",
-        default="0012_approval_delegations_compat",
+        default="0014_break_type_config",
         help="required Alembic head on the target schema",
     )
     parser.add_argument(

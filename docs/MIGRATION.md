@@ -322,12 +322,12 @@ This is now an enforced rule rather than a convention:
 ```bash
 DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   python scripts/check_cc_rules.py
-# CC-01 OK — 46 identity + 4 natural keys, all sequences ahead of data
+# CC-01 OK — 51 identity + 5 natural keys, all sequences ahead of data
 ```
 
 Plus a PG-gated unit test (`test_cc01_surrogate_keys_are_identity`): every
 primary key is `a`/`d` identity unless on the natural-key whitelist, and the
-50-table target schema is present.
+The target schema is present, including the FR-ANL-01 analytics snapshot table.
 
 ### Public-flip probe (measured readiness)
 `scripts/probe_public_flip.py` boots the *current* v1.0 app against the pure
@@ -1384,3 +1384,72 @@ existed only to prove the ETL tolerated a missing table.
 - CI is one job rather than two. The `duckdb` job's unique steps — ruff, compose
   validation, the image build — moved into the PostgreSQL job instead of being
   dropped.
+
+## FR-ANL-01 — scheduled analytics snapshots
+
+Alembic revision `0013_analytics_snapshots` creates `analytics_snapshots` on the
+v2.0 target with a `JSONB` payload and `TIMESTAMPTZ` computation time. The
+compatibility schema receives the equivalent table from `init_db` (`TEXT`
+payload and `TIMESTAMP`). The four dashboard aggregates are refreshed every 30
+minutes and served with an `as_of` timestamp; reads recompute and warm a missing
+or older-than-45-minute snapshot so a missed job does not leave analytics
+unavailable. `/api/analytics/refresh` provides an audited, admin-gated manual
+refresh. The leave-trend route stores a 24-month series and applies its requested
+window when serving the snapshot.
+
+The SRS names materialized views. The implementation uses one keyed snapshot
+table instead: the requested leave-trend window is parameterised, and one table
+and refresh path work on both the compatibility and v2.0 schema shapes. The
+The cutover preflight expected head is subsequently advanced by each migration;
+after FR-ATT-01 it is `0014_break_type_config`.
+
+## FR-ATT-01 — configurable break types
+
+Alembic revision `0014_break_type_config` adds optional location and
+`requires_approval` configuration to `break_types`, and a case-insensitive
+unique-name index. The compatibility schema adds the same fields at boot. The
+seeded Lunch type retains its 60-minute limit and requires approval; other
+defaults remain Tea (15) and Personal (30). Admins can create, edit and delete
+types through `/api/break-types`; type names remain globally unique to preserve
+the existing employee-owned `breaks` and `break_approvals` foreign keys. A
+location-specific type is visible and usable only to employees whose effective
+leave-policy assignment matches that location. Organization-wide types remain
+available everywhere. Types referenced by break history or approvals cannot be
+deleted.
+
+FR-ATT-02 enforces the single-Active-break invariant in both shapes: the
+canonical target already has `uq_one_active_break`, and `init_db` creates the
+same partial unique index on the compatibility schema. Starting a break uses
+`db_backend.transaction()` for the auto-end plus insert, so a rejected insert
+cannot leave the previous break spuriously completed.
+
+## FR-ATT-15 — cached dashboard statistics
+
+`/api/dashboard-stats` serves the stable SRS counters from `dashboard_stats.py`,
+using Redis with a 15-second TTL when configured. Cache misses are serialized
+within the process to avoid duplicate aggregate queries; a scheduler worker
+refreshes the entry every 10 seconds. When Redis is not configured or is
+unavailable, a lock-protected, process-local cache keeps the endpoint usable.
+The original `total_employees` and `blocked_users` response names remain as
+aliases for the current dashboard template.
+
+## FR-AUD-01 — transactional audit outbox
+
+Mutating HTTP requests run in one request-scoped PostgreSQL transaction.
+`db_backend` propagates that transaction through `get_db()` using savepoint
+scopes, so legacy route-level `close()`, `commit()` and `rollback()` calls do
+not prematurely commit the request. Nested `outbox.transaction()` calls also
+use savepoints. `audit_log()` enqueues an `audit.recorded` event and invokes its
+handler in that same transaction; the handler materializes the normal
+`audit_log` row synchronously, preserving the existing response/read behavior.
+Thus a successful business write, its outbox event and audit row commit together.
+
+A failed HTTP write response rolls the business transaction back; any audit
+attempt already recorded in that request is then re-enqueued independently so
+the refusal remains visible without committing the failed business change.
+Login 401 responses are an explicit exception to response-based rollback because
+failed-attempt lockout counters must persist. Hourly maintenance and import-job
+completion use explicit outbox transactions around their business-state change
+and audit event as well. Materialized audit event payloads are cleared after
+delivery to avoid retaining a second copy of potentially sensitive audit data.
+The audit history itself remains append-only from the application's perspective.

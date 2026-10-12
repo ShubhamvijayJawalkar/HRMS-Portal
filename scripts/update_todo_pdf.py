@@ -52,6 +52,82 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-12", "FR-AUD-01 (Medium): audit writes now travel through an "
+     "`audit.recorded` outbox event and materialize inside the same request "
+     "transaction as the business write. Mutating requests share one transaction; "
+     "`get_db()` connections and nested CC-09 transactions use savepoints, preserving "
+     "legacy close/commit/rollback call patterns. Error responses roll business "
+     "changes back while preserving the audit of an attempted action; login 401s "
+     "commit lockout counters. Hourly maintenance and import completion now bind "
+     "their audited state transitions too. Delivered audit-event payloads are "
+     "cleared after materialization. The last unaudited route, marking one's own "
+     "notifications read, now emits one aggregate audit row; the AST ratchet has "
+     "an empty unaudited set. The atomicity/outbox tests and full unit suite passed "
+     "343 tests with 2 skips. The public probe verified the canonical audit row "
+     "and delivered outbox event; total was 115/115 GET and 64/65 writes, with the "
+     "existing `leaves(apply)` 409 guard. Browser validation had one known CDN "
+     "navigation timeout (22 passed); the failed test passed in isolation."),
+    ("2026-10-12", "FR-ATT-15 (Medium): `/api/dashboard-stats` now serves the "
+     "stable SRS keys (`total`, `logged_in_today`, `on_break`, `blocked`, "
+     "`pending_leaves`) from a Redis cache with a 15-second TTL. A scheduler "
+     "worker refreshes every 10 seconds, leaving room for the TTL and avoiding "
+     "per-request recomputation; a cache miss warms once under a lock. Existing "
+     "`total_employees` and `blocked_users` aliases remain so the current admin "
+     "dashboard keeps rendering unchanged. With no Redis configured the same TTL "
+     "is provided in process memory, matching the project's optional-Redis dev "
+     "mode. Cache, fixed-TTL fallback, payload and scheduler tests were added. "
+     "The focused dashboard/break/traceability set passed 27/27 and the full unit "
+     "suite passed 341 with 2 skips. On the public schema, the cache worker flow "
+     "passed; the probe reported 64/65 writes with its existing `leaves(apply)` "
+     "409 guard and no unguarded failures."),
+    ("2026-10-12", "FR-ATT-02 (Medium): `POST /api/start-break` now runs the "
+     "quota/approval checks, auto-end and new Active row in one PostgreSQL "
+     "transaction; a failed insert rolls the old break's end back as well. The "
+     "compatibility schema now creates the same `uq_one_active_break` partial "
+     "unique index already present on the canonical schema, enforcing at most one "
+     "Active break per employee under concurrency. The compatibility suite had two "
+     "fixtures that deliberately stored two simultaneous Active rows for one "
+     "employee; with the rule now real, the orphan-sweep fixture uses two employees "
+     "and a notification assertion is scoped to its subject. Regression tests prove "
+     "rollback and database-level duplicate refusal. Break/policy/traceability "
+     "checks passed 22/22; after correcting the neighboring delegation test's "
+     "month-boundary fixture, the full unit run passed 341 with 2 skips. The "
+     "public-flip probe served 115/115 GETs and 64/65 writes, with "
+     "the existing `start-break(Tea)` flow passing and the unrelated "
+     "`leaves(apply)` flow guarded with 409."),
+    ("2026-10-12", "FR-ATT-01 (Medium): break types are now managed through "
+     "admin-gated create/update/delete routes. The existing `break_type` key and "
+     "foreign keys remain intact; names are additionally case-insensitively unique, "
+     "so a type can have one optional location scope but cannot have independently "
+     "configured duplicates at several locations. The location is resolved from the "
+     "employee's effective leave-policy assignment, and location-scoped types are "
+     "filtered from both the list and write APIs. `requires_approval` is explicit, "
+     "Lunch defaults to true, and a pending request cannot start the break until it "
+     "has been approved. Alembic `0014_break_type_config` and the compatibility "
+     "schema add matching columns. Unit regression tests cover CRUD, role denial, "
+     "location visibility, approval flow and retained references; the public-schema "
+     "probe created, updated, read back and deleted a configured type. The focused "
+     "break/policy checks passed 21/21; CC-01 and preflight passed at head 0014. "
+     "The full public probe served 115/115 GETs and 63/64 write flows; its "
+     "unrelated `leaves(apply)` flow returned a guarded 409."),
+    ("2026-10-12", "FR-ANL-01 (Medium): all four analytics aggregates are now "
+     "materialised in `analytics_snapshots`, refreshed by a 30-minute scheduler "
+     "job and available through an admin-gated refresh route. Read paths serve a "
+     "fresh snapshot with an `as_of` timestamp; missing or stale data is recomputed "
+     "live and stored as a warm-up fallback. Leave trends retain their request "
+     "window by storing a wider monthly series and filtering it at read time. The "
+     "SRS says materialized views; this implementation uses a keyed JSON snapshot "
+     "table because the trend window is parameterised and the app supports two "
+     "schema shapes. The metric is its natural primary key and is recorded in the "
+     "CC-01 whitelist; the public schema preflight requires the new table. Targeted "
+     "analytics, traceability and CC-01 tests passed (9/9); public-schema JSONB "
+     "round-trip and the authenticated refresh route passed. The updated page accepts "
+     "both the old array and new timestamped response shapes. The full unit run had "
+     "335 passed / 2 skipped and one "
+     "unrelated existing failure: the regularization-delegation test creates a date "
+     "21 days ahead but filters by the current month, so it fails when the date crosses "
+     "a month boundary. Browser suite passed 23/23, including the updated analytics "
+     "page. The requirement is now IMPLEMENTED; the next listed item is FR-ATT-01."),
     ("2026-10-09", "FR-PAY-07 / FR-DOC-02 / FR-DOC-03 / FR-ONB-04 (High/Medium): "
      "object storage (S3/MinIO) and presigned URLs for payslips and documents. "
      "A new `object_storage.py` module provides a boto3-based abstraction over "
@@ -1401,17 +1477,6 @@ _NEXT_STEPS = {
     # FR-USR-10 is IMPLEMENTED (SRS progress endpoint /api/imports/<job_id> served
     # and advertised; error cap already 50)
     # ── Medium ─────────────────────────────────────────────────────────
-    'FR-ANL-01': 'Add a scheduled job that materialises the dashboard aggregates into a '
-                 'table and read from it, keeping the live query as the warm-up fallback.',
-    'FR-ATT-01': 'Add an admin-gated CRUD route for break types (and a location on the type) '
-                 'so the limits are editable rather than edited in the database.',
-    'FR-ATT-02': 'Wrap the auto-end plus insert in one transaction and add the partial unique '
-                 'index to `init_db`, so the compatibility schema enforces the rule the v2.0 '
-                 'one already does.',
-    'FR-ATT-15': 'Cache the break summary in Redis for 15 s with a background refresh instead '
-                 'of recomputing it on every panel poll.',
-    'FR-AUD-01': 'Route `audit_log()` through the outbox (CC-09) so the row commits with the '
-                 'business write it describes.',
     'FR-AUTH-04': 'Store the session creation time and expire at 24 h absolute in addition to '
                  'the 8 h idle timeout, and test the two independently.',
     # FR-DOC-02 is IMPLEMENTED (object storage + content validation + presigned URL)
@@ -1505,14 +1570,14 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "319 passed, 2 skipped (leader chaos test needs REDIS_URL; one PG-only test)"),
-    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "319 passed, 1 skipped"),
-    ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed; all 10 skip cleanly with REDIS_URL unset"),
-    ("Browser suite (tests/test_playwright.py)", "PostgreSQL, threaded server", "23 passed"),
-    ("CC-01 rule checker (scripts/check_cc_rules.py)", "hrms_probe (public)", "OK - every surrogate key is identity, sequences ahead of data"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "hrms_probe (public)", "Ready at head 0011_leave_grants. 0012_approval_delegations_compat exists for the in-flight FR-LEA-08a slice and bumps --expected-head when it lands"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "343 passed, 2 skipped; audit/outbox atomicity, mutation ratchet and notification receipt audit covered"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "Full unit suite not rerun with REDIS_URL; dedicated session-store suite reverified after the transaction retrofit"),
+    ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed after the request-transaction changes; all 10 skip cleanly with REDIS_URL unset"),
+    ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "22 passed; one CDN page-load timeout, passed in isolation"),
+    ("CC-01 rule checker (scripts/check_cc_rules.py)", "temporary PostgreSQL 17 public schema", "OK - 51 identity + 5 natural primary keys; sequences ahead of data"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "temporary PostgreSQL 17 public schema", "Expected head 0014_break_type_config; schema-only disposable database, not production data"),
     ("SRS extraction (scripts/extract_srs_spec.py --check)", "HRMS_SRS_v2.0.pdf", "113 requirements, no duplicates, srs_spec.py byte-identical to the PDF"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "hrms_probe (public)", "113/113 GET + 59/59 write flows; run twice to confirm idempotency"),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "disposable PostgreSQL 17 public schema", "115/115 GET served; 64/65 write flows OK, including audit-row materialization from a delivered outbox event, dashboard cache refresh, break-type configuration and start-break(Tea). One leaves(apply) flow returned its guarded 409."),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
     ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),
