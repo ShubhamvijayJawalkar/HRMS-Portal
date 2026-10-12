@@ -824,9 +824,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'feedback refuses self-feedback and takes a fixed category set.'),
 
     # ── FR-EXP: expenses ────────────────────────────────────────────────
-    'FR-EXP-01': ('M', 'R', 'PARTIAL', ('/api/expense-categories',),
-                  'Six seeded categories and a read endpoint. No CRUD, so the set is '
-                  'configurable only by editing rows.'),
+    'FR-EXP-01': ('M', 'R', 'IMPLEMENTED',
+                  ('/api/expense-categories', '/api/expense-categories/<int:cat_id>'),
+                  'Admin-only create, partial update and delete with bounded input validation, '
+                  'case/whitespace-insensitive unique names, before/after audit rows and a '
+                  '409 referential guard when claims use the category. The existing cat_id '
+                  'primary keys and claim foreign keys are retained; the admin expenses page '
+                  'exposes category management only to Admin/Super Admin.'),
     'FR-EXP-02': ('M', 'C', 'PARTIAL', ('/api/expenses',),
                   'emp_id is taken from the session and a body override is rejected with '
                   'a 400, closing the v1.0 impersonation hole; the category must exist '

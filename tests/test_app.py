@@ -6593,6 +6593,125 @@ def test_expense_claim_must_name_a_real_category_and_positive_amount(client):
         _cleanup_expense_rows('EMP963')
 
 
+def test_expense_category_admin_crud_validation_audit_and_claim_guard(client):
+    _set_admin_session(client, 99845)
+    category_id = None
+    claim_id = None
+    category_name = 'Test Travel Reimbursement'
+    try:
+        created = client.post('/api/expense-categories', json={
+            'name': category_name, 'description': 'Travel related costs',
+        })
+        assert created.status_code == 201, created.get_json()
+        category_id = created.get_json()['id']
+        assert created.get_json()['name'] == category_name
+
+        assert client.post('/api/expense-categories', json={
+            'name': f'  {category_name.lower()}  ',
+        }).status_code == 409
+        assert client.post('/api/expense-categories', json={'name': '   '}).status_code == 400
+        assert client.post('/api/expense-categories', json={
+            'name': 'A' * 81,
+        }).status_code == 400
+        assert client.post('/api/expense-categories', json={
+            'name': 'Unknown field', 'unexpected': True,
+        }).status_code == 400
+
+        updated = client.put(
+            f'/api/expense-categories/{category_id}',
+            json={'description': 'Updated travel costs'},
+        )
+        assert updated.status_code == 200, updated.get_json()
+        assert updated.get_json() == {
+            'id': category_id,
+            'name': category_name,
+            'description': 'Updated travel costs',
+        }
+        assert client.put(
+            f'/api/expense-categories/{category_id}', json={'name': 'Food'}
+        ).status_code == 409
+        assert client.put(
+            f'/api/expense-categories/{category_id}', json={}
+        ).status_code == 400
+        assert client.put('/api/expense-categories/999999', json={'name': 'Missing'}).status_code == 404
+
+        claim = client.post('/api/expenses', json={
+            'cat_id': category_id, 'amount': '125.50', 'description': 'Category delete guard',
+        })
+        assert claim.status_code == 201, claim.get_json()
+        claim_id = claim.get_json()['id']
+        blocked_delete = client.delete(f'/api/expense-categories/{category_id}')
+        assert blocked_delete.status_code == 409, blocked_delete.get_json()
+        assert blocked_delete.get_json()['claim_count'] == 1
+
+        conn = get_db()
+        try:
+            actions = conn.execute(
+                "SELECT action FROM audit_log WHERE entity = 'expense_categories' "
+                "AND CAST(entity_id AS VARCHAR) = ? ORDER BY log_id",
+                [str(category_id)],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [row[0] for row in actions] == [
+            'EXPENSE_CATEGORY_CREATE', 'EXPENSE_CATEGORY_UPDATE',
+        ]
+
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM expense_claims WHERE claim_id = ?', [claim_id])
+        finally:
+            conn.close()
+        claim_id = None
+        deleted = client.delete(f'/api/expense-categories/{category_id}')
+        assert deleted.status_code == 200, deleted.get_json()
+        assert client.delete(f'/api/expense-categories/{category_id}').status_code == 404
+
+        conn = get_db()
+        try:
+            actions = conn.execute(
+                "SELECT action FROM audit_log WHERE entity = 'expense_categories' "
+                "AND CAST(entity_id AS VARCHAR) = ? ORDER BY log_id",
+                [str(category_id)],
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [row[0] for row in actions] == [
+            'EXPENSE_CATEGORY_CREATE', 'EXPENSE_CATEGORY_UPDATE',
+            'EXPENSE_CATEGORY_DELETE',
+        ]
+
+        _create_policy_user(client, 'EMP966', role='Employee')
+        _login_as(client, 'EMP966', 'Employee', 99844)
+        assert client.get('/api/expense-categories').status_code == 200
+        denied = client.post('/api/expense-categories', json={'name': 'Employee category'})
+        assert denied.status_code == 403, denied.get_json()
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET role = 'HR' WHERE emp_id = 'EMP966'")
+        finally:
+            conn.close()
+        _login_as(client, 'EMP966', 'HR', 99843)
+        page = client.get('/admin/expenses')
+        assert page.status_code == 200
+        assert 'Expense Categories' not in page.get_data(as_text=True)
+    finally:
+        conn = get_db()
+        try:
+            if claim_id is not None:
+                conn.execute('DELETE FROM expense_claims WHERE claim_id = ?', [claim_id])
+            if category_id is not None:
+                conn.execute('DELETE FROM expense_categories WHERE cat_id = ?', [category_id])
+                conn.execute(
+                    "DELETE FROM audit_log WHERE entity = 'expense_categories' "
+                    "AND CAST(entity_id AS VARCHAR) = ?",
+                    [str(category_id)],
+                )
+        finally:
+            conn.close()
+        _cleanup_user_contract_rows('EMP966')
+
+
 def test_nobody_may_approve_their_own_expense_claim(client):
     """The v1.0 hole: any admin could approve a claim they had filed."""
     _set_admin_session(client, 99842)

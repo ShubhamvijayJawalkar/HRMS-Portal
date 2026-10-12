@@ -1750,6 +1750,11 @@ def init_db():
              [5, 'Utilities', 'Phone, internet, electricity bills'],
              [6, 'Other', 'Miscellaneous expenses']]
         )
+    if not _is_public_target_schema():
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_expense_categories_name_ci "
+            "ON expense_categories (LOWER(TRIM(name)))"
+        )
 
     # ── Normalize any passwords still stored in plain/legacy format ──
     # Prefix check ($2 = bcrypt, $a = Argon2id) — avoids LIKE/% patterns,
@@ -2729,6 +2734,9 @@ _ROUTE_MODULES = {
     'admin_dispose_break': 'breaks', 'approve_break': 'breaks', 'reject_break': 'breaks',
     'create_break_type': 'breaks', 'update_break_type': 'breaks',
     'delete_break_type': 'breaks',
+    'create_expense_category': 'expenses',
+    'update_expense_category': 'expenses',
+    'delete_expense_category': 'expenses',
     # ATS
     'admin_jobs': 'jobs', 'jobs_api': 'jobs', 'close_job': 'jobs',
     'job_detail': 'jobs', 'recruitment_pipeline': 'jobs',
@@ -8776,7 +8784,20 @@ def feedback_api():
 @app.route('/admin/expenses')
 @hr_or_admin_required
 def admin_expenses():
-    return render_template('admin_expenses.html')
+    conn = get_db()
+    try:
+        actor = policy.current_actor(conn)
+        can_manage_expense_categories = bool(
+            actor
+            and actor.get('role') in policy.ADMIN_ROLES
+            and policy.can(actor, 'expenses', conn=conn)
+        )
+    finally:
+        conn.close()
+    return render_template(
+        'admin_expenses.html',
+        can_manage_expense_categories=can_manage_expense_categories,
+    )
 
 
 @app.route('/expenses')
@@ -8790,9 +8811,173 @@ def expenses_page():
 @login_required
 def expense_categories():
     conn = get_db()
-    rows = conn.execute("SELECT cat_id, name, description FROM expense_categories").fetchall()
-    conn.close()
+    try:
+        rows = conn.execute(
+            "SELECT cat_id, name, description FROM expense_categories "
+            "ORDER BY LOWER(name), cat_id"
+        ).fetchall()
+    finally:
+        conn.close()
     return jsonify([{'id': r[0], 'name': r[1], 'description': r[2]} for r in rows]), 200
+
+
+def _expense_category_payload(payload, *, existing=None):
+    if not isinstance(payload, dict):
+        raise ValueError('A JSON object is required')
+    unknown = set(payload) - {'name', 'description'}
+    if unknown:
+        raise ValueError(f'Unknown fields: {", ".join(sorted(unknown))}')
+    if existing is not None and not payload:
+        raise ValueError('At least one field is required')
+    if existing is None and 'name' not in payload:
+        raise ValueError('name is required')
+
+    name = existing['name'] if existing else None
+    if 'name' in payload:
+        name = payload['name']
+        if not isinstance(name, str):
+            raise ValueError('name must be a string')
+        name = name.strip()
+        if not name or len(name) > 80:
+            raise ValueError('name must contain 1 to 80 characters')
+
+    description = existing['description'] if existing else None
+    if 'description' in payload:
+        description = payload['description']
+        if description is not None and not isinstance(description, str):
+            raise ValueError('description must be a string or null')
+        if isinstance(description, str):
+            description = description.strip() or None
+            if description is not None and len(description) > 500:
+                raise ValueError('description must be at most 500 characters')
+    return {'name': name, 'description': description}
+
+
+def _expense_category_name_exists(conn, name, *, excluding_id=None):
+    query = (
+        "SELECT 1 FROM expense_categories "
+        "WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))"
+    )
+    params = [name]
+    if excluding_id is not None:
+        query += " AND cat_id <> ?"
+        params.append(excluding_id)
+    return bool(conn.execute(query, params).fetchone())
+
+
+@app.route('/api/v1/expense-categories', methods=['POST'])
+@app.route('/api/expense-categories', methods=['POST'])
+@admin_required
+def create_expense_category():
+    try:
+        values = _expense_category_payload(request.get_json(silent=True))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    conn = get_db()
+    try:
+        if _expense_category_name_exists(conn, values['name']):
+            return jsonify({'error': 'Expense category already exists'}), 409
+        cat_id = _next_generated_id(conn, 'expense_categories', 'cat_id')
+        try:
+            conn.execute(
+                "INSERT INTO expense_categories (cat_id, name, description) "
+                "VALUES (?, ?, ?)",
+                [cat_id, values['name'], values['description']],
+            )
+        except Exception as exc:
+            if 'uq_expense_categories_name_ci' in str(exc):
+                return jsonify({'error': 'Expense category already exists'}), 409
+            raise
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'EXPENSE_CATEGORY_CREATE',
+        f"Created expense category {cat_id}",
+        entity='expense_categories', entity_id=cat_id, after=values,
+    )
+    return jsonify({'id': cat_id, **values}), 201
+
+
+@app.route('/api/v1/expense-categories/<int:cat_id>', methods=['PUT'])
+@app.route('/api/expense-categories/<int:cat_id>', methods=['PUT'])
+@admin_required
+def update_expense_category(cat_id):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT name, description FROM expense_categories WHERE cat_id = ?",
+            [cat_id],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Expense category not found'}), 404
+        before = {'name': row[0], 'description': row[1]}
+        try:
+            values = _expense_category_payload(
+                request.get_json(silent=True), existing=before,
+            )
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 400
+        if _expense_category_name_exists(conn, values['name'], excluding_id=cat_id):
+            return jsonify({'error': 'Expense category already exists'}), 409
+        try:
+            conn.execute(
+                "UPDATE expense_categories SET name = ?, description = ? WHERE cat_id = ?",
+                [values['name'], values['description'], cat_id],
+            )
+        except Exception as exc:
+            if 'uq_expense_categories_name_ci' in str(exc):
+                return jsonify({'error': 'Expense category already exists'}), 409
+            raise
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'EXPENSE_CATEGORY_UPDATE',
+        f"Updated expense category {cat_id}",
+        entity='expense_categories', entity_id=cat_id,
+        before=before, after=values,
+    )
+    return jsonify({'id': cat_id, **values}), 200
+
+
+@app.route('/api/v1/expense-categories/<int:cat_id>', methods=['DELETE'])
+@app.route('/api/expense-categories/<int:cat_id>', methods=['DELETE'])
+@admin_required
+def delete_expense_category(cat_id):
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT name, description FROM expense_categories WHERE cat_id = ?",
+            [cat_id],
+        ).fetchone()
+        if not row:
+            return jsonify({'error': 'Expense category not found'}), 404
+        before = {'name': row[0], 'description': row[1]}
+        claim_count = int(conn.execute(
+            "SELECT COUNT(*) FROM expense_claims WHERE cat_id = ?", [cat_id]
+        ).fetchone()[0])
+        if claim_count:
+            return jsonify({
+                'error': 'Expense category is in use and cannot be deleted',
+                'claim_count': claim_count,
+            }), 409
+        try:
+            conn.execute("DELETE FROM expense_categories WHERE cat_id = ?", [cat_id])
+        except Exception as exc:
+            message = str(exc).lower()
+            if 'expense_claims_cat_id_fkey' in message or 'foreign key' in message:
+                return jsonify({
+                    'error': 'Expense category is in use and cannot be deleted',
+                }), 409
+            raise
+    finally:
+        conn.close()
+    audit_log(
+        session['emp_id'], 'EXPENSE_CATEGORY_DELETE',
+        f"Deleted expense category {cat_id}",
+        entity='expense_categories', entity_id=cat_id, before=before,
+    )
+    return jsonify({'message': 'Expense category deleted', 'id': cat_id}), 200
 
 
 @app.route('/api/v1/expenses', methods=['GET', 'POST'])

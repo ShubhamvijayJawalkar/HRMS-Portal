@@ -215,6 +215,16 @@ def _run(args: argparse.Namespace) -> int:
                     "public.break_types missing required columns: "
                     + ", ".join(sorted(missing_break_type_columns))
                 )
+        if "expense_categories" in public_tables:
+            category_index = conn.execute(
+                "SELECT 1 FROM pg_indexes WHERE schemaname = %s "
+                "AND indexname = 'uq_expense_categories_name_ci'",
+                (target,),
+            ).fetchone()
+            if not category_index:
+                failures.append(
+                    "public.expense_categories missing uq_expense_categories_name_ci"
+                )
         if public["alembic_version"] != args.expected_head:
             failures.append(
                 f"public Alembic version is {public['alembic_version']!r}; "
@@ -295,7 +305,7 @@ def main() -> int:
     parser.add_argument("--legacy-schema", default="legacy", help="fallback schema to compare")
     parser.add_argument(
         "--expected-head",
-        default="0014_break_type_config",
+        default="0015_expense_category_names",
         help="required Alembic head on the target schema",
     )
     parser.add_argument(

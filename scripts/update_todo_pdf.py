@@ -52,6 +52,16 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-12", "FR-EXP-01 (Medium): Admin and Super Admin can now create, "
+      "partially update and delete expense categories from the expense page and "
+      "API. Names are bounded, trimmed and unique across case/whitespace variants "
+      "with a database index; mutations are audited, and categories referenced by "
+      "claims return 409 rather than breaking retained claim history. The existing "
+      "`cat_id` identity and claim foreign keys are unchanged. Alembic "
+      "`0015_expense_category_names` and the compatibility boot index provide the "
+      "same invariant. Unit suite passed 351 tests with 2 skips; browser suite "
+      "passed 23/23. The disposable public-schema probe passed twice at 115/115 "
+      "GET and 66/66 writes; CC-01 and preflight passed at head 0015."),
     ("2026-10-12", "FR-DOC-02 / FR-USR-12 / FR-ONB-04 (Medium/Low): every "
      "employee and pre-boarding document upload now shares content-signature and "
      "declared-MIME checks, per-category caps, and a real ClamAV INSTREAM scan. "
@@ -1510,8 +1520,7 @@ _NEXT_STEPS = {
     # and advertised; error cap already 50)
     # ── Medium ─────────────────────────────────────────────────────────
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads + delete from object storage)
-    'FR-EXP-01': 'Add admin CRUD for expense categories; today the create route validates '
-                 'against a set nobody can change.',
+    # FR-EXP-01 is IMPLEMENTED (admin CRUD, audit trail and claim reference guard).
     'FR-EXP-02': 'Validate receipts at upload through the document pipeline — extension, magic '
                  'bytes and per-category size.',
     'FR-LEA-03': 'Run large exports through the import-job pattern: return 202 with a job id '
@@ -1594,14 +1603,14 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "350 passed, 2 skipped; includes ClamAV protocol/fail-closed and category-cap checks plus 8-hour idle and 24-hour absolute session expiry"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "351 passed, 2 skipped; includes expense-category CRUD, audit/reference guards, ClamAV protocol/fail-closed and category-cap checks, plus session expiry"),
     ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "Full unit suite not rerun with REDIS_URL; dedicated session-store suite reverified after the transaction retrofit"),
     ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "11 passed, including absolute-expiry Redis-key revocation; all skip cleanly with REDIS_URL unset"),
     ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "23 passed; includes the shared pre-boarding document upload flow"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "temporary PostgreSQL 17 public schema", "OK - 51 identity + 5 natural primary keys; sequences ahead of data"),
-    ("Cutover preflight (scripts/cutover_preflight.py)", "temporary PostgreSQL 17 public schema", "Expected head 0014_break_type_config; schema-only disposable database, not production data"),
+    ("Cutover preflight (scripts/cutover_preflight.py)", "temporary PostgreSQL 17 public schema", "Expected head 0015_expense_category_names; verifies identity/sequence health and the case-insensitive expense-category index"),
     ("SRS extraction (scripts/extract_srs_spec.py --check)", "HRMS_SRS_v2.0.pdf", "113 requirements, no duplicates, srs_spec.py byte-identical to the PDF"),
-    ("Public-flip probe (scripts/probe_public_flip.py)", "disposable PostgreSQL 17 public schema", "115/115 GET served; 64/65 write flows OK, including audit-row materialization from a delivered outbox event, dashboard cache refresh, break-type configuration and start-break(Tea). One leaves(apply) flow returned its guarded 409."),
+    ("Public-flip probe (scripts/probe_public_flip.py)", "disposable PostgreSQL 17 public schema", "115/115 GET served; 66/66 write flows OK, including expense-category CRUD + claim reference guard, audit/outbox, dashboard cache, break-type configuration and start-break(Tea). Scanner and S3 transports are isolated from this schema probe."),
     ("Backup restore drill (scripts/backup.py verify)", "scratch DB", "PASS on a real dump (exit 0); FAIL on a deliberately empty one (exit 1)"),
     ("Load harness (scripts/loadcheck.py)", "local server, 80 req/s", "p95 181 ms, p99 226 ms, 0.000% errors, 0 lockouts - SRS targets p95<300, p99<800, errors<0.1%"),
     ("Shared-NAT check (scripts/shared_nat_check.py)", "15 employees, one egress IP", "375/375 served after the fix; 200/375 and 175x429 before it"),

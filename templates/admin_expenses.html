@@ -66,6 +66,33 @@
 
 <div class="container-fluid p-4">
     <h2 class="page-title">Expense Claims</h2>
+    {% if can_manage_expense_categories %}
+    <div class="card">
+        <div class="card-header"><h5 class="mb-0">Expense Categories</h5></div>
+        <div class="card-body">
+            <form id="expenseCategoryForm" class="row g-2 align-items-end mb-3">
+                <div class="col-md-4">
+                    <label class="form-label" for="expenseCategoryName">Name</label>
+                    <input id="expenseCategoryName" class="form-control" maxlength="80" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="expenseCategoryDescription">Description</label>
+                    <input id="expenseCategoryDescription" class="form-control" maxlength="500">
+                </div>
+                <div class="col-md-2">
+                    <button class="btn btn-primary w-100" type="submit">Add category</button>
+                </div>
+            </form>
+            <div id="expenseCategoryMessage" class="small mb-2" role="status"></div>
+            <div class="table-responsive">
+                <table class="table table-hover mb-0">
+                    <thead><tr><th>Name</th><th>Description</th><th>Actions</th></tr></thead>
+                    <tbody id="expenseCategoriesTable"><tr><td colspan="3">Loading...</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
     <div class="card">
         <div class="card-header"><h5 class="mb-0">All Claims</h5></div>
         <div class="card-body">
@@ -79,7 +106,93 @@
     </div>
 </div>
 <script>
-document.addEventListener('DOMContentLoaded', loadExpenses);
+document.addEventListener('DOMContentLoaded', () => {
+   loadExpenses();
+   if (document.getElementById('expenseCategoriesTable')) {
+       loadExpenseCategories();
+       document.getElementById('expenseCategoryForm').addEventListener('submit', createExpenseCategory);
+   }
+});
+
+function escapeExpenseCategory(value) {
+   return String(value ?? '').replace(/[&<>"']/g, char => ({
+       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+   })[char]);
+}
+
+async function loadExpenseCategories() {
+   const response = await fetch('/api/expense-categories');
+   const rows = await response.json();
+   const body = document.getElementById('expenseCategoriesTable');
+   if (!response.ok || !Array.isArray(rows)) {
+       body.innerHTML = '<tr><td colspan="3" class="text-danger">Could not load categories</td></tr>';
+       return;
+   }
+   if (!rows.length) {
+       body.innerHTML = '<tr><td colspan="3" class="text-muted">No categories</td></tr>';
+       return;
+   }
+   body.innerHTML = rows.map(category => `<tr>
+       <td>${escapeExpenseCategory(category.name)}</td>
+       <td>${escapeExpenseCategory(category.description || '-')}</td>
+       <td>
+           <button class="btn btn-warning btn-sm me-1" onclick="editExpenseCategory(${Number(category.id)})">Edit</button>
+           <button class="btn btn-danger btn-sm" onclick="deleteExpenseCategory(${Number(category.id)})">Delete</button>
+       </td>
+   </tr>`).join('');
+}
+
+async function createExpenseCategory(event) {
+   event.preventDefault();
+   const response = await fetch('/api/expense-categories', {
+       method: 'POST',
+       headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({
+           name: document.getElementById('expenseCategoryName').value,
+           description: document.getElementById('expenseCategoryDescription').value
+       })
+   });
+   const result = await response.json();
+   showExpenseCategoryMessage(response, result);
+   if (response.ok) {
+       event.target.reset();
+       loadExpenseCategories();
+   }
+}
+
+async function editExpenseCategory(id) {
+   const response = await fetch('/api/expense-categories');
+   const rows = await response.json();
+   const category = rows.find(row => Number(row.id) === id);
+   if (!category) return;
+   const name = prompt('Category name', category.name);
+   if (name === null) return;
+   const description = prompt('Description (leave blank to clear)', category.description || '');
+   if (description === null) return;
+   const updated = await fetch(`/api/expense-categories/${id}`, {
+       method: 'PUT',
+       headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify({name, description})
+   });
+   showExpenseCategoryMessage(updated, await updated.json());
+   if (updated.ok) loadExpenseCategories();
+}
+
+async function deleteExpenseCategory(id) {
+   if (!confirm('Delete this expense category? Categories used by claims cannot be deleted.')) return;
+   const response = await fetch(`/api/expense-categories/${id}`, {method: 'DELETE'});
+   showExpenseCategoryMessage(response, await response.json());
+   if (response.ok) loadExpenseCategories();
+}
+
+function showExpenseCategoryMessage(response, result) {
+   const message = document.getElementById('expenseCategoryMessage');
+   message.className = `small mb-2 ${response.ok ? 'text-success' : 'text-danger'}`;
+   message.textContent = response.ok
+       ? (result.message || 'Category saved')
+       : (result.error || 'Category request failed');
+}
+
 async function loadExpenses() {
     const r = await fetch('/api/expenses');
     const data = await r.json();

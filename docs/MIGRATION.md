@@ -1411,7 +1411,7 @@ The SRS names materialized views. The implementation uses one keyed snapshot
 table instead: the requested leave-trend window is parameterised, and one table
 and refresh path work on both the compatibility and v2.0 schema shapes. The
 The cutover preflight expected head is subsequently advanced by each migration;
-after FR-ATT-01 it is `0014_break_type_config`.
+after FR-EXP-01 it is `0015_expense_category_names`.
 
 ## FR-DOC-02 / FR-USR-12 / FR-ONB-04 — document validation and scanning
 
@@ -1448,6 +1448,20 @@ unit fixtures replace only the external scanner transport with a clean result;
 the scanner protocol and negative outcomes are independently tested. Validation:
 unit suite **350 passed / 2 skipped**, browser suite **23/23**, Ruff and compile
 checks passed, and both base and local-override Compose configurations validate.
+
+## FR-EXP-01 — expense category administration
+
+Admins can create, partially update and delete expense categories through
+`/api/expense-categories`; the admin expenses page exposes the same controls to
+Admin and Super Admin users. Names are trimmed and bounded (1–80 characters),
+descriptions are limited to 500 characters, and names are unique without regard
+to case or surrounding whitespace. Every successful mutation writes an audit
+row. Categories referenced by an expense claim cannot be deleted; the endpoint
+returns 409 with the number of referencing claims. The existing `cat_id`
+identity/primary keys and `expense_claims.cat_id` foreign keys are unchanged.
+Alembic revision `0015_expense_category_names` adds a functional unique index
+for the canonical target; the compatibility schema creates the same index at
+boot.
 
 ## FR-ATT-01 — configurable break types
 

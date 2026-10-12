@@ -613,16 +613,45 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     run("regularization(submit)", regularization)
 
     def leave_apply():
+        import leave_policy
+        from app import get_db
+
         # FR-LEA-09 counts working days, so fixed offsets off an unanchored
         # `today` land on a weekend roughly every other run (today +30/+31 is
         # a Saturday and Sunday when today is a Thursday) and the range is
-        # refused with a 400. Anchor to the next Monday instead, like the
-        # attendance flows: +2/+3 are always working days.
-        return _post(cl, tok, "/api/leaves",
-                     {"leave_type": "Casual",
-                      "start_date": (attendance_date + timedelta(days=2)).isoformat(),
-                      "end_date": (attendance_date + timedelta(days=3)).isoformat(),
-                      "reason": "public write probe"}).status_code
+        # refused with a 400. Anchor to the next Monday, then skip seeded active
+        # leave ranges and holiday/weekly-off dates using the same day counter
+        # the endpoint uses.
+        start = attendance_date + timedelta(days=2)
+        with app_mod.test_request_context():
+            conn = get_db()
+            try:
+                for _ in range(52):
+                    end = start + timedelta(days=1)
+                    overlap = conn.execute(
+                        "SELECT 1 FROM leave_requests WHERE emp_id = ? "
+                        "AND status IN ('Pending', 'Approved') "
+                        "AND start_date <= ? AND end_date >= ? LIMIT 1",
+                        ["EMP002", end, start],
+                    ).fetchone()
+                    if not overlap and leave_policy.days_between(
+                        start, end, conn=conn, emp_id="EMP002",
+                    ) == 2:
+                        break
+                    start += timedelta(days=7)
+                else:
+                    return 409, "could not find an unoccupied two-working-day range"
+            finally:
+                conn.close()
+        response = _post(
+            cl, tok, "/api/leaves",
+            {"leave_type": "Casual", "start_date": start.isoformat(),
+             "end_date": (start + timedelta(days=1)).isoformat(),
+             "reason": "public write probe"},
+        )
+        if response.status_code not in (200, 201):
+            return response.status_code, f"response={response.get_json()}"
+        return response.status_code
     run("leaves(apply)", leave_apply)
 
     run("notifications( read)", lambda: _post(cl, tok, "/api/notifications/read").status_code)
@@ -700,6 +729,93 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
                 )
                 pc.execute("DELETE FROM break_types WHERE break_type = %s", (name,))
     run("break-types(location + approval config)", break_type_configuration)
+
+    def expense_category_management():
+        name = f"ProbeExpense{os.getpid()}"
+        category_id = None
+        claim_id = None
+        try:
+            created = _post(cl_a, tok_a, "/api/expense-categories", {
+                "name": name, "description": "public category CRUD probe",
+            })
+            if created.status_code != 201:
+                return 409, f"create status={created.status_code}, body={created.get_json()}"
+            category_id = created.get_json()["id"]
+            duplicate = _post(cl_a, tok_a, "/api/expense-categories", {
+                "name": f"  {name.lower()} ",
+            })
+            if duplicate.status_code != 409:
+                return 409, f"case/whitespace duplicate status={duplicate.status_code}"
+            updated = cl_a.put(
+                f"/api/expense-categories/{category_id}",
+                json={"description": "updated public category probe"},
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if updated.status_code != 200 or updated.get_json().get("name") != name:
+                return 409, f"partial update status={updated.status_code}"
+            claim = _post(cl, tok, "/api/expenses", {
+                "cat_id": category_id,
+                "amount": "12.50",
+                "description": "FR-EXP-01 public write probe",
+            })
+            if claim.status_code != 201:
+                return 409, f"claim creation status={claim.status_code}"
+            claim_id = claim.get_json()["id"]
+            blocked = cl_a.delete(
+                f"/api/expense-categories/{category_id}",
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if blocked.status_code != 409 or blocked.get_json().get("claim_count") != 1:
+                return 409, f"referential guard status={blocked.status_code}"
+            with psycopg.connect(pg_dsn) as pc:
+                category = pc.execute(
+                    "SELECT name, description FROM expense_categories WHERE cat_id = %s",
+                    (category_id,),
+                ).fetchone()
+                actions = pc.execute(
+                    "SELECT action FROM audit_log WHERE entity = 'expense_categories' "
+                    "AND entity_id::text = %s ORDER BY log_id",
+                    (str(category_id),),
+                ).fetchall()
+            if category != (name, "updated public category probe"):
+                return 409, f"canonical category row={category}"
+            if [row[0] for row in actions] != [
+                "EXPENSE_CATEGORY_CREATE", "EXPENSE_CATEGORY_UPDATE",
+            ]:
+                return 409, f"category audit trail={actions}"
+            with psycopg.connect(pg_dsn) as pc:
+                pc.execute("DELETE FROM expense_claims WHERE claim_id = %s", (claim_id,))
+            claim_id = None
+            deleted = cl_a.delete(
+                f"/api/expense-categories/{category_id}",
+                headers={"X-CSRF-Token": tok_a},
+            )
+            if deleted.status_code != 200:
+                return 409, f"delete status={deleted.status_code}"
+            with psycopg.connect(pg_dsn) as pc:
+                remaining = pc.execute(
+                    "SELECT COUNT(*) FROM expense_categories WHERE cat_id = %s",
+                    (category_id,),
+                ).fetchone()[0]
+                actions = pc.execute(
+                    "SELECT action FROM audit_log WHERE entity = 'expense_categories' "
+                    "AND entity_id::text = %s ORDER BY log_id",
+                    (str(category_id),),
+                ).fetchall()
+            if remaining or [row[0] for row in actions] != [
+                "EXPENSE_CATEGORY_CREATE", "EXPENSE_CATEGORY_UPDATE",
+                "EXPENSE_CATEGORY_DELETE",
+            ]:
+                return 409, f"delete result={remaining}, audit={actions}"
+            return 200
+        finally:
+            with psycopg.connect(pg_dsn) as pc:
+                if claim_id is not None:
+                    pc.execute("DELETE FROM expense_claims WHERE claim_id = %s", (claim_id,))
+                if category_id is not None:
+                    pc.execute("DELETE FROM expense_categories WHERE cat_id = %s", (category_id,))
+
+    run("expense-categories(admin CRUD + claim guard)", expense_category_management)
 
     def analytics_snapshots():
         expected = {
@@ -2293,7 +2409,18 @@ def main() -> int:
 
     # Supress the ADAPTER's own boolean rewrite introspection noise: none needed.
     import db_backend  # noqa: F401
+    import document_security
+    import object_storage
     from security import hash_password
+
+    # This probe targets the canonical database contract, not the external
+    # antivirus or S3 providers. Their protocols and failure modes are covered
+    # independently; keep this flow deterministic and offline.
+    document_security.clamav_scanner.scan_bytes = lambda _content: None
+    object_storage.upload_document = (
+        lambda emp_id, doc_id, filename, content, content_type:
+        f"documents/public-probe-{doc_id}"
+    )
 
     with psycopg.connect(dsn, autocommit=True) as pconn:
         ph = hash_password("pass123")
