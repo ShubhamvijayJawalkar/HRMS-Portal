@@ -18,9 +18,6 @@ os.environ.setdefault('FORGOT_PASSWORD_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('RESET_PASSWORD_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('DEFAULT_RATE_LIMIT', '100000 per minute')
 os.environ.setdefault('ANONYMISATION_SALT', 'test-anonymisation-salt-value')
-# FR-AUTH-11: encrypts authenticator secrets at rest. Fixed non-production
-# value; MFA returns 503 without it rather than storing secrets in the clear.
-os.environ.setdefault('MFA_ENCRYPTION_KEY', '3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=')
 # FR-PAY-07 / FR-DOC-02: MinIO object storage for payslips and documents.
 # Tests run against mocked S3 via moto (no MinIO container needed).
 os.environ.setdefault('S3_ENDPOINT_URL', '')
@@ -51,77 +48,21 @@ import json  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
-import pyotp  # noqa: E402
 import pytest  # noqa: E402
-from playwright.sync_api import TimeoutError as PlaywrightTimeout  # noqa: E402
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 import document_security  # noqa: E402
-from app import app, get_db  # noqa: E402
+from app import app  # noqa: E402
 
 BASE_URL = 'http://localhost:8787'
 
 
-def _stored_secret(emp_id):
-    """Decrypt an enrolled employee's authenticator secret for a challenge."""
-    import mfa
-
-    conn = get_db()
-    try:
-        row = conn.execute(
-            'SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = ?', [emp_id],
-        ).fetchone()
-    finally:
-        conn.close()
-    assert row, f'{emp_id} has no MFA credential to challenge against'
-    return mfa.decrypt_secret(row[0])
-
-
 def _login(page, emp_id='EMP001', password='pass123'):
-    """Sign in, walking the FR-AUTH-11 second factor when the account has one.
-
-    The seeded admin is an Admin, so a second factor is compulsory for it and a
-    bare password no longer reaches the dashboard. Rather than exempt the browser
-    suite from the control, this drives the real panel: on the first sign-in it
-    enrols (reading the secret the page itself displays and minting a code from
-    it) and on later ones it challenges. That also means the login page's MFA
-    panel is exercised by every test rather than by one dedicated test.
-
-    The Employee accounts the suite also uses have no factor and take the
-    single-step path, so both shapes stay covered.
-    """
+    """Sign in through the password-only flow."""
     page.goto(BASE_URL + '/login')
     page.fill('#empId', emp_id)
     page.fill('#password', password)
     page.click('button[type="submit"]')
-
-    # 15s, not 5s: the panel appears only after POST /login and the MFA enrol round
-    # trip. A tight window here turns a loaded machine into a false "no MFA" and then
-    # a timeout waiting for a dashboard that was never going to arrive.
-    panel = page.locator('#mfaStep')
-    try:
-        panel.wait_for(state='visible', timeout=15000)
-    except PlaywrightTimeout:
-        page.wait_for_url(BASE_URL + '/dashboard')
-        return
-
-    # An enrolment shows the secret on the page; a challenge only shows a box, and
-    # the secret has to come from the stored (encrypted) credential.
-    #
-    # The wait on the *text*, not on the box becoming visible: the panel reveals the
-    # enrolment area first and fills the secret only after `/api/mfa/enrol` returns,
-    # so reading it on visibility alone yields an empty string and mints a code from
-    # no secret at all.
-    if page.locator('#mfaEnrolBox').is_visible():
-        page.wait_for_function(
-            "() => document.getElementById('mfaSecret').textContent.trim().length > 0",
-            timeout=10000,
-        )
-        secret = page.locator('#mfaSecret').inner_text().strip()
-    else:
-        secret = _stored_secret(emp_id)
-    page.fill('#mfaCode', pyotp.TOTP(secret).now())
-    page.click('#mfaBtn')
     page.wait_for_url(BASE_URL + '/dashboard')
 
 @pytest.fixture(scope='session', autouse=True)

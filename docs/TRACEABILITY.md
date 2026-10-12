@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 88 | 78% |
+| `IMPLEMENTED` | 87 | 77% |
 | `PARTIAL` | 19 | 17% |
-| `NOT_STARTED` | 5 | 4% |
+| `NOT_STARTED` | 6 | 5% |
 | `RETIRED` | 1 | 1% |
 | **total** | **113** | |
 
-### IMPLEMENTED (88)
+### IMPLEMENTED (87)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -66,7 +66,6 @@ rather than quietly invalidating this document.
 | `FR-AUTH-08` | H | C | `/api/forgot-password`<br>`/reset-password` | Always 202 with the SRS's own sentence and never a token, so the request has nothing to compare between a real and an unknown account; a test asserts all four request shapes answer byte-identically. Delivery moved to the outbox, which is where the SRS puts it ("email {host}/reset-password?token=... (queued via outbox)") and what makes an empty response possible. This row previously claimed IMPLEMENTED while the route answered 404 {"error": "No matching user found"} for an unknown account and 200 *carrying the working token* for a real one - not a weakened control but its inversion, since a caller could confirm any employee ID and obtain a credential without touching the account. /reset-password now exists too: the emailed URL used to 404, so the journey was reachable only by calling the API. |
 | `FR-AUTH-09` | H | C | `/api/reset-password`<br>`/reset-password` | token_urlsafe(32), stored as a SHA-256 digest and never in the clear, 1 h expiry, single use via a write conditional on used = 0, and every other live token for the account invalidated on a successful reset - without that last part an attacker who requested their own reset while a legitimate one was live keeps a working credential after the legitimate user resets. Purged hourly. The queued link carries the token encrypted (the digest cannot be reversed, so the dispatcher needs a copy), which is unreadable without the app Fernet key, so a database read still cannot mint a reset. Two corrections to this row: it previously said the token was "stored unhashed", which was half true and arguably worse - hashing existed on the write path while /api/reset-password looked tokens up as token IN (raw, digest) to accommodate two plaintext tokens the boot seed wrote, so a database read still yielded working credentials; and it said the expiry should be 24 h, which is wrong - that is FR-USR-02's welcome-email token, a different flow, and FR-AUTH-09 specifies 1 h, which the code already used. |
 | `FR-AUTH-10` | M | C | `/api/users`<br>`/api/change-password`<br>`/api/reset-password` | passwords.py: a 10-character minimum (Appendix A-01 calls 6 a defect) and a breach-corpus check, enforced at every point a password is set. The corpus is a bundled offline list, extended optionally by the HIBP k-anonymity range API; leet variants and known-password-plus-suffix are caught too. Deliberately no complexity rules and no expiry, per NIST SP 800-63B, and a test parses the module to keep them out. The old shared default of 'pass123' is gone: a user created without a password gets a generated compliant one, returned once. The rejection message is generic, so it is not an oracle for confirming a guess. |
-| `FR-AUTH-11` | H | N | `/api/mfa/enrol`<br>`/api/mfa/confirm`<br>`/api/mfa/challenge`<br>`/api/mfa/status`<br>`/api/mfa/qr`<br>`/api/mfa/disable`<br>`/api/admin/users/<emp_id>/mfa/reset` | mfa.py: TOTP (RFC 6238) for Admin/Super Admin/HR/Finance and self-service opt-in for everyone else. Two-phase enrolment — the row is written with enabled=0 and only a valid code promotes it, so a stolen password cannot enrol an attacker's own authenticator against the account. The password step parks the identity in session["mfa_pending"] and deliberately does NOT set session["emp_id"], so a half-authenticated session is refused by every existing gate by construction rather than by each route remembering to check. Five wrong codes abandon the parked login (429); one step of clock drift is tolerated; the pending state expires after ten minutes. Secrets are Fernet-encrypted under a dedicated MFA_ENCRYPTION_KEY and the feature refuses with 503 rather than storing them in the clear — key separation from SECRET_KEY, mirroring ANONYMISATION_SALT. Recovery is an audited admin reset only, which is the weaker of the two answers the SRS allows: there are no recovery codes, so the mitigation is that the reset answers identically whether or not the target was enrolled (so it cannot be used to find out who is protected) and writes a before/after audit row. A mandatory role cannot disable its own factor. |
 | `FR-AUTH-12` | M | C | `/api/csrf-token` | A per-session synchroniser token, compared with hmac.compare_digest on every mutating request. Note the shape differs from the SRS, which names "a csrf_token cookie plus X-CSRF-Token header (double-submit)": the token lives in the session rather than in a separate cookie, and enforcement is app-wide rather than scoped to /api/* - both stricter than asked, and session storage is the stronger of the two patterns. An HTML response gets a script that attaches the header to fetch, and native forms carry a hidden field. /api/preboarding/* is exempt because those requests authenticate with a signed, expiring token of their own and cannot be forged cross-site. Asserted end to end with server-side sessions too. |
 | `FR-AUTH-14` | H | C | `/api/admin/users/<emp_id>/unlock` | Hourly job does both duties the SRS names in one sentence: purge expired reset tokens AND idempotency keys (CC-07), and auto-close breaks left Active for more than 12 hours. The sweep is orphan_breaks.close_orphaned_breaks: the write is conditional on status = Active so a repeat pass or a racing pod is a no-op rather than a double notification, and it sets status Orphaned plus ended_reason orphan_timeout - the canonical schema already carried that column and documented the vocabulary on it (orphan_timeout|admin_dispose|auto_end_new_break) with no writer anywhere, so a break could be closed four ways and there was no way to tell which. Duration is derived from the break TYPE daily limit, capped by elapsed time, and never from the 12 hours itself: that number is a threshold for when a row can no longer be believed to be running, not a length of break, and closing at start_time + 12h would manufacture an absence and a loss-of-pay deduction out of a forgotten button press. Every closure is audited with actor SYSTEM (before/after) and notified to the employee, because the recorded duration is a guess and they are the only party who knows when they came back - FR-ATT-16 admin disposal is how a wrong record is corrected, and an employee never told cannot ask. |
 | `FR-DOC-01` | M | R | `/api/documents` | Scoped to the owner unless HR/Admin. The record and the delete are both audited. The create also used a bare INSERT INTO employee_documents VALUES (...) - not a live failure, since both schemas have five columns in that order today, but the same latent shape that made POST /api/goals return 500 on every backend and mis-targeted add_holiday against v2.0 sixth column. It names its columns now, and a test reads the canonical schema and fails if the route list and the schema stop agreeing. |
@@ -147,11 +146,12 @@ rather than quietly invalidating this document.
 | `FR-USR-13` | M | C | `/api/profile` | Profile read/write is self-scoped and routed through the PII helper. The field allow-list is not a declared strict subset: an employee cannot change their own role, but the boundary is implied by the handler rather than asserted by a test. |
 | `FR-USR-14` | M | R | `/api/change-password` | The current password is required. The session token is not re-issued on change, so an existing cookie keeps working. |
 
-### NOT_STARTED (5)
+### NOT_STARTED (6)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
 | `FR-ANL-04` | S | C | `/api/analytics/attrition-risk` | The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing them needs a code change and redeploy. |
+| `FR-AUTH-11` | H | N | `/api/mfa/enrol`<br>`/api/mfa/confirm`<br>`/api/mfa/challenge`<br>`/api/mfa/status`<br>`/api/mfa/qr`<br>`/api/mfa/disable`<br>`/api/admin/users/<emp_id>/mfa/reset` | MFA is intentionally disabled system-wide: valid-password sign-in completes without a second factor, including for privileged roles and accounts with a saved credential. Enrolment, QR, confirmation and challenge routes refuse with 410; the profile explains that saved authenticators are not checked and permits removing an old record. Existing encrypted credential rows are retained rather than deleted. The TOTP/encryption implementation and audited Admin reset remain in the code but do not protect sign-in. FR-AUTH-11 is therefore not implemented until MFA enforcement is deliberately re-enabled. |
 | `FR-JOB-03` | S | R | — | No quarterly job opens the next performance review cycle. |
 | `FR-PAY-03` | M | C | — | No rates table exists in the canonical schema or anywhere in the code, so there is nothing versioned, effective-dated or editable. Every rate the calculation needs is a literal inside calc_payroll_item (app.py): PF 0.12 / ESI 0.0075 / pf_max 1800 / esi_max 21000 / pt 200 / pt_threshold 10000. A run therefore cannot "use the rates effective on the run period end date" because there are no rates to date, and changing one is a code change. |
 | `FR-PAY-09` | S | R | — | The SRS sentence is printed under Payroll but is a performance-review requirement, cross-referenced by FR-JOB-03 (which names the same quarterly job). Neither half exists: there is no review_cycles table - performance_reviews rows carry a review_period string, which is a label on a review, not a cycle to report progress against - so the progress query has nothing to be progress OF, and no quarterly job opens the next cycle. The flat GET /api/performance-reviews that exists answers a different question. |
@@ -165,16 +165,13 @@ rather than quietly invalidating this document.
 
 ## What the gaps have in common
 
-Eight `NOT_STARTED` rows remain, and they cluster in four places.
+Six `NOT_STARTED` rows remain, and they cluster in four places.
 
-**No account-level authentication defence is missing any more.** Phase 3a did
-the session, hashing, CSRF and rate-limit work; FR-AUTH-10 added the password
-policy; FR-AUTH-11 added TOTP; FR-AUTH-03 added the lockout; and FR-AUTH-08/09
-were corrected, which turned out to matter more than either of their numbers —
-the reset endpoint was answering 404 for an unknown account and 200 *with a
-working token* for a real one. What is left is a `PARTIAL` row:
-**FR-AUTH-01**'s login rate limit is keyed on remote address rather than on the
-account *and* the IP, which is the right order of magnitude but not the right key.
+**MFA sign-in enforcement is intentionally disabled.** FR-AUTH-11 is not
+implemented: password-only login is accepted for every role, saved authenticator
+records are inert, and enrolment/challenge routes refuse requests. The TOTP
+implementation remains dormant, but it is not an account-level sign-in defence.
+Other authentication gaps are named in their own matrix rows.
 
 **Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
 table and its no-overlap exclusion constraint in the canonical schema and no

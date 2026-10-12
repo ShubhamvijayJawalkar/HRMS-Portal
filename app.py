@@ -3380,7 +3380,7 @@ def login():
     finally:
         conn.close()
 
-    # FR-AUTH-11: for a role in mfa.MANDATORY_ROLES, and for anyone who has
+    # FR-AUTH-11: when enabled, for a role in mfa.MANDATORY_ROLES, and for anyone who has
     # opted in, the password is only half the credential. From here login is a
     # two-step flow: the password step parks the identity in
     # `session['mfa_pending']` and deliberately does NOT set `session['emp_id']`,
@@ -3393,7 +3393,7 @@ def login():
     finally:
         conn.close()
     mandatory = mfa.requires_enrolment(row[2])
-    if enrolled or mandatory:
+    if mfa.MFA_ENABLED and (enrolled or mandatory):
         # Signing in as a second account has to end the first one. The browser
         # keeps the session cookie across a sign-in, so without this the previous
         # employee's identity is *still* in the session while the second factor is
@@ -3565,13 +3565,19 @@ def _mfa_subject():
 def _mfa_unauthorised():
     return jsonify({
         'error': 'Authentication required',
-        'mfa_required': 'login',
     }), 401
+
+
+def _mfa_disabled():
+    return jsonify({
+        'error': 'Multi-factor authentication is disabled',
+        'enabled': False,
+    }), 410
 
 
 @app.route('/api/mfa/status')
 def mfa_status():
-    """Is the caller enrolled, and is it compulsory for their role?"""
+    """Report any saved enrolment and whether MFA protects sign-in."""
     emp_id, _, _ = _mfa_subject()
     if not emp_id:
         return _mfa_unauthorised()
@@ -3592,6 +3598,8 @@ def mfa_enrol():
     emp_id, name, _ = _mfa_subject()
     if not emp_id:
         return _mfa_unauthorised()
+    if not mfa.MFA_ENABLED:
+        return _mfa_disabled()
     conn = get_db()
     try:
         try:
@@ -3626,6 +3634,8 @@ def mfa_qr():
     emp_id, _, _ = _mfa_subject()
     if not emp_id:
         return _mfa_unauthorised()
+    if not mfa.MFA_ENABLED:
+        return _mfa_disabled()
     conn = get_db()
     try:
         row = conn.execute(
@@ -3655,6 +3665,8 @@ def mfa_confirm():
     emp_id, _, state = _mfa_subject()
     if not emp_id:
         return _mfa_unauthorised()
+    if not mfa.MFA_ENABLED:
+        return _mfa_disabled()
     code = (request.get_json(silent=True) or {}).get('code', '')
     conn = get_db()
     try:
@@ -3691,6 +3703,10 @@ def mfa_confirm():
 @app.route('/api/mfa/challenge', methods=['POST'])
 def mfa_challenge():
     """Second step for an enrolled user: the code from their authenticator."""
+    if not mfa.MFA_ENABLED:
+        if not _mfa_subject()[0]:
+            return _mfa_unauthorised()
+        return _mfa_disabled()
     state = mfa.pending(session)
     if not state:
         return _mfa_unauthorised()
@@ -3729,22 +3745,14 @@ def mfa_challenge():
 def mfa_disable():
     """Turn one's own second factor off.
 
-    Refused for a role where MFA is mandatory: an Admin could otherwise make
-    themselves unbreakable-to-themselves and permanently outside the control
-    the policy exists to impose. Those users go through the Admin reset, which
-    is audited.
+    This remains available so users can remove stored authenticator records
+    that are no longer used while MFA is disabled system-wide.
     """
     emp_id, _, _ = _mfa_subject()
     if not emp_id:
         return _mfa_unauthorised()
     conn = get_db()
     try:
-        st = mfa.status_for(conn, emp_id)
-        if st['mandatory']:
-            return jsonify({
-                'error': 'Multi-factor authentication is required for your role '
-                         'and can only be reset by an administrator.',
-            }), 409
         removed = mfa.disable(conn, emp_id)
     finally:
         conn.close()
@@ -3790,10 +3798,10 @@ def admin_reset_mfa(emp_id):
     add_notification(
         emp_id, 'MFA_RESET',
         'Your multi-factor authentication was reset by an administrator. '
-        'You will be asked to enrol again the next time you sign in.',
+        'Multi-factor authentication is currently disabled for sign-in.',
     )
     return jsonify({
-        'message': f'MFA reset for {emp_id}. They will re-enrol at next sign-in.',
+        'message': f'Saved MFA credential reset for {emp_id}.',
         'emp_id': emp_id,
     }), 200
 

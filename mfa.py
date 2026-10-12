@@ -1,4 +1,8 @@
-"""FR-AUTH-11 — TOTP multi-factor authentication.
+"""FR-AUTH-11 — dormant TOTP multi-factor authentication implementation.
+
+The application-level MFA switch is intentionally off. Existing encrypted
+credentials remain stored but are ignored at sign-in; the implementation below
+is retained for a future explicit re-enable decision.
 
 The canonical schema shipped ``mfa_credentials`` (an encrypted secret, unique
 per employee, an ``enabled`` flag) and **no code anywhere read or wrote it** —
@@ -46,6 +50,10 @@ import pyotp
 
 logger = logging.getLogger(__name__)
 
+# MFA is intentionally disabled at the application level. Existing credential
+# rows remain available for an explicit future re-enable decision.
+MFA_ENABLED = False
+
 # Roles that cannot use the application without a second factor. See the module
 # docstring for why this set and not "everyone".
 MANDATORY_ROLES = frozenset({'Admin', 'Super Admin', 'HR', 'Finance'})
@@ -72,7 +80,7 @@ _MISSING_KEY = (
 
 def requires_enrolment(role: str | None) -> bool:
     """Must this role have a second factor before it can use the app?"""
-    return role in MANDATORY_ROLES
+    return MFA_ENABLED and role in MANDATORY_ROLES
 
 
 # ── Secret encryption ──────────────────────────────────────────────────────
@@ -169,7 +177,7 @@ def verify_code(secret: str, code) -> bool:
 # POST /api/goals return 500 on every backend.
 
 def status_for(conn, emp_id: str) -> dict:
-    """What the UI needs to know: enrolled, and whether it is compulsory."""
+    """Report stored enrolment separately from sign-in enforcement."""
     row = conn.execute(
         "SELECT enabled FROM mfa_credentials WHERE emp_id = ?", [emp_id]
     ).fetchone()
@@ -178,8 +186,11 @@ def status_for(conn, emp_id: str) -> dict:
     return {
         'emp_id': emp_id,
         'role': role,
+        'enabled': MFA_ENABLED,
+        'stored': bool(row),
         'enrolled': bool(row and row[0]),
         'mandatory': requires_enrolment(role),
+        'enforced': MFA_ENABLED and bool(row and row[0] or requires_enrolment(role)),
     }
 
 

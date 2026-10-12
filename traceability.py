@@ -259,28 +259,19 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    "default of 'pass123' is gone: a user created without a password gets a "
                    'generated compliant one, returned once. The rejection message is generic, '
                    'so it is not an oracle for confirming a guess.'),
-    'FR-AUTH-11': ('H', 'N', 'IMPLEMENTED',
+    'FR-AUTH-11': ('H', 'N', 'NOT_STARTED',
                    ('/api/mfa/enrol', '/api/mfa/confirm', '/api/mfa/challenge',
                     '/api/mfa/status', '/api/mfa/qr', '/api/mfa/disable',
                     '/api/admin/users/<emp_id>/mfa/reset'),
-                   'mfa.py: TOTP (RFC 6238) for Admin/Super Admin/HR/Finance and '
-                   'self-service opt-in for everyone else. Two-phase enrolment — the '
-                   'row is written with enabled=0 and only a valid code promotes it, '
-                   'so a stolen password cannot enrol an attacker\'s own authenticator '
-                   'against the account. The password step parks the identity in '
-                   'session["mfa_pending"] and deliberately does NOT set session["emp_id"], '
-                   'so a half-authenticated session is refused by every existing gate by '
-                   'construction rather than by each route remembering to check. Five '
-                   'wrong codes abandon the parked login (429); one step of clock drift '
-                   'is tolerated; the pending state expires after ten minutes. Secrets are '
-                   'Fernet-encrypted under a dedicated MFA_ENCRYPTION_KEY and the feature '
-                   'refuses with 503 rather than storing them in the clear — key '
-                   'separation from SECRET_KEY, mirroring ANONYMISATION_SALT. Recovery is '
-                   'an audited admin reset only, which is the weaker of the two answers '
-                   'the SRS allows: there are no recovery codes, so the mitigation is that '
-                   'the reset answers identically whether or not the target was enrolled '
-                   '(so it cannot be used to find out who is protected) and writes a '
-                   'before/after audit row. A mandatory role cannot disable its own factor.'),
+                   'MFA is intentionally disabled system-wide: valid-password sign-in '
+                   'completes without a second factor, including for privileged roles and '
+                   'accounts with a saved credential. Enrolment, QR, confirmation and '
+                   'challenge routes refuse with 410; the profile explains that saved '
+                   'authenticators are not checked and permits removing an old record. '
+                   'Existing encrypted credential rows are retained rather than deleted. '
+                   'The TOTP/encryption implementation and audited Admin reset remain in '
+                   'the code but do not protect sign-in. FR-AUTH-11 is therefore not '
+                   'implemented until MFA enforcement is deliberately re-enabled.'),
     'FR-AUTH-12': ('M', 'C', 'IMPLEMENTED', ('/api/csrf-token',),
                    'A per-session synchroniser token, compared with hmac.compare_digest '
                    'on every mutating request. Note the shape differs from the SRS, which '

@@ -52,16 +52,13 @@ rather than quietly invalidating this document.
 {groups}
 ## What the gaps have in common
 
-Eight `NOT_STARTED` rows remain, and they cluster in four places.
+Six `NOT_STARTED` rows remain, and they cluster in four places.
 
-**No account-level authentication defence is missing any more.** Phase 3a did
-the session, hashing, CSRF and rate-limit work; FR-AUTH-10 added the password
-policy; FR-AUTH-11 added TOTP; FR-AUTH-03 added the lockout; and FR-AUTH-08/09
-were corrected, which turned out to matter more than either of their numbers —
-the reset endpoint was answering 404 for an unknown account and 200 *with a
-working token* for a real one. What is left is a `PARTIAL` row:
-**FR-AUTH-01**'s login rate limit is keyed on remote address rather than on the
-account *and* the IP, which is the right order of magnitude but not the right key.
+**MFA sign-in enforcement is intentionally disabled.** FR-AUTH-11 is not
+implemented: password-only login is accepted for every role, saved authenticator
+records are inert, and enrolment/challenge routes refuse requests. The TOTP
+implementation remains dormant, but it is not an account-level sign-in defence.
+Other authentication gaps are named in their own matrix rows.
 
 **Schema without routes** — `approval_delegations` (FR-LEA-08a) still has its
 table and its no-overlap exclusion constraint in the canonical schema and no

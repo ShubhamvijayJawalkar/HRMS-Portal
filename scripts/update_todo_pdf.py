@@ -52,6 +52,14 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-12", "FR-AUTH-11 (High): two-factor authentication has been "
+     "disabled system-wide as requested. Login now completes after password "
+     "verification for every role, including accounts with an enabled saved "
+     "factor. Enrollment, QR, confirmation and challenge routes return 410; the "
+     "profile identifies MFA as disabled and allows removal of an old stored "
+     "credential. Existing encrypted credential rows are retained rather than "
+     "deleted. Traceability is corrected to NOT_STARTED because the SRS control "
+     "does not protect sign-in while this switch is off."),
     ("2026-10-12", "FR-EXP-01 (Medium): Admin and Super Admin can now create, "
       "partially update and delete expense categories from the expense page and "
       "API. Names are bounded, trimmed and unique across case/whitespace variants "
@@ -1512,6 +1520,9 @@ def _srs_modules(rows):
 #: status report wearing a different heading.
 _NEXT_STEPS = {
     # ── High ────────────────────────────────────────────────────────────
+    'FR-AUTH-11': 'Re-enable MFA sign-in enforcement and restore enrollment/challenge '
+                  'controls, then verify privileged and previously-enrolled accounts '
+                  'cannot establish a session with only a password.',
     # FR-PAY-07 is IMPLEMENTED (object storage + presigned URL for payslips)
     # FR-DOC-02 is IMPLEMENTED (object storage + presigned URL for documents)
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads)

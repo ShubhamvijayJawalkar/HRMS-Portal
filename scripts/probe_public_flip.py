@@ -99,69 +99,12 @@ def _install_tolerant_boot() -> None:
 
 
 def _login(app_mod, dsn, emp_id: str):
-    """Sign in and walk the FR-AUTH-11 second factor when the account has one.
-
-    The probe logs in as an Admin as well as an Employee, and MFA is compulsory
-    for the former, so a bare password leaves the admin client half-authenticated
-    and every admin-scoped flow below reports 401. Walking the real flow rather
-    than exempting the probe is the point: this is exactly the surface a public
-    flip has to keep working.
-
-    An account with no factor takes the one-step path and is untouched by any of
-    this, so the ordinary case costs nothing.
-    """
-    import pyotp
-
+    """Sign in through the password-only flow while MFA is disabled."""
     cl = app_mod.test_client()
     tok = cl.get("/api/csrf-token").get_json()["csrf_token"]
     r = cl.post("/login", json={"emp_id": emp_id, "password": "pass123"},
                 headers={"X-CSRF-Token": tok})
-    if r.status_code != 200 or not (r.is_json and r.get_json().get("mfa_required")):
-        return cl, tok, r.status_code
-
-    step = r.get_json()["mfa_required"]
-    if step == "enrol_required":
-        # Mint the secret through the same route the UI uses, then read it back
-        # out of the database: the API deliberately never returns a stored secret
-        # a second time, so this is the only place it is available. The read goes
-        # through psycopg on `dsn` rather than the app's `get_db`, because this
-        # function is handed the Flask *app*, which has no `get_db` attribute.
-        e = cl.post("/api/mfa/enrol", headers={"X-CSRF-Token": tok})
-        if e.status_code != 200:
-            return cl, tok, e.status_code
-        secret = _stored_secret(dsn, emp_id)
-        if secret is None:
-            return cl, tok, 500
-        # The QR is only served while the enrolment is in progress, so this is the
-        # one moment it can be checked against the v2.0 target. After the confirm
-        # below the same route answers 404 by design.
-        if cl.get("/api/mfa/qr").status_code != 200:
-            return cl, tok, 500
-        ok = cl.post("/api/mfa/confirm", json={"code": pyotp.TOTP(secret).now()},
-                     headers={"X-CSRF-Token": tok, "Content-Type": "application/json"})
-    else:
-        secret = _stored_secret(dsn, emp_id)
-        if secret is None:
-            return cl, tok, 500
-        ok = cl.post(
-            "/api/mfa/challenge",
-            json={"code": pyotp.TOTP(secret).now()},
-            headers={"X-CSRF-Token": tok, "Content-Type": "application/json"},
-        )
-    return cl, tok, ok.status_code
-
-
-def _stored_secret(dsn, emp_id: str):
-    """The decrypted authenticator secret for an enrolled employee, or None."""
-    import mfa as _mfa
-
-    with psycopg.connect(dsn, autocommit=True) as pc:
-        row = pc.execute(
-            "SELECT secret_encrypted FROM mfa_credentials WHERE emp_id = %s", [emp_id],
-        ).fetchone()
-    if not row:
-        return None
-    return _mfa.decrypt_secret(row[0])
+    return cl, tok, r.status_code
 
 
 def _post(cl, tok, url, body=None):
@@ -1820,8 +1763,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
     # Last, deliberately. It locks EMP002 for real, and every flow above signs in
     # as EMP002, so anything after it would fail for the wrong reason.
     def lockout_lock():
-        # A throwaway client per attempt, because a parked MFA login is not what
-        # this is testing and a reused session would carry state between tries.
+        # A throwaway client per attempt keeps session state out of this flow.
         last = None
         for _ in range(_LOCKOUT_ATTEMPTS):
             lc = app_mod.test_client()
@@ -1898,11 +1840,8 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         happens to work on the `legacy` shape.
         """
         target = "EMP002"
-        # `cl_a` is the probe's already-authenticated **Admin** session — and it has
-        # to be reused rather than re-logged-in. EMP001 is in `mfa.MANDATORY_ROLES`,
-        # so a fresh `/login` here returns a *parked* half-session (`mfa_required`)
-        # and every admin route then answers 401. Reusing the session the other admin
-        # flows use is what keeps this one measuring the password route.
+        # `cl_a` is the probe's already-authenticated Admin session. Reusing it
+        # keeps this flow focused on the admin-set-password route.
         #
         # Note the target is EMP002, which the lockout flows above deliberately locked
         # — that is useful, not incidental: it means this flow also proves the
@@ -2219,8 +2158,7 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             with psycopg.connect(pg_dsn, autocommit=True) as pc:
                 pc.execute("UPDATE users SET manager_emp_id = %s WHERE emp_id = %s",
                            [mgr, rep])
-            # Sign in the three fresh accounts. None of the roles is in
-            # mfa.MANDATORY_ROLES, so each login is the one-step path.
+            # Sign in the three fresh accounts through the password-only flow.
             clients = {}
             for emp in (mgr, rep, dlg):
                 lcl = app_mod.test_client()
@@ -2473,11 +2411,7 @@ def main() -> int:
     global _BOOT
     _BOOT = False
 
-    # The GET sweep below runs on this client, so it needs a *fully* authenticated
-    # session. EMP001 is an Admin and FR-AUTH-11 makes a second factor compulsory
-    # for that role, so a bare password parks the login and every route would then
-    # answer 401 — which reads as a broken public flip rather than as a login that
-    # stopped half way. `_login` walks the second factor.
+    # The GET sweep below runs on this fully authenticated password-only session.
     c, tok, status = _login(app, dsn, "EMP001")
     print("login:", status)
     if status != 200:
@@ -2509,19 +2443,18 @@ def main() -> int:
         if status != "OK":
             print(f"  {name}: {status}  {detail}")
 
-    # `/api/mfa/qr` is the one route whose *correct* answer depends on state the
-    # sweep has already left behind: it serves the provisioning image only while an
-    # enrolment is in progress, and answers 404 once confirmed, because re-serving
-    # a live bearer secret after the fact would be strictly worse. The sweep runs
-    # after a completed login, so 404 is the right answer here — recorded with its
-    # reason rather than filtered out silently, and asserted where it *does* apply
-    # (during enrolment, in `_login`).
-    EXPECTED_GET_404 = {
-        "/api/mfa/qr": "only served during an in-progress enrolment; 404 once confirmed",
+    # MFA routes are deliberately disabled; the QR route reports 410 to
+    # authenticated callers instead of serving an enrolment secret.
+    EXPECTED_GET_ERRORS = {
+        "/api/mfa/qr": (410, "MFA is disabled system-wide"),
     }
-    fails = [u for u, s in statuses.items() if s != 200 and u not in EXPECTED_GET_404]
+    fails = [
+        u for u, status in statuses.items()
+        if (u in EXPECTED_GET_ERRORS and status != EXPECTED_GET_ERRORS[u][0])
+        or (u not in EXPECTED_GET_ERRORS and status != 200)
+    ]
     wfails = [n for n, (s, _) in write.items() if s != "OK"]
-    print(f"\n{len(statuses) - len(fails)}/{len(statuses)} authenticated GET routes served from {schema}")
+    print(f"\n{len(statuses) - len(fails)}/{len(statuses)} authenticated GET routes matched expected responses from {schema}")
     print(f"{len(write) - len(wfails)}/{len(write)} core write flows served from {schema}")
 
     print("\n=== seed-level deltas (init_db inserts still rejected by v2.0) ===")
