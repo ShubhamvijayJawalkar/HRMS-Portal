@@ -238,7 +238,15 @@ identically on DuckDB and PostgreSQL; nothing here depends on the DB backend.
 - Set `REDIS_URL` (e.g. `redis://localhost:56379/0`) to store Flask sessions in
   Redis; the cookie then holds only an opaque session id. Default (unset) keeps
   signed cookies, so dev/CI needs no Redis.
-- TTL = `PERMANENT_SESSION_LIFETIME` (8 h); logout deletes the server copy.
+- TTL = `PERMANENT_SESSION_LIFETIME` (8 h), refreshed on activity; successful
+  authentication marks the session permanent so the signed-cookie fallback gets
+  the same idle expiry. Logout deletes the server copy.
+- `auth_session_created_at` is set once after full authentication (including MFA)
+  and is not refreshed. Every authenticated request checks the fixed 24 h
+  absolute deadline. Expiry closes the attendance session, writes
+  `SESSION_EXPIRED`, clears the identity and deletes the Redis key. A legacy
+  authenticated session without a creation timestamp is expired rather than
+  granted a fresh 24-hour window.
 - Blocking, archiving, unchecking `allow_login`, anonymisation and the nightly
   offboarding revocation all call `_revoke_redis_sessions()`, which scans
   `hrms:session:*` and deletes the keys whose payload names that employee.

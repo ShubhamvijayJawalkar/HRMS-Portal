@@ -93,6 +93,10 @@ app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_SECURE'] = (os.getenv('FLASK_ENV') == 'production')
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
+app.config['SESSION_ABSOLUTE_LIFETIME'] = timedelta(hours=24)
+
+AUTH_SESSION_CREATED_AT = 'auth_session_created_at'
 
 if os.getenv('FLASK_ENV') == 'production':
     from werkzeug.middleware.proxy_fix import ProxyFix
@@ -280,6 +284,18 @@ def get_db():
     """
     import db_backend
     return db_backend.connect()
+
+
+def _auth_session_expired(created_at, now=None):
+    """Whether the authenticated session exceeded its fixed 24-hour lifetime."""
+    try:
+        created_at = float(created_at)
+    except (TypeError, ValueError):
+        return True
+    if not math.isfinite(created_at):
+        return True
+    current = now if now is not None else datetime.now(timezone.utc).timestamp()
+    return current - created_at >= app.config['SESSION_ABSOLUTE_LIFETIME'].total_seconds()
 
 
 def _is_public_target_schema():
@@ -3416,6 +3432,8 @@ def _complete_login(emp_id, name, role, department):
     session['role'] = role
     session['department'] = department
     session['session_id'] = session_id
+    session[AUTH_SESSION_CREATED_AT] = datetime.now(timezone.utc).timestamp()
+    session.permanent = True
 
     now = datetime.now()
     shift_date = _get_shift_date_for_dt(emp_id, now, conn)
@@ -3474,10 +3492,12 @@ def logout():
 #: previous employee's session in place. `csrf_token` is deliberately not here:
 #: it is not an identity, and dropping it would make the very next write — the
 #: challenge itself — fail CSRF for no reason.
-_IDENTITY_SESSION_KEYS = ('emp_id', 'name', 'role', 'department', 'session_id')
+_IDENTITY_SESSION_KEYS = (
+    'emp_id', 'name', 'role', 'department', 'session_id', AUTH_SESSION_CREATED_AT,
+)
 
 
-def _end_current_session():
+def _end_current_session(action='LOGOUT', detail='Session replaced by a new sign-in'):
     """Drop the current identity, closing its `user_sessions` row first.
 
     Called when a new sign-in replaces an existing one. The row is closed with
@@ -3487,25 +3507,26 @@ def _end_current_session():
     """
     emp_id = session.get('emp_id')
     session_id = session.get('session_id')
-    if emp_id and session_id:
-        conn = get_db()
-        try:
-            row = conn.execute(
-                'SELECT login_time FROM user_sessions WHERE session_id = ? '
-                'AND emp_id = ? AND logout_time IS NULL',
-                [session_id, emp_id],
-            ).fetchone()
-            if row:
-                logout_time = datetime.now()
-                hours = round((logout_time - row[0]).total_seconds() / 3600, 2)
-                conn.execute(
-                    'UPDATE user_sessions SET logout_time = ?, total_hours = ? '
-                    'WHERE session_id = ?',
-                    [logout_time, hours, session_id],
-                )
-        finally:
-            conn.close()
-        audit_log(emp_id, 'LOGOUT', 'Session replaced by a new sign-in',
+    if emp_id:
+        if session_id:
+            conn = get_db()
+            try:
+                row = conn.execute(
+                    'SELECT login_time FROM user_sessions WHERE session_id = ? '
+                    'AND emp_id = ? AND logout_time IS NULL',
+                    [session_id, emp_id],
+                ).fetchone()
+                if row:
+                    logout_time = datetime.now()
+                    hours = round((logout_time - row[0]).total_seconds() / 3600, 2)
+                    conn.execute(
+                        'UPDATE user_sessions SET logout_time = ?, total_hours = ? '
+                        'WHERE session_id = ?',
+                        [logout_time, hours, session_id],
+                    )
+            finally:
+                conn.close()
+        audit_log(emp_id, action, detail,
                   entity='Auth', entity_id=emp_id)
     for key in _IDENTITY_SESSION_KEYS:
         session.pop(key, None)
@@ -12968,8 +12989,30 @@ class _RollbackWriteRequest(Exception):
 
 
 @app.before_request
+def _enforce_absolute_session_lifetime():
+    emp_id = session.get('emp_id')
+    if not emp_id or not _auth_session_expired(session.get(AUTH_SESSION_CREATED_AT)):
+        return None
+
+    with outbox.transaction():
+        _end_current_session(
+            action='SESSION_EXPIRED',
+            detail='The 24-hour absolute session lifetime was reached',
+        )
+    g.pop('_hrms_queued_audits', None)
+    session.clear()
+
+    if request.endpoint == 'login':
+        return None
+    if request.path.startswith('/api/') or _wants_json():
+        return jsonify({'error': 'session_expired'}), 401
+    return redirect(url_for('login'))
+
+
+@app.before_request
 def _begin_write_request_transaction():
-    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'}:
+    if request.method not in {'POST', 'PUT', 'PATCH', 'DELETE'} \
+            and request.endpoint != 'logout':
         return None
     manager = outbox.transaction()
     manager.__enter__()

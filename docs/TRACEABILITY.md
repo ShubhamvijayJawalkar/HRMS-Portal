@@ -24,13 +24,13 @@ rather than quietly invalidating this document.
 
 | Verdict | Count | Share |
 |---|---:|---:|
-| `IMPLEMENTED` | 84 | 74% |
-| `PARTIAL` | 23 | 20% |
+| `IMPLEMENTED` | 85 | 75% |
+| `PARTIAL` | 22 | 19% |
 | `NOT_STARTED` | 5 | 4% |
 | `RETIRED` | 1 | 1% |
 | **total** | **113** | |
 
-### IMPLEMENTED (84)
+### IMPLEMENTED (85)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
@@ -59,6 +59,7 @@ rather than quietly invalidating this document.
 | `FR-AUTH-01` | M | C | `/login`<br>`/api/forgot-password`<br>`/api/reset-password` | Employee code is trimmed and matched case-insensitively. PER-ACCOUNT *AND* PER-IP, which is the whole requirement and was measured rather than asserted. Two per-IP-only limiters existed: LOGIN_RATE_LIMIT at 20/min (10x below the SRS shift-start burst of 1,000 logins in 5 minutes = 200/min from one address, so it refused 90% of a legitimate shift start) and the global DEFAULT_RATE_LIMIT at 200/min keyed by remote address - measured at 15 distinct employees behind one egress address and 25 reads each: 200 of 375 served, 175 locked out with 429, because the first users consumed a bucket shared by the whole company. With 500 concurrent sessions behind one corporate NAT that is 0.4 req/min per user. The global key is now the employee identity once authenticated and the remote address only while anonymous, so authenticated browsing is fair and NAT-safe; anonymous traffic (the surface actually worth limiting) stays per address; and login gains the per-account dimension from lockout.py (10 consecutive failures in 15 minutes, FR-AUTH-03), which is what makes a looser address limit safe. login/forgot-password/reset-password are all env-overridable. The shared-NAT case is reproduced by scripts/shared_nat_check.py, and two ratchet tests fail if a default drifts back below the SRS figures. |
 | `FR-AUTH-02` | M | N | `/login` | Every refusal is the same 401 {"error":"invalid_credentials"}: unknown account, wrong password, blocked, archived, pre-hire, allow_login=false and locked out are indistinguishable, and the password is verified before any state is considered so the response time says nothing either. This row previously claimed IMPLEMENTED while the route answered two different 401 messages and two 403s ("Account is blocked", "Login is not allowed") - the state leak the requirement exists to prevent. Found by reading the handler while building FR-AUTH-03. |
 | `FR-AUTH-03` | M | N | `/login`<br>`/api/admin/users/<emp_id>/unlock` | lockout.py, to the SRS numbers: 10 consecutive failures inside a 15-minute window lock the account for 15 minutes and notify the user by email (plus in-app, because send_email only logs when no SMTP host is configured, and a lockout nobody can see is a silent denial). A successful sign-in breaks the streak - without that, four typos spread over a week lock an employee out - and the window is sliding, so ten failures across a month are not ten consecutive failures. An admin can clear a lockout immediately without touching users.status, because a lockout is a temporary consequence of failed sign-ins while Blocked is a sanctioned account state; folding them together would write an HR record against a fifteen-minute nuisance. Deliberate deviation: the SRS flow diagram puts the counter in Redis and it is stored on users instead, because this app treats Redis as optional and a lockout that silently stops existing when Redis is unreachable has failed open rather than degraded. |
+| `FR-AUTH-04` | M | C | `/login`<br>`/logout` | Successful authentication starts a fixed 24 h deadline stored in the signed/server-side session. Every authenticated request checks it; expiry closes the attendance session, audits the expiration, clears the session and revokes the Redis key. Missing legacy timestamps fail closed. Permanent sessions refresh the independent 8 h idle timeout on activity; cookie and Redis paths are tested. |
 | `FR-AUTH-05` | M | R | `/logout` | Logout closes the active user_sessions row with total_hours = logout - login and audits the action. |
 | `FR-AUTH-06` | M | R | `/` | Redirects by session state. |
 | `FR-AUTH-07` | M | R | `/dashboard` | Admin vs self dashboard chosen by policy.sees_admin_surface(). Unauthenticated gets 302 for a page and 401 for JSON - and the Accept header the SRS names is now honoured, so this row was previously describing behaviour the handler did not have: _wants_json checked is_json and the /api/ path but not Accept, so GET /dashboard with Accept: application/json answered 302 to the login page - HTML for a caller that asked for JSON, which then follows the redirect and cannot parse what it got. Same failure the multipart case was fixed for, one trigger earlier. A combined Accept still redirects, so a browser mentioning JSON among other types is unaffected. |
@@ -119,13 +120,12 @@ rather than quietly invalidating this document.
 | `FR-USR-11` | M | C | `/api/dependents`<br>`/api/dependents/<int:did>` | emp_id always from the session, never the payload; delete is scoped by emp_id as well. Create and delete are both audited, because policy.PII_FIELDS classifies dependents as PII - a third party with no statutory retention of their own - and a silent erase of one was the gap the audit pass found. The create also used a bare INSERT INTO dependents VALUES (...), now a named column list. |
 | `FR-USR-15` | M | C | — | policy.navigation_for() is the same predicate the route gates use, injected into every template; five tests assert the navbar and the gate of the linked route never disagree. |
 
-### PARTIAL (23)
+### PARTIAL (22)
 
 | ID | Pri | Δ | Routes | Notes |
 |---|---|:---:|---|---|
 | `FR-ANL-02` | S | C | `/api/analytics/attrition-risk` | The four factors are all present. The weights are hard-coded rather than configuration (FR-ANL-04), and the score is not versioned. |
 | `FR-ATT-07` | L | R | `/api/break-types`<br>`/api/user-breaks` | Minutes used and the approval flag are exposed. The per-type summary is assembled by the client from two calls rather than served as one projection. |
-| `FR-AUTH-04` | M | C | `/logout` | Server-side Redis sessions (opaque cookie, 8 h TTL), HttpOnly, SameSite=Lax, Secure in production; logout deletes the server copy. There is no 24 h *absolute* timeout distinct from the 8 h idle one. |
 | `FR-AUTH-13` | L | C | `/api/credentials` | Restricted by the permission policy and no longer returns passwords or hashes. Missing the 5-minute re-authentication and the audit row for a credential read. |
 | `FR-DOC-02` | M | C | `/api/upload`<br>`/api/documents/<int:did>/download`<br>`/api/documents/<int:did>` | Multipart upload, size cap, MIME type sniffed from content (not extension), malware scan (EICAR signature), and the file is persisted to object storage under a random key (FR-DOC-02). Downloads return a 302 redirect to a presigned URL so the object store is never reachable directly. Deletes also remove the object from storage. Uses the same S3/MinIO configuration as FR-PAY-07. Moto mocks S3 in tests. The earlier note claiming "a renamed .exe passes" was incorrect - the content is validated against the claimed extension magic numbers (and EICAR rejected). Still missing: per-category size caps (one global cap applies) and a real malware scanner (only EICAR signature checked). |
 | `FR-EXP-01` | M | R | `/api/expense-categories` | Six seeded categories and a read endpoint. No CRUD, so the set is configurable only by editing rows. |

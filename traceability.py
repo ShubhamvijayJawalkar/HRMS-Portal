@@ -194,10 +194,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'instead, because this app treats Redis as optional and a lockout '
                    'that silently stops existing when Redis is unreachable has failed '
                    'open rather than degraded.'),
-    'FR-AUTH-04': ('M', 'C', 'PARTIAL', ('/logout',),
-                   'Server-side Redis sessions (opaque cookie, 8 h TTL), HttpOnly, '
-                   'SameSite=Lax, Secure in production; logout deletes the server copy. '
-                   'There is no 24 h *absolute* timeout distinct from the 8 h idle one.'),
+    'FR-AUTH-04': ('M', 'C', 'IMPLEMENTED', ('/login', '/logout'),
+                   'Successful authentication starts a fixed 24 h deadline stored in '
+                   'the signed/server-side session. Every authenticated request checks '
+                   'it; expiry closes the attendance session, audits the expiration, '
+                   'clears the session and revokes the Redis key. Missing legacy '
+                   'timestamps fail closed. Permanent sessions refresh the independent '
+                   '8 h idle timeout on activity; cookie and Redis paths are tested.'),
     'FR-AUTH-05': ('M', 'R', 'IMPLEMENTED', ('/logout',),
                    'Logout closes the active user_sessions row with total_hours = '
                    'logout - login and audits the action.'),

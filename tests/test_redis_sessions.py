@@ -23,6 +23,7 @@ Run it with::
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -240,6 +241,37 @@ def test_the_session_survives_across_requests(client, redis_client, subjects):
     # A client with no cookie sees nothing, which is the point of a server-side store.
     with app.test_client() as anon:
         assert anon.get('/api/leave-balance').status_code in (302, 401)
+
+
+def test_absolute_expiry_revokes_redis_session_and_closes_attendance(
+    client, redis_client, subjects,
+):
+    assert _login(client, TARGET).status_code == 200
+    sid = _sid(client)
+    with client.session_transaction() as auth_session:
+        session_id = auth_session['session_id']
+        auth_session['auth_session_created_at'] = time.time() - 24 * 60 * 60 - 1
+
+    response = client.get('/api/profile')
+    assert response.status_code == 401
+    assert response.get_json() == {'error': 'session_expired'}
+    assert redis_client.get(f'{PREFIX}{sid}') is None
+
+    conn = get_db()
+    try:
+        logout_time = conn.execute(
+            'SELECT logout_time FROM user_sessions WHERE session_id = ? AND emp_id = ?',
+            [session_id, TARGET],
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'SESSION_EXPIRED' "
+            "AND entity_id = ?",
+            [TARGET],
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert logout_time is not None
+    assert audit == 1
 
 
 def test_logout_destroys_the_server_side_session(client, redis_client, subjects):

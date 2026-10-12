@@ -52,6 +52,21 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-12", "FR-AUTH-04 (Medium): authenticated sessions now have an "
+     "immutable 24-hour absolute deadline, checked before protected requests; "
+     "expiry closes the attendance row, writes `SESSION_EXPIRED`, clears the "
+     "identity and revokes Redis storage. Missing timestamps on old sessions fail "
+     "closed. Implementing the absolute limit exposed that the signed-cookie path "
+     "never set Flask's permanent-session flag, so its claimed 8-hour idle expiry "
+     "was not actually enforced. Login now enables rolling permanent sessions, "
+     "giving both signed cookies and Redis the 8-hour activity-refreshed limit "
+     "independently of the fixed deadline. Tests cover idle cookie max-age, an "
+     "unchanged absolute timestamp across activity, attendance close and audit; "
+     "the Redis suite also proves key revocation. Full unit validation passed "
+     "346 tests with 2 skips; all 11 Redis session tests passed. Browser tests "
+     "passed 23/23. On a fresh public schema, the probe served 115/115 GET routes "
+     "and 64/65 writes, with only the existing guarded `leaves(apply)` 409; CC-01 "
+     "and the read-only preflight passed."),
     ("2026-10-12", "FR-AUD-01 (Medium): audit writes now travel through an "
      "`audit.recorded` outbox event and materialize inside the same request "
      "transaction as the business write. Mutating requests share one transaction; "
@@ -1477,8 +1492,6 @@ _NEXT_STEPS = {
     # FR-USR-10 is IMPLEMENTED (SRS progress endpoint /api/imports/<job_id> served
     # and advertised; error cap already 50)
     # ── Medium ─────────────────────────────────────────────────────────
-    'FR-AUTH-04': 'Store the session creation time and expire at 24 h absolute in addition to '
-                 'the 8 h idle timeout, and test the two independently.',
     # FR-DOC-02 is IMPLEMENTED (object storage + content validation + presigned URL)
     # Remaining: per-category size cap, real malware scanner
     'FR-DOC-02': 'Add a per-category size cap (one global cap applies) and swap the EICAR '
@@ -1570,10 +1583,10 @@ def _srs_open(rows):
 
 # ── Test / readiness gates (current green state) ────────────────────────
 GATES = [
-    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "343 passed, 2 skipped; audit/outbox atomicity, mutation ratchet and notification receipt audit covered"),
+    ("Unit suite (tests/test_app.py)", "PostgreSQL legacy", "346 passed, 2 skipped; includes independent 8-hour idle and 24-hour absolute session expiry assertions"),
     ("Unit suite (tests/test_app.py)", "PostgreSQL + Redis", "Full unit suite not rerun with REDIS_URL; dedicated session-store suite reverified after the transaction retrofit"),
-    ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "10 passed after the request-transaction changes; all 10 skip cleanly with REDIS_URL unset"),
-    ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "22 passed; one CDN page-load timeout, passed in isolation"),
+    ("Redis session store (tests/test_redis_sessions.py)", "PostgreSQL + Redis", "11 passed, including absolute-expiry Redis-key revocation; all skip cleanly with REDIS_URL unset"),
+    ("Browser suite (tests/test_playwright.py)", "temporary PostgreSQL 17, threaded server", "23 passed after the session-timeout changes"),
     ("CC-01 rule checker (scripts/check_cc_rules.py)", "temporary PostgreSQL 17 public schema", "OK - 51 identity + 5 natural primary keys; sequences ahead of data"),
     ("Cutover preflight (scripts/cutover_preflight.py)", "temporary PostgreSQL 17 public schema", "Expected head 0014_break_type_config; schema-only disposable database, not production data"),
     ("SRS extraction (scripts/extract_srs_spec.py --check)", "HRMS_SRS_v2.0.pdf", "113 requirements, no duplicates, srs_spec.py byte-identical to the PDF"),

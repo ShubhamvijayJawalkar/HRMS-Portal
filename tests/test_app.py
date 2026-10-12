@@ -5,7 +5,9 @@ import pathlib
 import subprocess
 import sys
 import textwrap
-from datetime import date, datetime, timedelta
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from io import BytesIO
 
 import psycopg
@@ -145,6 +147,21 @@ def _attach_csrf(c):
 
     for method in ('post', 'put', 'patch', 'delete'):
         _bind(method)
+
+    original_session_transaction = c.session_transaction
+
+    @contextmanager
+    def _session_transaction_with_auth_metadata(*args, **kwargs):
+        with original_session_transaction(*args, **kwargs) as test_session:
+            yield test_session
+            if test_session.get('emp_id'):
+                test_session.setdefault(
+                    'auth_session_created_at',
+                    datetime.now(timezone.utc).timestamp(),
+                )
+                test_session.permanent = True
+
+    c.session_transaction = _session_transaction_with_auth_metadata
     return c
 
 
@@ -248,6 +265,110 @@ def test_login_admin_success(client):
     assert data['mandatory'] is True
     # No session was established: the dashboard still refuses.
     assert client.get('/api/profile').status_code == 401
+
+
+def test_absolute_session_expiry_boundary_and_legacy_timestamp():
+    from app import _auth_session_expired
+
+    deadline = app.config['SESSION_ABSOLUTE_LIFETIME'].total_seconds()
+    assert not _auth_session_expired(1000, now=1000 + deadline - 1)
+    assert _auth_session_expired(1000, now=1000 + deadline)
+    assert _auth_session_expired(None, now=1000)
+    assert _auth_session_expired('not-a-timestamp', now=1000)
+
+
+def test_authenticated_session_without_creation_time_fails_closed():
+    conn = get_db()
+    try:
+        previous = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'SESSION_EXPIRED' "
+            "AND entity_id = 'EMP002'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    raw = app.test_client()
+    with raw.session_transaction() as auth_session:
+        auth_session.update({
+            'emp_id': 'EMP002',
+            'name': 'Employee',
+            'role': 'Employee',
+            'department': 'MIS',
+        })
+    response = raw.get('/api/profile')
+    assert response.status_code == 401
+    assert response.get_json() == {'error': 'session_expired'}
+    conn = get_db()
+    try:
+        expired = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'SESSION_EXPIRED' "
+            "AND entity_id = 'EMP002'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert expired == previous + 1
+
+
+def test_session_idle_and_absolute_timeouts_are_independent(client):
+    conn = get_db()
+    try:
+        previous_expiry_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'SESSION_EXPIRED' "
+            "AND entity_id = 'EMP002'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    response = client.post('/login', json={'emp_id': 'EMP002', 'password': 'pass123'})
+    assert response.status_code == 200, response.get_json()
+    cookie_headers = [
+        value for value in response.headers.getlist('Set-Cookie')
+        if value.startswith('session=')
+    ]
+    assert cookie_headers, 'login did not set an authentication cookie'
+    cookie = next(
+        value for value in cookie_headers if 'Expires=' in value
+    )
+    expiry_text = cookie.split('Expires=', 1)[1].split(';', 1)[0]
+    idle_seconds = (
+        parsedate_to_datetime(expiry_text) - datetime.now(timezone.utc)
+    ).total_seconds()
+    assert 7 * 60 * 60 < idle_seconds <= 8 * 60 * 60
+
+    with client.session_transaction() as auth_session:
+        created_at = auth_session['auth_session_created_at']
+        session_id = auth_session['session_id']
+        assert auth_session.permanent is True
+
+    assert client.get('/api/profile').status_code == 200
+    with client.session_transaction() as auth_session:
+        assert auth_session['auth_session_created_at'] == created_at
+
+    with client.session_transaction() as auth_session:
+        auth_session['auth_session_created_at'] = (
+            datetime.now().timestamp()
+            - app.config['SESSION_ABSOLUTE_LIFETIME'].total_seconds()
+            - 1
+        )
+    response = client.get('/api/profile')
+    assert response.status_code == 401
+    assert response.get_json() == {'error': 'session_expired'}
+    assert client.get_cookie('session') is None
+
+    conn = get_db()
+    try:
+        logout_time = conn.execute(
+            'SELECT logout_time FROM user_sessions WHERE session_id = ? AND emp_id = ?',
+            [session_id, 'EMP002'],
+        ).fetchone()[0]
+        audit = conn.execute(
+            "SELECT COUNT(*) FROM audit_log WHERE action = 'SESSION_EXPIRED' "
+            "AND entity_id = 'EMP002'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert logout_time is not None
+    assert audit == previous_expiry_audits + 1
 
 
 # ── Authentication Tests ────────────────────────────────────────
