@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 from typing import BinaryIO, Optional
 
@@ -293,6 +294,28 @@ def upload_document(
     )
 
 
+def upload_expense_receipt(
+    emp_id: str, filename: str, content: bytes, content_type: str
+) -> str:
+    """Upload a validated expense receipt under an opaque, non-employee key."""
+    extension = os.path.splitext(filename)[1].lower()
+    key = f"expense-receipts/{secrets.token_hex(24)}{extension}"
+    return _storage.upload_bytes(
+        key,
+        content,
+        content_type=content_type,
+        metadata={'emp_id': emp_id, 'filename': filename},
+    )
+
+
+def is_expense_receipt_key(object_key: str | None) -> bool:
+    """Only keys created by the receipt uploader may be signed for download."""
+    return bool(re.fullmatch(
+        r'expense-receipts/[0-9a-f]{48}\.(?:pdf|jpg|jpeg|png)',
+        object_key or '',
+    ))
+
+
 def get_document_presigned_url(
     object_key: str, filename: str, expires_in: int = 3600
 ) -> str:
@@ -302,6 +325,43 @@ def get_document_presigned_url(
         expires_in=expires_in,
         response_content_disposition=f'attachment; filename="{filename}"',
     )
+
+
+def get_expense_receipt_presigned_url(
+    object_key: str, filename: str, expires_in: int = 3600
+) -> str:
+    """Get a short-lived download URL for an expense receipt."""
+    return _storage.generate_presigned_url(
+        object_key,
+        expires_in=expires_in,
+        response_content_disposition=f'attachment; filename="{filename}"',
+    )
+
+
+def delete_expense_receipt(object_key: str) -> bool:
+    """Delete a receipt object when its claim write cannot be completed."""
+    return _storage.delete_object(object_key)
+
+
+def upload_leave_export(job_id: int, content: bytes) -> str:
+    """Store a generated leave export under a private job-specific key."""
+    key = f'leave-exports/{job_id}.xlsx'
+    return _storage.upload_bytes(
+        key, content,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    )
+
+
+def get_leave_export_presigned_url(object_key: str, expires_in: int = 900) -> str:
+    """Sign a short-lived download for a completed leave export."""
+    return _storage.generate_presigned_url(
+        object_key, expires_in=expires_in,
+        response_content_disposition='attachment; filename="leave-export.xlsx"',
+    )
+
+
+def delete_leave_export(object_key: str) -> bool:
+    return _storage.delete_object(object_key)
 
 
 def delete_document_object(object_key: str) -> bool:

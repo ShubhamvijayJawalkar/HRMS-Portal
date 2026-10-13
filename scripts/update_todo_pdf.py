@@ -52,6 +52,16 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-13", "FR-AUTH-11 is deferred by product decision and removed from the "
+     "actionable ToDo list for now; it remains NOT_STARTED in SRS traceability so the "
+     "coverage report does not imply the control exists. Development proceeds with "
+     "FR-EXP-02, the next actionable requirement."),
+    ("2026-10-13", "FR-EXP-02 (Medium): expense claims now accept a receipt upload "
+     "with the claim, validate extension, magic bytes, MIME, category-specific size "
+     "and ClamAV through the shared document pipeline, then store it under a random "
+     "object key. Receipt downloads use short-lived presigned URLs and enforce the "
+     "claim visibility policy. Arbitrary receipt_path values are refused; failed "
+     "database inserts clean up the uploaded object."),
     ("2026-10-12", "FR-AUTH-11 (High): two-factor authentication has been "
      "disabled system-wide as requested. Login now completes after password "
      "verification for every role, including accounts with an enabled saved "
@@ -1520,9 +1530,6 @@ def _srs_modules(rows):
 #: status report wearing a different heading.
 _NEXT_STEPS = {
     # ── High ────────────────────────────────────────────────────────────
-    'FR-AUTH-11': 'Re-enable MFA sign-in enforcement and restore enrollment/challenge '
-                  'controls, then verify privileged and previously-enrolled accounts '
-                  'cannot establish a session with only a password.',
     # FR-PAY-07 is IMPLEMENTED (object storage + presigned URL for payslips)
     # FR-DOC-02 is IMPLEMENTED (object storage + presigned URL for documents)
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads)
@@ -1532,10 +1539,6 @@ _NEXT_STEPS = {
     # ── Medium ─────────────────────────────────────────────────────────
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads + delete from object storage)
     # FR-EXP-01 is IMPLEMENTED (admin CRUD, audit trail and claim reference guard).
-    'FR-EXP-02': 'Validate receipts at upload through the document pipeline — extension, magic '
-                 'bytes and per-category size.',
-    'FR-LEA-03': 'Run large exports through the import-job pattern: return 202 with a job id '
-                 'and let the worker write the file.',
     # FR-ONB-04 is IMPLEMENTED (inherits completed FR-DOC-02)
     'FR-PAY-01': 'Grant HR read access to the payroll and salary routes (read-only, module '
                  '`payroll`) and land FR-PAY-03 so there is a rates surface to read.',
@@ -1585,6 +1588,12 @@ _NEXT_STEPS = {
                  'progress query, and let FR-JOB-03 open the next one.',
 }
 
+# Requirements explicitly deferred by product decision are not development
+# tasks. They remain in the generated coverage totals and traceability matrix.
+_DEFERRED_REQUIREMENTS = {
+    'FR-AUTH-11': 'Two-factor authentication is intentionally out of scope for now.',
+}
+
 
 def _srs_open(rows):
     """Every requirement not fully implemented, highest SRS priority first.
@@ -1601,7 +1610,11 @@ def _srs_open(rows):
     `test_every_open_requirement_has_a_next_step` fails if the two sets diverge, so
     a requirement newly opened cannot land on the list with no way to act on it.
     """
-    open_rows = [r for r in rows if r['status'] in ('PARTIAL', 'NOT_STARTED')]
+    open_rows = [
+        r for r in rows
+        if r['status'] in ('PARTIAL', 'NOT_STARTED')
+        and r['id'] not in _DEFERRED_REQUIREMENTS
+    ]
     open_rows.sort(key=lambda r: (_PRIORITY_ORDER.get(r['priority'], 9), r['id']))
     for row in open_rows:
         row['gap'] = _gap_of(row['note'])
@@ -1767,7 +1780,8 @@ def build_pdf(path: str) -> None:
         story.append(PageBreak())
         story.append(Paragraph("Development reference: open requirements", h2))
         story.append(Paragraph(
-            f"{len(open_rows)} requirements are PARTIAL or NOT_STARTED; {len(high)} of them "
+            f"{len(open_rows)} requirements are actionable PARTIAL or NOT_STARTED items; "
+            f"{len(high)} of them "
             f"are SRS <b>High</b> priority. Each row is keyed by its SRS serial "
             f"(<b>SR-001..SR-{len(srs_rows):03d}</b>), allocated in §5 document order and "
             f"permanent — closing a requirement never renumbers the ones after it, so a "
@@ -1779,6 +1793,17 @@ def build_pdf(path: str) -> None:
             small,
         ))
         story.append(Spacer(1, 6))
+        if _DEFERRED_REQUIREMENTS:
+            deferred = ', '.join(
+                f"{requirement}: {reason}"
+                for requirement, reason in sorted(_DEFERRED_REQUIREMENTS.items())
+            )
+            story.append(Paragraph(
+                f"<b>Deferred by product decision (not on the ToDo list):</b> "
+                f"{_escape_markup(deferred)}",
+                small,
+            ))
+            story.append(Spacer(1, 4))
         story.append(Paragraph(
             f"<b>High priority first ({len(high)}).</b> A High-priority gap outranks a "
             f"Low-priority one regardless of module, which is how the SRS ranks them.",

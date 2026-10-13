@@ -480,9 +480,13 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'the three values rather than being defaulted. The apply response reports '
                   'days_requested, calendar_days and session, so an employee can see what '
                   'they were charged and reconcile it against their own calendar.'),
-    'FR-LEA-03': ('M', 'R', 'PARTIAL', ('/api/leaves/export',),
-                  'Excel export ships, synchronously. The async variant for large ranges '
-                  'is not implemented.'),
+    'FR-LEA-03': ('M', 'R', 'IMPLEMENTED',
+                  ('/api/leaves/export', '/api/leaves/exports/<int:job_id>',
+                   '/api/leaves/exports/<int:job_id>/download'),
+                  'Leave exports with more than 500 rows are queued with 202 and built by '
+                  'the scheduled worker. Smaller exports retain the synchronous XLSX '
+                  'download. Job status and the short-lived private-object download are '
+                  'admin-gated; completed files expire and are removed after 24 hours.'),
     'FR-LEA-04': ('H', 'C', 'IMPLEMENTED', ('/api/leaves/<int:leave_id>/approve',),
                   'Approve and reject are one actor rule, and the "not the applicant" half '
                   'was previously asserted rather than enforced: the gate was admin-only, '
@@ -822,10 +826,16 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   '409 referential guard when claims use the category. The existing cat_id '
                   'primary keys and claim foreign keys are retained; the admin expenses page '
                   'exposes category management only to Admin/Super Admin.'),
-    'FR-EXP-02': ('M', 'C', 'PARTIAL', ('/api/expenses',),
-                  'emp_id is taken from the session and a body override is rejected with '
-                  'a 400, closing the v1.0 impersonation hole; the category must exist '
-                  'and the amount must be positive. Missing: receipt validation on upload.'),
+    'FR-EXP-02': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/expenses', '/api/expenses/<int:eid>/receipt'),
+                  'Claims accept a receipt file in the same request as the claim; clients '
+                  'cannot submit an arbitrary receipt_path. The shared document pipeline '
+                  'checks PDF/JPEG/PNG extension, magic bytes, declared MIME, per-expense-'
+                  'category size limits and ClamAV before uploading under a random object '
+                  'key. Scanner/storage failure refuses the claim and orphaned uploads are '
+                  'removed if the database insert fails. Receipt reads are short-lived '
+                  'presigned redirects authorized for the owner, their manager, actionable '
+                  'reviewers and policy company-wide viewers.'),
     'FR-EXP-03': ('M', 'C', 'IMPLEMENTED', ('/api/expenses', '/api/expenses/<int:eid>/status',),
                   'Strict transition table in expenses.py: Pending -> Approved/Rejected by '
                   "the owner's manager or HR/Admin, Approved -> Paid by Finance/Admin only "

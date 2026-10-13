@@ -550,6 +550,47 @@ def test_holidays_page_loads_for_admin(page):
     assert 'Holiday Calendar' in body
     assert 'Add Holiday' in body
 
+
+def test_large_leave_export_polls_then_opens_download(page):
+    import json
+
+    _login(page, 'EMP001', 'pass123')
+    page.goto(BASE_URL + '/admin/holidays', wait_until='commit')
+    excel_button = page.locator('button[title="Download Excel"]')
+    excel_button.wait_for(state='visible', timeout=15000)
+    page.route(
+        '**/api/leaves/export?*',
+        lambda route: route.fulfill(
+            status=202, content_type='application/json',
+            body=json.dumps({
+                'job_id': 999, 'status': 'pending', 'row_count': 501,
+                'status_url': '/api/leaves/exports/999',
+            }),
+        ),
+    )
+    page.route(
+        '**/api/leaves/exports/999',
+        lambda route: route.fulfill(
+            content_type='application/json',
+            body=json.dumps({
+                'job_id': 999, 'status': 'completed',
+                'download': '/api/leaves/exports/999/download',
+            }),
+        ),
+    )
+    page.route(
+        '**/api/leaves/exports/999/download',
+        lambda route: route.fulfill(
+            content_type='text/html', body='<html>download route reached</html>',
+        ),
+    )
+    excel_button.click()
+    page.locator('.toast-msg').filter(
+        has_text='Large export queued (501 rows)',
+    ).wait_for(state='visible', timeout=5000)
+    page.wait_for_url('**/api/leaves/exports/999/download', timeout=10000)
+
+
 def test_can_submit_regularization(page):
     from datetime import date, timedelta
     tomorrow = (date.today() + timedelta(days=1)).isoformat()

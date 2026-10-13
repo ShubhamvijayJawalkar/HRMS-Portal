@@ -4040,8 +4040,9 @@ def test_the_todo_pdf_srs_section_is_generated_from_the_matrix():
 
     assert pdf._srs_modules(rows), 'no SRS modules were derived'
     open_rows = pdf._srs_open(rows)
-    # Every non-IMPLEMENTED requirement appears in the working list, and no IMPLEMENTED
-    # one does — a to-do entry for finished work is how a list stops being usable.
+    # Every non-IMPLEMENTED, non-deferred requirement appears in the working list,
+    # and no IMPLEMENTED one does — a to-do entry for finished work is how a list
+    # stops being usable.
     # RETIRED is excluded deliberately: a superseded requirement (FR-ATT-10) is not
     # open work, and listing it would put a finished item on the working list. The
     # first version of this assertion compared against "not IMPLEMENTED" and so
@@ -4049,7 +4050,7 @@ def test_the_todo_pdf_srs_section_is_generated_from_the_matrix():
     from_matrix = {
         r[0] for r in traceability.rows() if r[3] in ('PARTIAL', 'NOT_STARTED')
     }
-    assert {r['id'] for r in open_rows} == from_matrix, (
+    assert {r['id'] for r in open_rows} == from_matrix - set(pdf._DEFERRED_REQUIREMENTS), (
         f'the working list and the matrix disagree: '
         f'{ {r["id"] for r in open_rows} ^ from_matrix }'
     )
@@ -4156,6 +4157,9 @@ def test_every_open_requirement_has_a_next_step():
     assert open_rows, 'nothing is open, so this test proves nothing'
 
     open_ids = {row['id'] for row in open_rows}
+    assert 'FR-AUTH-11' in pdf._DEFERRED_REQUIREMENTS
+    assert 'FR-AUTH-11' not in open_ids
+    assert pdf._DEFERRED_REQUIREMENTS['FR-AUTH-11']
     assert set(pdf._NEXT_STEPS) == open_ids, (
         f'open requirements with no next step: {sorted(open_ids - set(pdf._NEXT_STEPS))}; '
         f'steps for requirements that are no longer open: '
@@ -6504,6 +6508,90 @@ def _file_claim(client, amount='120.50', **overrides):
     return response.get_json()['id']
 
 
+def test_expense_receipts_use_shared_validation_private_storage_and_access_control(client):
+    from io import BytesIO
+
+    import object_storage
+
+    assert document_security.expense_receipt_limit_bytes('Food') == 5 * document_security.MIB
+    assert document_security.expense_receipt_limit_bytes('Equipment') == 20 * document_security.MIB
+    assert document_security.expense_receipt_limit_bytes('Custom Category') == 5 * document_security.MIB
+    _set_admin_session(client, 99839)
+    claim_id = None
+    receipt_key = None
+    try:
+        _seed_expense_users(client)
+        _create_policy_user(client, 'EMP964', role='Team Leader')
+        _login_as(client, 'EMP960', 'Employee', 99838)
+        clean_pdf = b'%PDF-1.7\nreceipt'
+
+        bad_magic = client.post('/api/expenses', data={
+            'cat_id': '1', 'amount': '42.50',
+            'receipt': (BytesIO(b'not a PDF'), 'receipt.pdf', 'application/pdf'),
+        }, content_type='multipart/form-data')
+        assert bad_magic.status_code == 400, bad_magic.get_json()
+
+        bad_mime = client.post('/api/expenses', data={
+            'cat_id': '1', 'amount': '42.50',
+            'receipt': (BytesIO(clean_pdf), 'receipt.pdf', 'image/png'),
+        }, content_type='multipart/form-data')
+        assert bad_mime.status_code == 400, bad_mime.get_json()
+
+        # Food receipts are limited to 5 MiB; the multipart handler reads only
+        # cap + 1 bytes before rejecting rather than buffering an unbounded file.
+        too_large = client.post('/api/expenses', data={
+            'cat_id': '2', 'amount': '42.50',
+            'receipt': (BytesIO(b'%PDF-' + b'x' * (5 * document_security.MIB)),
+                        'receipt.pdf', 'application/pdf'),
+        }, content_type='multipart/form-data')
+        assert too_large.status_code == 413, too_large.get_json()
+
+        refused_key = client.post('/api/expenses', json={
+            'cat_id': 1, 'amount': 42.50, 'receipt_path': 'expenses/receipts/forged',
+        })
+        assert refused_key.status_code == 400, refused_key.get_json()
+
+        created = client.post('/api/expenses', data={
+            'cat_id': '1', 'amount': '42.50', 'description': 'taxi',
+            'receipt': (BytesIO(clean_pdf), 'taxi-receipt.pdf', 'application/pdf'),
+        }, content_type='multipart/form-data')
+        assert created.status_code == 201, created.get_json()
+        claim_id = created.get_json()['id']
+        assert created.get_json()['receipt_attached'] is True
+        conn = get_db()
+        try:
+            row = conn.execute(
+                'SELECT receipt_path FROM expense_claims WHERE claim_id = ?', [claim_id]
+            ).fetchone()
+        finally:
+            conn.close()
+        receipt_key = row[0]
+        assert receipt_key.startswith('expense-receipts/')
+        assert 'taxi-receipt' not in receipt_key
+        assert object_storage.is_expense_receipt_key(receipt_key)
+        assert not object_storage.is_expense_receipt_key('payslips/1/EMP001.pdf')
+        assert object_storage.get_storage().object_exists(receipt_key)
+        claims = client.get('/api/expenses').get_json()
+        assert next(item for item in claims if item['id'] == claim_id)['has_receipt'] is True
+
+        # Receipt access follows the claim visibility policy, not possession of
+        # the opaque object key or a guessable sequential claim id.
+        _login_as(client, 'EMP964', 'Team Leader', 99837)
+        assert client.get(
+            f'/api/expenses/{claim_id}/receipt', follow_redirects=False
+        ).status_code == 404
+
+        _login_as(client, 'EMP001', 'Admin', 99836)
+        download = client.get(f'/api/expenses/{claim_id}/receipt', follow_redirects=False)
+        assert download.status_code == 302
+        assert '/expense-receipts/' in download.headers['Location']
+        assert 'Signature=' in download.headers['Location']
+    finally:
+        if receipt_key:
+            object_storage.delete_expense_receipt(receipt_key)
+        _cleanup_expense_rows('EMP960', 'EMP961', 'EMP964')
+
+
 def _claim_row(claim_id):
     conn = get_db()
     try:
@@ -6521,6 +6609,7 @@ def _cleanup_expense_rows(*emp_ids):
         for emp_id in emp_ids:
             conn.execute('DELETE FROM expense_claims WHERE emp_id = ?', [emp_id])
             conn.execute('DELETE FROM notifications WHERE emp_id = ?', [emp_id])
+            conn.execute('DELETE FROM audit_log WHERE emp_id = ?', [emp_id])
             conn.execute('DELETE FROM audit_log WHERE CAST(entity_id AS VARCHAR) = ?', [emp_id])
             conn.execute('DELETE FROM users WHERE emp_id = ?', [emp_id])
     finally:
@@ -10665,6 +10754,151 @@ def test_export_report(client):
     assert resp.status_code == 200
 
 
+def _leave_export_admin(client, session_id=99991):
+    with client.session_transaction() as sess:
+        sess.update({
+            'emp_id': 'EMP001', 'name': 'Admin', 'role': 'Admin',
+            'session_id': session_id,
+        })
+
+
+def test_leave_export_at_threshold_remains_a_synchronous_xlsx(client, monkeypatch):
+    import leave_exports
+
+    _leave_export_admin(client)
+    monkeypatch.setattr(leave_exports, 'count_rows', lambda *_args: 500)
+    response = client.get('/api/leaves/export?month=1&year=2026')
+    assert response.status_code == 200
+    assert response.mimetype == (
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    assert response.data.startswith(b'PK')
+
+
+def test_large_leave_export_is_queued_and_status_is_admin_gated(client, monkeypatch):
+    import leave_exports
+
+    _leave_export_admin(client)
+    monkeypatch.setattr(leave_exports, 'count_rows', lambda *_args: 501)
+    response = client.get('/api/leaves/export?month=1&year=2026')
+    assert response.status_code == 202
+    queued = response.get_json()
+    assert queued['status'] == 'pending'
+    assert queued['row_count'] == 501
+    status_url = queued['status_url']
+    try:
+        status = client.get(status_url)
+        assert status.status_code == 200
+        assert status.get_json()['status'] == 'pending'
+        assert status.get_json()['row_count'] == 501
+        assert client.get(f'{status_url}/download').status_code == 410
+
+        with client.session_transaction() as sess:
+            sess.update({
+                'emp_id': 'EMP002', 'name': 'Employee', 'role': 'Employee',
+                'session_id': 99990,
+            })
+        assert client.get(status_url).status_code == 403
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM leave_export_jobs WHERE job_id = ?', [queued['job_id']])
+        finally:
+            conn.close()
+
+
+def test_leave_export_dispatch_stores_file_and_returns_presigned_redirect(
+        client, monkeypatch):
+    import leave_exports
+    import object_storage
+
+    _leave_export_admin(client)
+    job = leave_exports.create_job(1, 2026, None, 'EMP001', 1)
+    monkeypatch.setattr(
+        object_storage, 'upload_leave_export',
+        lambda job_id, _content: f'leave-exports/{job_id}.xlsx',
+    )
+    monkeypatch.setattr(
+        object_storage, 'get_leave_export_presigned_url',
+        lambda key: f'https://storage.example/{key}',
+    )
+    try:
+        assert leave_exports.dispatch_once() == job['job_id']
+        status = client.get(f'/api/leaves/exports/{job["job_id"]}')
+        assert status.status_code == 200
+        assert status.get_json()['status'] == 'completed'
+        assert status.get_json()['download'].endswith('/download')
+        response = client.get(status.get_json()['download'], follow_redirects=False)
+        assert response.status_code == 302
+        assert response.headers['Cache-Control'] == 'no-store'
+        assert response.headers['Location'] == (
+            f'https://storage.example/leave-exports/{job["job_id"]}.xlsx'
+        )
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM leave_export_jobs WHERE job_id = ?', [job['job_id']])
+        finally:
+            conn.close()
+
+
+def test_leave_export_dispatch_marks_storage_failure(client, monkeypatch):
+    import leave_exports
+    import object_storage
+
+    _leave_export_admin(client)
+    job = leave_exports.create_job(1, 2026, None, 'EMP001', 1)
+
+    def fail_upload(*_args):
+        raise object_storage.ObjectStorageError('test failure')
+
+    monkeypatch.setattr(object_storage, 'upload_leave_export', fail_upload)
+    try:
+        assert leave_exports.dispatch_once() == job['job_id']
+        response = client.get(f'/api/leaves/exports/{job["job_id"]}')
+        assert response.status_code == 200
+        assert response.get_json()['status'] == 'failed'
+        assert 'test failure' not in response.get_json()['failure_reason']
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM leave_export_jobs WHERE job_id = ?', [job['job_id']])
+        finally:
+            conn.close()
+
+
+def test_leave_export_expiry_removes_object_and_marks_job(client, monkeypatch):
+    import leave_exports
+    import object_storage
+
+    _leave_export_admin(client)
+    job = leave_exports.create_job(1, 2026, None, 'EMP001', 1)
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE leave_export_jobs SET status = 'completed', file_key = ?, "
+            "expires_at = ? WHERE job_id = ?",
+            ['leave-exports/expired-test.xlsx', datetime.now() - timedelta(seconds=1),
+             job['job_id']],
+        )
+    finally:
+        conn.close()
+    deleted = []
+    monkeypatch.setattr(object_storage, 'delete_leave_export', lambda key: deleted.append(key))
+    try:
+        assert leave_exports.cleanup_expired() == 1
+        status = leave_exports.get_job(job['job_id'])
+        assert status['status'] == 'expired'
+        assert status['download'] is None
+        assert deleted == ['leave-exports/expired-test.xlsx']
+    finally:
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM leave_export_jobs WHERE job_id = ?', [job['job_id']])
+        finally:
+            conn.close()
+
+
 # ── Leave Management Tests ──────────────────────────────────────
 
 def test_leave_balance(client):
@@ -12113,6 +12347,7 @@ def test_lifecycle_scheduler_job_registered():
     assert app_module.scheduler.get_job('offboarding-access-revocation') is not None
     assert app_module.scheduler.get_job('import-dispatch') is not None
     assert app_module.scheduler.get_job('outbox-dispatch') is not None
+    assert app_module.scheduler.get_job('leave-export-dispatch') is not None
 
 
 # ── FR-AUTH-08/09 password reset: enumeration and token handling ───────────

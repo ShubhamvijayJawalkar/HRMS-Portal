@@ -1,6 +1,6 @@
 # HRMS v2.0 — Data Dictionary
 
-_Generated 2026-10-01T12:09:59.170397+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms_dd`. **Do not hand-edit** — regenerate (SRS §15)._
+_Generated 2026-10-13T09:09:42.315031+00:00 by `scripts/generate_data_dictionary.py` from `localhost:55432/hrms`. **Do not hand-edit** — regenerate (SRS §15)._
 
 Corresponds to SRS v2.0 §7 (Data model & database constraints). 
 Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4), `audit-indefinite-with-review`. PII columns are permission-gated behind `pii_reveal`.
@@ -10,59 +10,62 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | Table | Rows | Retention | PII cols |
 |-------|-----:|-----------|----------|
 | `alembic_version` | 1 | transactional | — |
+| `analytics_snapshots` | 0 | transactional | — |
 | `anonymisation_requests` | 0 | transactional | — |
 | `approval_delegations` | 0 | transactional | — |
-| `assets` | 2 | transactional | — |
+| `assets` | 0 | transactional | — |
 | `attendance_days` | 0 | statutory-7y | — |
-| `audit_log` | 2 | audit-indefinite-with-review | — |
+| `audit_log` | 0 | audit-indefinite-with-review | — |
 | `break_approvals` | 0 | transactional | — |
-| `break_types` | 3 | transactional | — |
-| `breaks` | 2 | statutory-7y | — |
-| `candidates` | 2 | transactional | — |
-| `dependents` | 2 | transactional | — |
-| `documents` | 2 | transactional | — |
-| `employee_documents` | 2 | transactional | — |
-| `exit_interviews` | 2 | transactional | — |
-| `expense_categories` | 6 | transactional | — |
-| `expense_claims` | 2 | statutory-7y | — |
-| `feedback_360` | 2 | transactional | — |
-| `goals` | 2 | transactional | — |
+| `break_types` | 0 | transactional | — |
+| `breaks` | 0 | statutory-7y | — |
+| `candidates` | 0 | transactional | — |
+| `dependents` | 0 | transactional | — |
+| `documents` | 0 | transactional | — |
+| `employee_documents` | 0 | transactional | — |
+| `exit_interviews` | 0 | transactional | — |
+| `expense_categories` | 0 | transactional | — |
+| `expense_claims` | 0 | statutory-7y | — |
+| `feedback_360` | 0 | transactional | — |
+| `goals` | 0 | transactional | — |
 | `holiday_optins` | 0 | transactional | — |
-| `holidays` | 5 | transactional | — |
+| `holidays` | 0 | transactional | — |
 | `idempotency_keys` | 0 | transactional | — |
 | `import_jobs` | 0 | transactional | — |
-| `interviews` | 2 | transactional | — |
-| `job_postings` | 2 | transactional | — |
-| `leave_balance` | 6 | statutory-7y | — |
+| `interviews` | 0 | transactional | — |
+| `job_postings` | 0 | transactional | — |
+| `leave_balance` | 0 | statutory-7y | — |
+| `leave_export_jobs` | 0 | transactional | — |
+| `leave_grants` | 0 | transactional | — |
 | `leave_policy_assignments` | 0 | transactional | — |
-| `leave_requests` | 2 | statutory-7y | — |
+| `leave_requests` | 0 | statutory-7y | — |
 | `mfa_credentials` | 0 | transactional | — |
 | `monthly_leave_grants` | 0 | transactional | — |
 | `notification_preferences` | 0 | transactional | — |
-| `notifications` | 2 | transactional | — |
+| `notifications` | 0 | transactional | — |
 | `offboarding_approvals` | 0 | transactional | — |
 | `offboarding_settlements` | 0 | transactional | — |
-| `offboarding_tasks` | 2 | transactional | — |
+| `offboarding_tasks` | 0 | transactional | — |
 | `offboarding_workflow` | 0 | transactional | — |
-| `offer_letters` | 2 | transactional | — |
+| `offer_letters` | 0 | transactional | — |
 | `onboarding_checklist` | 0 | transactional | — |
-| `onboarding_tasks` | 2 | transactional | — |
+| `onboarding_tasks` | 0 | transactional | — |
 | `onboarding_workflow` | 0 | transactional | — |
 | `outbox_events` | 0 | audit-indefinite-with-review | — |
-| `password_reset_tokens` | 2 | transactional | — |
+| `password_reset_tokens` | 0 | transactional | — |
 | `payroll_approvals` | 0 | statutory-7y | — |
-| `payroll_items` | 2 | statutory-7y | — |
-| `payroll_runs` | 2 | statutory-7y | — |
-| `performance_reviews` | 2 | transactional | — |
-| `regularization_requests` | 2 | statutory-7y | — |
+| `payroll_items` | 0 | statutory-7y | — |
+| `payroll_runs` | 0 | statutory-7y | — |
+| `performance_reviews` | 0 | transactional | — |
+| `regularization_requests` | 0 | statutory-7y | — |
 | `resignations` | 0 | transactional | — |
-| `salary_structures` | 2 | statutory-7y | — |
-| `shift_assignments` | 2 | transactional | — |
-| `ticket_comments` | 2 | transactional | — |
-| `tickets` | 2 | transactional | — |
+| `salary_structures` | 0 | statutory-7y | — |
+| `shift_assignments` | 0 | transactional | — |
+| `ticket_comments` | 0 | transactional | — |
+| `tickets` | 0 | transactional | — |
 | `user_permissions` | 0 | transactional | — |
-| `user_sessions` | 2 | transactional | — |
-| `users` | 2 | transactional | — |
+| `user_sessions` | 0 | transactional | — |
+| `users` | 0 | transactional | — |
 
 ---
 
@@ -75,6 +78,18 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
 | `version_num` | character varying | N | `` |  |
+
+## `analytics_snapshots`
+
+- Retention class: **transactional**
+- Primary key: `metric`
+- Unique indexes: none
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `metric` | character varying | N | `` |  |
+| `payload` | jsonb | N | `` |  |
+| `computed_at` | timestamp with time zone | N | `now()` |  |
 
 ## `anonymisation_requests`
 
@@ -198,7 +213,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 - Retention class: **transactional**
 - Primary key: `break_type`
-- Unique indexes: `uq_break_types_name_ci` ((lower(break_type)))
+- Unique indexes: `uq_break_types_name_ci` ((expression))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
@@ -313,7 +328,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 
 - Retention class: **transactional**
 - Primary key: `cat_id`
-- Unique indexes: none
+- Unique indexes: `uq_expense_categories_name_ci` ((expression))
 
 | Column | Type | Null | Default | PII |
 |--------|------|:----:|---------|:---:|
@@ -340,7 +355,6 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `approved_by` | character varying | Y | `` |  |
 | `paid_at` | timestamp with time zone | Y | `` |  |
 | `created_at` | timestamp with time zone | N | `now()` |  |
-| `rejection_reason` | character varying | Y | `` |  |
 
 ## `feedback_360`
 
@@ -501,6 +515,48 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `reserved` | integer | N | `0` |  |
 | `year` | integer | N | `` |  |
 
+## `leave_export_jobs`
+
+- Retention class: **transactional**
+- Primary key: `job_id`
+- Foreign keys: `created_by` → `users.emp_id`
+- Unique indexes: none
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `job_id` | bigint | N | `` |  |
+| `created_by` | character varying | N | `` |  |
+| `month` | integer | N | `` |  |
+| `year` | integer | N | `` |  |
+| `status_filter` | character varying | Y | `` |  |
+| `status` | character varying | N | `'pending'::character varying` |  |
+| `row_count` | integer | N | `0` |  |
+| `file_key` | character varying | Y | `` |  |
+| `created_at` | timestamp with time zone | N | `now()` |  |
+| `started_at` | timestamp with time zone | Y | `` |  |
+| `finished_at` | timestamp with time zone | Y | `` |  |
+| `expires_at` | timestamp with time zone | Y | `` |  |
+| `failure_reason` | character varying | Y | `` |  |
+
+## `leave_grants`
+
+- Retention class: **transactional**
+- Primary key: `grant_id`
+- Foreign keys: `emp_id` → `users.emp_id`
+- Unique indexes: none
+
+| Column | Type | Null | Default | PII |
+|--------|------|:----:|---------|:---:|
+| `grant_id` | bigint | N | `` |  |
+| `emp_id` | character varying | N | `` |  |
+| `leave_type` | character varying | N | `` |  |
+| `days` | integer | N | `` |  |
+| `grant_month` | integer | Y | `` |  |
+| `grant_year` | integer | N | `` |  |
+| `granted_by` | character varying | Y | `` |  |
+| `reason` | text | Y | `` |  |
+| `created_at` | timestamp with time zone | N | `now()` |  |
+
 ## `leave_policy_assignments`
 
 - Retention class: **transactional**
@@ -545,6 +601,7 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `created_at` | timestamp with time zone | N | `now()` |  |
 | `updated_at` | timestamp with time zone | Y | `` |  |
 | `version` | integer | N | `1` |  |
+| `days` | integer | Y | `` |  |
 
 ## `mfa_credentials`
 
@@ -1069,3 +1126,6 @@ Retention classes per §7.4: `transactional`, `statutory-7y` (7 years per §11.4
 | `created_at` | timestamp with time zone | N | `now()` |  |
 | `is_super_admin` | boolean | N | `false` |  |
 | `candidate_id` | bigint | Y | `` |  |
+| `failed_attempts` | integer | N | `0` |  |
+| `last_failed_login` | timestamp with time zone | Y | `` |  |
+| `locked_until` | timestamp with time zone | Y | `` |  |

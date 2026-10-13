@@ -81,8 +81,9 @@
             <div class="row g-3">
                 <div class="col-md-3"><label class="form-label">Category</label><select id="catSelect" class="form-select"></select></div>
                 <div class="col-md-2"><label class="form-label">Amount (₹)</label><input id="amount" class="form-control" type="number" step="0.01"></div>
-                <div class="col-md-4"><label class="form-label">Description</label><input id="desc" class="form-control"></div>
-                <div class="col-md-3"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="submitClaim()">Submit</button></div>
+                <div class="col-md-3"><label class="form-label">Description</label><input id="desc" class="form-control"></div>
+                <div class="col-md-2"><label class="form-label" for="receipt">Receipt (PDF/JPG/PNG)</label><input id="receipt" class="form-control" type="file" accept=".pdf,.jpg,.jpeg,.png"></div>
+                <div class="col-md-2"><label class="form-label">&nbsp;</label><button class="btn btn-primary w-100" onclick="submitClaim()">Submit</button></div>
             </div>
         </div>
     </div>
@@ -91,8 +92,8 @@
         <div class="card-body">
             <div class="table-responsive">
                 <table class="table table-hover">
-                    <thead><tr><th>Category</th><th>Amount</th><th>Description</th><th>Status</th><th>Date</th></tr></thead>
-                    <tbody id="expensesTable"><tr><td colspan="5" class="text-center text-muted">No claims</td></tr></tbody>
+                    <thead><tr><th>Category</th><th>Amount</th><th>Description</th><th>Receipt</th><th>Status</th><th>Date</th></tr></thead>
+                    <tbody id="expensesTable"><tr><td colspan="6" class="text-center text-muted">No claims</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -110,19 +111,29 @@ async function loadExpenses() {
     const r = await fetch('/api/expenses');
     const data = await r.json();
     const tbody = document.getElementById('expensesTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No claims</td></tr>'; return; }
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">No claims</td></tr>'; return; }
     tbody.innerHTML = data.map(e => `<tr>
         <td>${e.category}</td><td class="amount">₹${e.amount.toFixed(2)}</td>
-        <td>${e.description || '-'}</td>
+        <td>${e.description || '-'}</td><td>${e.has_receipt ? `<a href="/api/expenses/${e.id}/receipt">View receipt</a>` : '-'}</td>
         <td><span class="status-${e.status}">${e.status}</span></td>
         <td>${e.created_at ? new Date(e.created_at).toLocaleDateString() : '-'}</td>
     </tr>`).join('');
 }
 async function submitClaim() {
-    const body = { cat_id: parseInt(document.getElementById('catSelect').value), amount: parseFloat(document.getElementById('amount').value), description: document.getElementById('desc').value };
-    if (!body.cat_id || !body.amount) return alert('Category and amount required');
-    const r = await fetch('/api/expenses', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-    if (r.ok) { loadExpenses(); document.getElementById('amount').value=''; document.getElementById('desc').value=''; } else alert((await r.json()).error);
+    const body = new FormData();
+    body.append('cat_id', document.getElementById('catSelect').value);
+    body.append('amount', document.getElementById('amount').value);
+    body.append('description', document.getElementById('desc').value);
+    const receipt = document.getElementById('receipt').files[0];
+    if (receipt) body.append('receipt', receipt);
+    if (!body.get('cat_id') || !body.get('amount')) return alert('Category and amount required');
+    const r = await fetch('/api/expenses', { method:'POST', body });
+    if (r.ok) {
+        loadExpenses();
+        document.getElementById('amount').value='';
+        document.getElementById('desc').value='';
+        document.getElementById('receipt').value='';
+    } else alert((await r.json()).error);
 }
 </script>
 </body>

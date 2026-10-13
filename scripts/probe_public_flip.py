@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import traceback
 from collections import Counter
 from io import BytesIO
@@ -479,6 +480,18 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM monthly_leave_grants WHERE emp_id = 'EMP002'")
         pc.execute("DELETE FROM leave_policy_assignments WHERE emp_id = 'EMP002'")
         pc.execute("DELETE FROM leave_balance WHERE emp_id = 'EMP002'")
+        old_leave_exports = pc.execute(
+            "SELECT job_id, file_key FROM leave_export_jobs "
+            "WHERE year = 2099 AND status_filter = 'public write probe'"
+        ).fetchall()
+        import object_storage as _object_storage
+        for _, old_key in old_leave_exports:
+            if old_key:
+                _object_storage.delete_leave_export(old_key)
+        pc.execute(
+            "DELETE FROM leave_export_jobs "
+            "WHERE year = 2099 AND status_filter = 'public write probe'"
+        )
         # FR-AUTH-03: a previous run that died between the lock and the unlock
         # would leave EMP002 locked, and the next run's lockout flow would then
         # start from "already locked" and assert the wrong thing. The flow unlocks
@@ -1995,6 +2008,66 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
             return 409
         return 200
     run("leaves(admin grant + reversal)", leave_grant)
+
+    def large_leave_export():
+        import leave_exports
+        import object_storage
+
+        old_counter = leave_exports.count_rows
+        leave_exports.count_rows = lambda *_args: 501
+        try:
+            queued = cl_a.get(
+                "/api/leaves/export?month=1&year=2099&status=public%20write%20probe",
+            )
+        finally:
+            leave_exports.count_rows = old_counter
+        if queued.status_code != 202:
+            return queued.status_code, f"queue: {queued.get_json()}"
+        queued_body = queued.get_json() or {}
+        if queued_body.get("row_count") != 501:
+            return 409, f"queue did not record the estimated count: {queued_body}"
+        job_id = queued_body.get("job_id")
+        if not job_id:
+            return 409, "queued response did not contain a job id"
+        try:
+            # The scheduler may win the same atomic claim. Either way, inspect the
+            # status endpoint until the generated object is ready.
+            leave_exports.dispatch_once()
+            for _ in range(50):
+                status = cl_a.get(f"/api/leaves/exports/{job_id}")
+                if status.status_code != 200:
+                    return status.status_code, "job status was not readable"
+                body = status.get_json() or {}
+                if body.get("status") in ("completed", "failed"):
+                    break
+                time.sleep(0.2)
+            if body.get("status") != "completed":
+                return 409, f"job did not complete: {body}"
+            download = cl_a.get(body["download"], follow_redirects=False)
+            if download.status_code != 302 or not download.headers.get("Location", "").startswith("http"):
+                return 409, "completed export did not return a presigned redirect"
+            with psycopg.connect(pg_dsn) as pc:
+                canonical = pc.execute(
+                    "SELECT status, row_count, file_key FROM leave_export_jobs WHERE job_id = %s",
+                    [job_id],
+                ).fetchone()
+            if not canonical or canonical[0] != "completed" or canonical[1] != 0:
+                return 409, f"canonical job row was not completed: {canonical}"
+            return 200
+        finally:
+            with psycopg.connect(pg_dsn, autocommit=True) as pc:
+                key = pc.execute(
+                    "SELECT file_key FROM leave_export_jobs WHERE job_id = %s", [job_id]
+                ).fetchone()
+                pc.execute(
+                    "DELETE FROM audit_log WHERE entity = 'leave_export_jobs' "
+                    "AND entity_id::text = %s", [str(job_id)]
+                )
+                pc.execute("DELETE FROM leave_export_jobs WHERE job_id = %s", [job_id])
+            if key and key[0]:
+                object_storage.delete_leave_export(key[0])
+
+    run("leaves(large export job + private download)", large_leave_export)
 
     def users_bulk():
         """FR-USR-07: bulk archive with a partial failure, and the self-exclusion.

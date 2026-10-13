@@ -462,10 +462,58 @@ async function rejectLeave(id) {
     loadLeaves(currentLeaveFilter);
 }
 
-function exportLeaves() {
+async function exportLeaves() {
     const month = document.getElementById('leaveMonthSelect').value;
     const year = document.getElementById('leaveYearSelect').value;
-    window.location.href = `/api/leaves/export?month=${month}&year=${year}&status=${currentLeaveFilter || ''}`;
+    const params = new URLSearchParams({month, year, status: currentLeaveFilter || ''});
+    try {
+        const response = await fetch(`/api/leaves/export?${params}`);
+        if (response.status === 202) {
+            const job = await response.json();
+            showToast('success', `Large export queued (${job.row_count} rows). Preparing download…`);
+            pollLeaveExport(job.job_id, job.status_url);
+            return;
+        }
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.error || 'Could not export leave records');
+        }
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filename = disposition.match(/filename="?([^";]+)"?/i);
+        anchor.download = filename ? filename[1] : `leaves_${month}_${year}.xlsx`;
+        anchor.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showToast('success', 'Leave export downloaded');
+    } catch (error) {
+        showToast('error', error.message || 'Could not export leave records');
+    }
+}
+
+async function pollLeaveExport(jobId, statusUrl) {
+    for (let attempt = 0; attempt < 150; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        try {
+            const response = await fetch(statusUrl);
+            if (!response.ok) throw new Error('Could not check export status');
+            const job = await response.json();
+            if (job.status === 'completed' && job.download) {
+                window.location.href = job.download;
+                showToast('success', 'Leave export is ready');
+                return;
+            }
+            if (job.status === 'failed' || job.status === 'expired') {
+                throw new Error(job.failure_reason || 'Leave export is no longer available');
+            }
+        } catch (error) {
+            showToast('error', error.message || 'Could not check export status');
+            return;
+        }
+    }
+    showToast('error', 'The export is still processing. You can request another copy later.');
 }
 
 function showToast(type, msg) {

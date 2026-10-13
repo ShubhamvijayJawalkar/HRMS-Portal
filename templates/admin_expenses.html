@@ -98,8 +98,8 @@
         <div class="card-body">
             <div class="table-responsive">
                 <table class="table table-hover">
-                    <thead><tr><th>Employee</th><th>Category</th><th>Amount</th><th>Description</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
-                    <tbody id="expensesTable"><tr><td colspan="7" class="text-center text-muted">Loading...</td></tr></tbody>
+                    <thead><tr><th>Employee</th><th>Category</th><th>Amount</th><th>Description</th><th>Receipt</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
+                    <tbody id="expensesTable"><tr><td colspan="8" class="text-center text-muted">Loading...</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -197,13 +197,14 @@ async function loadExpenses() {
     const r = await fetch('/api/expenses');
     const data = await r.json();
     const tbody = document.getElementById('expensesTable');
-    if (!data.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No claims</td></tr>'; return; }
+    if (!data.length) { tbody.innerHTML = '<tr><td colspan="8" class="text-center text-muted">No claims</td></tr>'; return; }
     tbody.innerHTML = data.map(e => {
         const canAct = e.status === 'Pending';
         return `<tr>
             <td><strong>${e.employee}</strong><br><small>${e.emp_id}</small></td>
             <td>${e.category}</td><td class="amount">₹${e.amount.toFixed(2)}</td>
             <td>${e.description || '-'}</td>
+            <td>${e.has_receipt ? `<a href="/api/expenses/${e.id}/receipt">View receipt</a>` : '-'}</td>
             <td><span class="status-${e.status}">${e.status}</span></td>
             <td>${e.created_at ? new Date(e.created_at).toLocaleDateString() : '-'}</td>
             <td>${canAct ? `<button class="btn btn-success btn-sm me-1" onclick="updateStatus(${e.id},'Approved')">Approve</button><button class="btn btn-danger btn-sm" onclick="updateStatus(${e.id},'Rejected')">Reject</button>` : `<button class="btn btn-info btn-sm" onclick="updateStatus(${e.id},'Paid')">Mark Paid</button>`}</td>

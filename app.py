@@ -56,6 +56,7 @@ import holiday_calendar  # noqa: E402  # holiday calendar maintenance (FR-HOL-01
 import holidays_optin  # noqa: E402  # optional-holiday opt-ins (FR-HOL-03)
 import imports  # noqa: E402  # background bulk-import jobs (FR-USR-04)
 import leave_accrual  # noqa: E402  # monthly accrual from leave_policy.accrual_rate
+import leave_exports  # noqa: E402  # queued large leave exports (FR-LEA-03)
 import leave_grants  # noqa: E402  # manual leave grants (FR-LEA-07)
 import leave_policy  # noqa: E402  # policy-derived leave balances (FR-LEA-06/08)
 import notifications  # noqa: E402  # per-category notification preferences (FR-NOT-03)
@@ -976,6 +977,32 @@ def init_db():
             failure_reason VARCHAR
         )
     ''')
+    # ── Background leave exports (FR-LEA-03) ──────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS leave_export_jobs (
+            job_id INTEGER PRIMARY KEY,
+            created_by VARCHAR NOT NULL,
+            month INTEGER NOT NULL,
+            year INTEGER NOT NULL,
+            status_filter VARCHAR,
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            row_count INTEGER NOT NULL DEFAULT 0,
+            file_key VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            expires_at TIMESTAMP,
+            failure_reason VARCHAR
+        )
+    ''')
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS ix_leave_export_jobs_status '
+        'ON leave_export_jobs (status, created_at)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS ix_leave_export_jobs_expiry '
+        'ON leave_export_jobs (status, expires_at)'
+    )
     # ── Password Reset Tokens (new) ────────────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -2728,6 +2755,7 @@ _ROUTE_MODULES = {
     'reject_holiday_optin': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
     'admin_leaves_page': 'leaves', 'export_leaves': 'leaves',
+    'leave_export_status': 'leaves', 'download_leave_export': 'leaves',
     'approve_leave': 'leaves', 'reject_leave': 'leaves', 'cancel_leave': 'leaves',
     'live_monitoring': 'breaks', 'get_break_summary': 'breaks',
     'get_disposed_breaks': 'breaks', 'admin_breaks': 'breaks',
@@ -5808,6 +5836,15 @@ def run_import_dispatch():
         return imports.dispatch_once()
     except Exception as exc:
         logger.warning('import dispatch failed: %s', exc)
+        return None
+
+
+def run_leave_export_dispatch():
+    """Scheduler job: build one queued leave export and expire old files."""
+    try:
+        return leave_exports.dispatch_once()
+    except Exception:
+        logger.exception('leave export dispatch failed')
         return None
 
 
@@ -8997,7 +9034,7 @@ def expenses_api():
         actor = _lifecycle_actor(conn)
         viewer = policy.current_actor(conn)
         if policy.can_view_all(viewer, 'expenses', conn=conn):
-            rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id ORDER BY c.created_at DESC").fetchall()
+            rows = conn.execute("SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, c.description, c.status, c.created_at, c.receipt_path FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id JOIN expense_categories e ON c.cat_id = e.cat_id ORDER BY c.created_at DESC").fetchall()
         else:
             # FR-EXP-03: a reviewer has to be able to *find* the claims they may
             # act on, so the list is scoped to "mine, my reports', or anything in
@@ -9024,7 +9061,7 @@ def expenses_api():
                 params.extend(actionable)
             rows = conn.execute(
                 "SELECT c.claim_id, c.emp_id, u.name, c.cat_id, e.name, c.amount, "
-                "c.description, c.status, c.created_at "
+                "c.description, c.status, c.created_at, c.receipt_path "
                 "FROM expense_claims c JOIN users u ON c.emp_id = u.emp_id "
                 "JOIN expense_categories e ON c.cat_id = e.cat_id "
                 f"WHERE {' OR '.join(clauses)} ORDER BY c.created_at DESC",
@@ -9036,10 +9073,12 @@ def expenses_api():
                    # FR-EXP-03: tell the client which transitions are actually
                    # available, rather than letting it guess and get a 403.
                    'allowed_actions': expenses.permitted_targets(actor, (r[1], r[7], r[5])),
-                   'created_at': r[8].isoformat() if r[8] else None} for r in rows]
+                   'created_at': r[8].isoformat() if r[8] else None,
+                   'has_receipt': object_storage.is_expense_receipt_key(r[9])} for r in rows]
         conn.close()
         return jsonify(claims), 200
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data or {}
     if not data.get('cat_id') or not data.get('amount'):
         return jsonify({'error': 'cat_id and amount required'}), 400
     # CC-10: emp_id comes from the session, never from the body. v1.0 accepted an
@@ -9047,33 +9086,125 @@ def expenses_api():
     # name and, because there was no self-approval block, approve it themselves.
     if data.get('emp_id') not in (None, '', session['emp_id']):
         return jsonify({'error': 'A claim may only be filed for yourself'}), 400
+    if data.get('receipt_path'):
+        return jsonify({
+            'error': 'Upload receipts with the claim; receipt_path is not accepted',
+        }), 400
     try:
         amount = float(data['amount'])
     except (TypeError, ValueError):
         return jsonify({'error': 'amount must be a number'}), 400
     if amount <= 0:
         return jsonify({'error': 'amount must be greater than zero'}), 400
+    receipt = request.files.get('receipt')
+    receipt_content = None
+    receipt_name = None
+    receipt_type = None
     conn = get_db()
     try:
-        if not conn.execute('SELECT 1 FROM expense_categories WHERE cat_id = ?', [data['cat_id']]).fetchone():
+        category = conn.execute(
+            'SELECT name FROM expense_categories WHERE cat_id = ?', [data['cat_id']]
+        ).fetchone()
+        if not category:
             return jsonify({'error': 'Unknown expense category'}), 400
         cid = _next_generated_id(conn, 'expense_claims', 'claim_id')
-        # Explicit column list: a bare VALUES would mis-target now that the
-        # table carries paid_at and rejection_reason (the v2.0 lesson).
-        conn.execute(
-            "INSERT INTO expense_claims (claim_id, emp_id, cat_id, amount, description, "
-            "receipt_path, status, approved_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [cid, session['emp_id'], data['cat_id'], amount, data.get('description'),
-             data.get('receipt_path'), 'Pending', None, datetime.now()])
+        if receipt:
+            if not receipt.filename:
+                return jsonify({'error': 'No receipt file selected'}), 400
+            receipt_name = secure_filename(receipt.filename)
+            if not receipt_name:
+                return jsonify({'error': 'Invalid receipt filename'}), 400
+            receipt_limit = document_security.expense_receipt_limit_bytes(category[0])
+            receipt_content = receipt.stream.read(receipt_limit + 1)
+            try:
+                receipt_type = document_security.validate_document_upload(
+                    receipt_name,
+                    category[0],
+                    receipt_content,
+                    receipt.mimetype,
+                    size_limit_bytes=receipt_limit,
+                )
+            except document_security.DocumentUploadError as exc:
+                return jsonify({'error': str(exc)}), exc.status_code
     finally:
         conn.close()
-    audit_log(
-        session['emp_id'], 'EXPENSE_CLAIM',
-        f'Filed expense claim {cid} for {amount}',
-        entity='expense_claims', entity_id=cid,
-        after={'amount': amount, 'cat_id': data['cat_id']},
-    )
-    return jsonify({'message': 'Expense claimed', 'id': cid}), 201
+    receipt_key = None
+    if receipt_content is not None:
+        try:
+            receipt_key = object_storage.upload_expense_receipt(
+                session['emp_id'], receipt_name, receipt_content, receipt_type
+            )
+        except object_storage.ObjectStorageError as exc:
+            logger.error('Expense receipt upload failed: %s', exc)
+            return jsonify({'error': 'Receipt storage unavailable'}), 503
+    try:
+        conn = get_db()
+        try:
+            # Explicit column list: a bare VALUES would mis-target now that the
+            # table carries paid_at and rejection_reason (the v2.0 lesson).
+            conn.execute(
+                "INSERT INTO expense_claims (claim_id, emp_id, cat_id, amount, description, "
+                "receipt_path, status, approved_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [cid, session['emp_id'], data['cat_id'], amount, data.get('description'),
+                 receipt_key, 'Pending', None, datetime.now()])
+        finally:
+            conn.close()
+        audit_log(
+            session['emp_id'], 'EXPENSE_CLAIM',
+            f'Filed expense claim {cid} for {amount}',
+            entity='expense_claims', entity_id=cid,
+            after={'amount': amount, 'cat_id': data['cat_id'],
+                   'receipt_attached': receipt_key is not None},
+        )
+    except Exception:
+        if receipt_key:
+            try:
+                object_storage.delete_expense_receipt(receipt_key)
+            except object_storage.ObjectStorageError:
+                logger.exception('Could not remove orphaned expense receipt %s', receipt_key)
+        raise
+    return jsonify({'message': 'Expense claimed', 'id': cid,
+                    'receipt_attached': receipt_key is not None}), 201
+
+
+@app.route('/api/v1/expenses/<int:eid>/receipt')
+@app.route('/api/expenses/<int:eid>/receipt')
+@login_required
+def expense_receipt(eid):
+    conn = get_db()
+    try:
+        claim = conn.execute(
+            'SELECT emp_id, status, amount, receipt_path FROM expense_claims WHERE claim_id = ?',
+            [eid],
+        ).fetchone()
+        if not claim or not object_storage.is_expense_receipt_key(claim[3]):
+            return jsonify({'error': 'Receipt not found'}), 404
+        actor = _lifecycle_actor(conn)
+        viewer = policy.current_actor(conn)
+        is_visible = claim[0] == session['emp_id'] or policy.can_view_all(
+            viewer, 'expenses', conn=conn
+        )
+        if not is_visible:
+            reports = conn.execute(
+                'SELECT 1 FROM users WHERE emp_id = ? AND manager_emp_id = ?',
+                [claim[0], session['emp_id']],
+            ).fetchone()
+            is_visible = bool(reports) or bool(
+                expenses.permitted_targets(actor, (claim[0], claim[1], claim[2]))
+            )
+        if not is_visible:
+            return jsonify({'error': 'Receipt not found'}), 404
+        receipt_key = claim[3]
+    finally:
+        conn.close()
+    filename = f'expense_receipt_{eid}{os.path.splitext(receipt_key)[1]}'
+    try:
+        url = object_storage.get_expense_receipt_presigned_url(receipt_key, filename)
+    except object_storage.ObjectStorageError as exc:
+        logger.error('Expense receipt download URL failed: %s', exc)
+        return jsonify({'error': 'Receipt storage unavailable'}), 503
+    return redirect(url, code=302)
 
 
 @app.route('/api/v1/expenses/<int:eid>/status', methods=['PUT'])
@@ -10523,54 +10654,59 @@ def export_leaves():
     month = request.args.get('month', datetime.now().month, type=int)
     year = request.args.get('year', datetime.now().year, type=int)
     status_filter = request.args.get('status')
+    if not 1 <= month <= 12 or not 1 <= year <= 9999:
+        return jsonify({'error': 'month must be 1..12 and year must be valid'}), 400
+    row_count = leave_exports.count_rows(month, year, status_filter)
+    if row_count > leave_exports.ASYNC_EXPORT_THRESHOLD:
+        job = leave_exports.create_job(
+            month, year, status_filter, session['emp_id'], row_count,
+        )
+        return jsonify({
+            'job_id': job['job_id'],
+            'status': job['status'],
+            'status_url': f'/api/leaves/exports/{job["job_id"]}',
+            'row_count': row_count,
+            'message': 'Large leave export queued',
+        }), 202
+
     conn = get_db()
     try:
-        query = """SELECT l.emp_id, u.name, l.leave_type, l.start_date, l.end_date,
-                   l.reason, l.status, l.approved_by, l.days
-                   FROM leave_requests l LEFT JOIN users u ON l.emp_id = u.emp_id
-                   WHERE l.year = ? AND CAST(strftime('%m', l.start_date) AS INTEGER) = ?"""
-        params = [year, month]
-        if status_filter:
-            query += " AND l.status = ?"
-            params.append(status_filter)
-        query += " ORDER BY l.start_date"
-        rows = conn.execute(query, params).fetchall()
-        # FR-LEA-09: report the **stored** working-day figure, not a recomputation.
-        # Reading `days` is what guarantees the sheet agrees with the ledger, and it
-        # is the only way this could work at all — the connection is closed by the
-        # `finally` below, so a per-row call to the shared function would run on a
-        # closed cursor. A NULL is a pre-migration row and falls back to the function
-        # *here*, while the connection is still open.
-        computed = [
-            (r, r[8] if r[8] is not None
-             else working_days.working_days(conn, r[0], r[3], r[4]))
-            for r in rows
-        ]
+        computed = leave_exports.fetch_rows(conn, month, year, status_filter)
     finally:
         conn.close()
 
-    import io
-
-    import pandas as pd
-    # Both figures are shown: the working days the ledger used, and the calendar span
-    # beside it. Reporting only one makes the other look like an error when an
-    # employee reconciles the sheet against their own calendar.
-    data = [{
-        'Employee ID': r[0], 'Employee Name': r[1] or r[0], 'Leave Type': r[2],
-        'From': r[3].isoformat(), 'To': r[4].isoformat(),
-        'Working Days': days,
-        'Calendar Days': (r[4] - r[3]).days + 1,
-        'Reason': r[5] or '', 'Status': r[6], 'Approved By': r[7] or ''
-    } for r, days in computed]
-
-    buf = io.BytesIO()
-    df = pd.DataFrame(data) if data else pd.DataFrame(columns=['Employee ID','Employee Name','Leave Type','From','To','Working Days','Calendar Days','Reason','Status','Approved By'])
-    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Leaves')
-    buf.seek(0)
+    buf = BytesIO(leave_exports.workbook_bytes(computed))
     month_name = datetime(2000, month, 1).strftime('%B')
     return send_file(buf, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                      download_name=f'leaves_{month_name}_{year}.xlsx', as_attachment=True)
+
+
+@app.route('/api/leaves/exports/<int:job_id>', methods=['GET'])
+@admin_required
+def leave_export_status(job_id):
+    job = leave_exports.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Leave export job not found'}), 404
+    return jsonify(job), 200
+
+
+@app.route('/api/leaves/exports/<int:job_id>/download', methods=['GET'])
+@admin_required
+def download_leave_export(job_id):
+    job = leave_exports.get_job(job_id)
+    if not job:
+        return jsonify({'error': 'Leave export job not found'}), 404
+    object_key = leave_exports.file_key_for_download(job_id)
+    if job['status'] != leave_exports.COMPLETED or not object_key:
+        return jsonify({'error': 'Leave export is not available'}), 410
+    try:
+        target = object_storage.get_leave_export_presigned_url(object_key)
+    except object_storage.ObjectStorageError:
+        logger.exception('Could not sign leave export download for job %s', job_id)
+        return jsonify({'error': 'Leave export download is temporarily unavailable'}), 503
+    response = redirect(target, code=302)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 # FR-LEA-04 — *"Approve: actor is manager (or delegate) or HR/Admin, not the
@@ -13349,6 +13485,11 @@ def _register_scheduler_jobs(attendance_hour=2):
     scheduler.add_job(
         run_import_dispatch, 'interval', seconds=15,
         id='import-dispatch', replace_existing=True, coalesce=True, max_instances=1,
+    )
+    scheduler.add_job(
+        run_leave_export_dispatch, 'interval', seconds=15,
+        id='leave-export-dispatch', replace_existing=True,
+        coalesce=True, max_instances=1,
     )
     # FR-ANL-01: materialise the dashboard aggregates so the analytics routes read
     # a snapshot instead of recomputing four aggregates per request. MAX_AGE in

@@ -8,6 +8,7 @@ import clamav_scanner
 
 MIB = 1024 * 1024
 DEFAULT_CATEGORY_LIMIT_BYTES = 20 * MIB
+DEFAULT_EXPENSE_RECEIPT_LIMIT_BYTES = 5 * MIB
 DOCUMENT_CATEGORY_LIMITS = {
     'address proof': 10 * MIB,
     'bank details': 5 * MIB,
@@ -19,6 +20,14 @@ DOCUMENT_CATEGORY_LIMITS = {
     'other': 20 * MIB,
     'payslip': 5 * MIB,
     'salary slip': 5 * MIB,
+}
+EXPENSE_RECEIPT_CATEGORY_LIMITS = {
+    'travel': 10 * MIB,
+    'food': 5 * MIB,
+    'office supplies': 10 * MIB,
+    'equipment': 20 * MIB,
+    'utilities': 5 * MIB,
+    'other': 5 * MIB,
 }
 
 _CONTENT_TYPES = {
@@ -40,11 +49,18 @@ def category_limit_bytes(category: str | None) -> int:
     return DOCUMENT_CATEGORY_LIMITS.get(key, DEFAULT_CATEGORY_LIMIT_BYTES)
 
 
+def expense_receipt_limit_bytes(category: str | None) -> int:
+    key = (category or 'Other').strip().casefold()
+    return EXPENSE_RECEIPT_CATEGORY_LIMITS.get(key, DEFAULT_EXPENSE_RECEIPT_LIMIT_BYTES)
+
+
 def validate_document_upload(
     filename: str,
     category: str | None,
     content: bytes,
     declared_type: str | None = None,
+    *,
+    size_limit_bytes: int | None = None,
 ) -> str:
     """Validate extension, category cap, content signature, MIME, and malware."""
     extension = os.path.splitext(filename)[1].lstrip('.').lower()
@@ -54,7 +70,8 @@ def validate_document_upload(
 
     if not content:
         raise DocumentUploadError('Document is empty', 400)
-    if len(content) > category_limit_bytes(category):
+    limit = category_limit_bytes(category) if size_limit_bytes is None else size_limit_bytes
+    if len(content) > limit:
         raise DocumentUploadError('Document exceeds the size limit for its category', 413)
 
     content_type, signature = spec

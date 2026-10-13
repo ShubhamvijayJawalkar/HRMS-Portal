@@ -1411,7 +1411,7 @@ The SRS names materialized views. The implementation uses one keyed snapshot
 table instead: the requested leave-trend window is parameterised, and one table
 and refresh path work on both the compatibility and v2.0 schema shapes. The
 The cutover preflight expected head is subsequently advanced by each migration;
-after FR-EXP-01 it is `0015_expense_category_names`.
+after FR-LEA-03 it is `0016_leave_export_jobs`.
 
 ## FR-DOC-02 / FR-USR-12 / FR-ONB-04 — document validation and scanning
 
@@ -1513,3 +1513,18 @@ completion use explicit outbox transactions around their business-state change
 and audit event as well. Materialized audit event payloads are cleared after
 delivery to avoid retaining a second copy of potentially sensitive audit data.
 The audit history itself remains append-only from the application's perspective.
+
+## FR-LEA-03 — queued large leave exports
+
+`GET /api/leaves/export` keeps returning an XLSX download synchronously for
+results of up to 500 rows. Larger results create a `leave_export_jobs` record
+and return 202 with a job id and status URL. The scheduler claims one pending
+job per tick with a conditional status update, builds the same workbook using
+the stored leave-day ledger values, and uploads it under a private object key.
+The admin-gated status endpoint reports progress; the download endpoint returns
+a short-lived presigned redirect. Exports expire after 24 hours and the worker
+removes expired objects.
+
+Alembic revision `0016_leave_export_jobs` creates the canonical job table and
+status index. `init_db` creates the compatibility table and index. The default
+cutover preflight head is `0016_leave_export_jobs`.

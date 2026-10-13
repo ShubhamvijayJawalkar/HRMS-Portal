@@ -58,6 +58,7 @@ _REQUIRED_PUBLIC_TABLES = {
     "attendance_days",
     "outbox_events",
     "analytics_snapshots",
+    "leave_export_jobs",
 }
 _COMMON_TABLES = (
     "users",
@@ -305,7 +306,7 @@ def main() -> int:
     parser.add_argument("--legacy-schema", default="legacy", help="fallback schema to compare")
     parser.add_argument(
         "--expected-head",
-        default="0015_expense_category_names",
+        default="0016_leave_export_jobs",
         help="required Alembic head on the target schema",
     )
     parser.add_argument(
