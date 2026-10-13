@@ -40,6 +40,13 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 Then open <http://localhost:5000>. The local demo login is `EMP001` /
 `pass123`; change or remove demo credentials before using real data.
 
+## UI modernization
+
+The incremental React migration strategy and separate UI task list are tracked
+in [`docs/REACT_UI_MIGRATION.md`](docs/REACT_UI_MIGRATION.md). The plan keeps
+Flask as the backend and preserves existing API, session, and authorization
+behavior while screens are migrated in phases.
+
 ## Cutover preflight
 
 The preflight command is read-only and emits a JSON reconciliation report:
