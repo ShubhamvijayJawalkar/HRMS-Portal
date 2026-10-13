@@ -1,6 +1,7 @@
 import os
+import pathlib
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 os.environ.setdefault(
@@ -57,13 +58,63 @@ from app import app  # noqa: E402
 BASE_URL = 'http://localhost:8787'
 
 
+# Every page in this app loads Bootstrap, bootstrap-icons and a Google webfont
+# from CDNs (see docs/UI_INVENTORY.md). Playwright's default `wait_until='load'`
+# waits for *every* subresource, so one slow CDN segment in a codespace fails an
+# arbitrary test at page load — recorded repeatedly in AGENTS.md as flakes that
+# "passed on a rerun", each time a different test. Reruns are not a fix, and the
+# CDN is not something this suite should be waiting on to reach a form.
+#
+# `commit` returns when the navigation response arrives. Playwright's `fill`,
+# `click` and `wait_for_*` all auto-wait for the element they need, so the real
+# signal is still "the thing I want appeared" — the CDN is simply no longer in
+# the critical path. (The React shell removed that dependency entirely; this is
+# about the legacy pages that still have it.)
+def _await_page_js(page):
+    """Wait until the injected CSRF `window.fetch` patcher has installed itself.
+
+    `security.init_csrf` appends a small inline script to every HTML response
+    that wraps `window.fetch` so unsafe requests carry `X-CSRF-Token` (CC-06).
+    Many tests below call `fetch` straight from `page.evaluate`, which relies on
+    that wrapper.
+
+    With `wait_until='commit'` the navigation has responded but the document has
+    not been parsed, so the wrapper is not there yet and the request goes out
+    un-tokened — which the server correctly refuses with 403. So the signal has
+    to be the wrapper itself, not a sleep and not the URL. `__hrmsCsrf` is the
+    idempotence flag that script sets on first run.
+
+    The diagnostic on failure names where the page actually was: the failure this
+    guards against is invisible otherwise, and the observed symptom (a 403 far
+    from here) points nowhere near the cause.
+    """
+    try:
+        page.wait_for_function('() => window.__hrmsCsrf === 1', timeout=15000)
+    except Exception:
+        state = page.evaluate("""() => ({
+            href: location.href,
+            readyState: document.readyState,
+            csrf: window.__hrmsCsrf,
+            hasRoot: Boolean(document.getElementById('root')),
+            bodyLength: document.body ? document.body.innerHTML.length : -1,
+        })""")
+        raise AssertionError(
+            'the CSRF fetch patcher never installed. '
+            f'Page state: {state}. Either the response was not text/html '
+            '(init_csrf injects only into HTML), or the document had not been '
+            'parsed yet.'
+        ) from None
+
+
 def _login(page, emp_id='EMP001', password='pass123'):
     """Sign in through the password-only flow."""
-    page.goto(BASE_URL + '/login')
+    page.goto(BASE_URL + '/login', wait_until='commit')
+    _await_page_js(page)
     page.fill('#empId', emp_id)
     page.fill('#password', password)
     page.click('button[type="submit"]')
     page.wait_for_url(BASE_URL + '/dashboard')
+    _await_page_js(page)
 
 @pytest.fixture(scope='session', autouse=True)
 def server():
@@ -99,7 +150,7 @@ def page(browser):
     ctx.close()
 
 def test_login_page(page):
-    page.goto(BASE_URL + '/login')
+    page.goto(BASE_URL + '/login', wait_until='commit')
     assert page.title() == 'HRMS - Login'
 
 def test_admin_login(page):
@@ -115,7 +166,7 @@ def test_employee_login(page):
 def test_admin_sees_user_tab(page):
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(2000)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_timeout(2000)
     tbody = page.locator('#usersTableBody')
     assert tbody.is_visible()
@@ -123,6 +174,24 @@ def test_admin_sees_user_tab(page):
     # and this test flaked once on a slow CDN load with an empty #pageInfo.
     tbody.locator('tr').first.wait_for(state='visible', timeout=15000)
     assert page.text_content('#pageInfo').startswith('Page')
+
+
+def test_shared_navigation_theme_is_responsive(page):
+    _login(page, 'EMP002', 'pass123')
+    page.wait_for_selector('.app-navbar .navbar-brand', timeout=15000)
+    desktop_theme = page.evaluate("""() => ({
+        background: getComputedStyle(document.body).backgroundColor,
+        nav: getComputedStyle(document.querySelector('.app-navbar')).backgroundColor
+    })""")
+    assert desktop_theme['background'] == 'rgb(244, 247, 251)', desktop_theme
+    assert '19, 31, 56' in desktop_theme['nav'], desktop_theme
+
+    page.set_viewport_size({'width': 390, 'height': 844})
+    toggler = page.locator('.app-navbar .navbar-toggler')
+    assert toggler.is_visible()
+    toggler.click()
+    assert page.locator('#mainNav').is_visible()
+
 
 def test_employee_cannot_access_admin_users(page):
     _login(page, 'EMP002', 'pass123')
@@ -134,7 +203,7 @@ def test_employee_cannot_access_admin_users(page):
 def test_admin_create_user(page):
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     # The create button appears only once the directory JS has loaded; clicking
     # before it exists is a no-op, and the fixed-sleep version of this step
     # failed one full run on a slow CDN while passing in isolation. The button
@@ -160,7 +229,7 @@ def test_admin_edits_user_permissions(page):
     """FR-USR-09: the permissions modal reads defaults and stores an override."""
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_timeout(1500)
     page.fill('#searchInput', 'EMP002')
     page.wait_for_timeout(1500)
@@ -203,7 +272,7 @@ def test_admin_pii_reveal_is_audited(page):
     """FR-USR-15: the PII reveal is a real, audited capability."""
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_timeout(1500)
     page.fill('#searchInput', 'EMP002')
     page.wait_for_timeout(1500)
@@ -233,7 +302,7 @@ def test_admin_assigns_a_leave_policy(page):
                 password: 'jade-marlin-quilt-77'})
         })
     """)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     # Wait for the button itself rather than a fixed sleep. The user list is
     # rendered by JS from `/api/users`, so a fixed timeout races the CDN load and
     # the search filter; this failed once on exactly that and passed in isolation.
@@ -282,7 +351,7 @@ def test_admin_assigns_a_leave_policy(page):
     page.wait_for_timeout(2000)
 
     # The employee sees the derived entitlement on their own balance endpoint.
-    page.goto(BASE_URL + '/logout')
+    page.goto(BASE_URL + '/logout', wait_until='commit')
     page.wait_for_timeout(1000)
     _login(page, 'EMP904', 'jade-marlin-quilt-77')
     page.wait_for_timeout(3000)
@@ -297,7 +366,7 @@ def test_admin_import_users_runs_as_a_background_job(page):
     """FR-USR-04: the upload is queued, polled, and reported as a job."""
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
-    page.goto(BASE_URL + '/admin/import-users')
+    page.goto(BASE_URL + '/admin/import-users', wait_until='commit')
     page.wait_for_timeout(1500)
 
     csv_body = (
@@ -366,7 +435,7 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
                 password: 'jade-marlin-quilt-77'})
         })
     """)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_timeout(1500)
     page.on('dialog', lambda dialog: dialog.accept())
 
@@ -508,7 +577,7 @@ def test_end_break_self_heal(page):
 
 def test_break_daily_limit_enforced(page):
     _login(page, 'EMP002', 'pass123')
-    page.goto(BASE_URL + '/dashboard')
+    page.goto(BASE_URL + '/dashboard', wait_until='commit')
     page.click('#breaktab')
     # Wait for the break-type buttons rather than sleeping after the tab click. A
     # fixed wait here is an upper bound on the tab render; the button appearing is
@@ -543,7 +612,7 @@ def test_break_daily_limit_enforced(page):
 def test_today_login_sessions_table(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
-    page.goto(BASE_URL + '/dashboard')
+    page.goto(BASE_URL + '/dashboard', wait_until='commit')
     page.wait_for_timeout(2000)
     rows = page.locator('#loginSessionsTable tr')
     count = rows.count()
@@ -552,7 +621,7 @@ def test_today_login_sessions_table(page):
 def test_holidays_page_loads_for_admin(page):
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(5000)
-    page.goto(BASE_URL + '/admin/holidays')
+    page.goto(BASE_URL + '/admin/holidays', wait_until='commit')
     page.wait_for_timeout(2000)
     body = page.text_content('body')
     assert 'Holiday Calendar' in body
@@ -621,7 +690,7 @@ def test_can_apply_leave(page):
     future2 = (date.today() + timedelta(days=11)).isoformat()
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
-    page.goto(BASE_URL + '/leaves')
+    page.goto(BASE_URL + '/leaves', wait_until='commit')
     page.wait_for_timeout(3000)
     page.wait_for_selector('#leaveForm', timeout=10000)
     page.select_option('#leaveType', 'Casual')
@@ -680,7 +749,7 @@ def test_ats_offer_and_preboarding_browser_flow(page):
     assert result['offer']['status'] == 201, result
     assert result['accepted']['status'] == 200, result
     token = result['accepted']['body']['preboarding_token']
-    page.goto(f'{BASE_URL}/preboarding/{token}')
+    page.goto(f'{BASE_URL}/preboarding/{token}', wait_until='commit')
     assert 'Pre-boarding' in page.title()
     file_input = page.locator('input[type="file"]').first
     file_input.set_input_files({'name': 'id-proof.pdf', 'mimeType': 'application/pdf', 'buffer': b'%PDF-1.4\nbrowser'})
@@ -693,7 +762,7 @@ def test_ats_offer_and_preboarding_browser_flow(page):
     assert submit_response.value.status == 200
     page.wait_for_timeout(500)
     assert 'Current step: 2 of 5' in page.text_content('body')
-    page.goto(BASE_URL + '/admin/candidates')
+    page.goto(BASE_URL + '/admin/candidates', wait_until='commit')
     page.wait_for_selector('select option[value="Hired"]', state='attached', timeout=10000)
     assert page.locator('option[value="Hired"]').first.is_disabled()
 
@@ -716,7 +785,8 @@ def test_password_reset_page_completes_the_journey(page):
     finally:
         conn.close()
 
-    page.goto(BASE_URL + '/login')
+    page.goto(BASE_URL + '/login', wait_until='commit')
+    _await_page_js(page)
     asked = page.evaluate(
         "([emp, mail]) => fetch('/api/forgot-password', {method: 'POST',"
         " headers: {'Content-Type': 'application/json'},"
@@ -748,7 +818,7 @@ def test_password_reset_page_completes_the_journey(page):
 
     # The page the SRS emails actually serves, and the token is read by script
     # rather than interpolated into the HTML.
-    page.goto(f'{BASE_URL}/reset-password?token={token}')
+    page.goto(f'{BASE_URL}/reset-password?token={token}', wait_until='commit')
     assert page.is_visible('#resetForm'), 'the reset form did not render'
     assert token not in page.content(), 'the token was rendered into the page'
 
@@ -769,7 +839,7 @@ def test_password_reset_page_completes_the_journey(page):
     assert page.is_visible('#successMsg'), 'the confirmation did not render'
 
     # Single use: the same link is now dead, on the page rather than in the API.
-    page.goto(f'{BASE_URL}/reset-password?token={token}')
+    page.goto(f'{BASE_URL}/reset-password?token={token}', wait_until='commit')
     page.fill('#newPassword', 'another-complying-password')
     page.fill('#confirmPassword', 'another-complying-password')
     with page.expect_response(
@@ -784,7 +854,7 @@ def test_password_reset_page_completes_the_journey(page):
     assert 'Invalid or expired token' in page.text_content('#errorMsg')
 
     # And the new password is the one that took.
-    page.goto(BASE_URL + '/login')
+    page.goto(BASE_URL + '/login', wait_until='commit')
     _login(page, 'EMP002', 'jade-marlin-quilt-77')
 
 
@@ -804,7 +874,7 @@ def test_admin_sets_a_password_from_the_user_management_panel(page):
     """
     _login(page, 'EMP001', 'pass123')
     page.wait_for_timeout(3000)
-    page.goto(BASE_URL + '/admin/users')
+    page.goto(BASE_URL + '/admin/users', wait_until='commit')
     page.wait_for_selector("button[title^='Set a new password']", timeout=15000)
 
     page.fill('#searchInput', 'EMP002')
@@ -854,5 +924,903 @@ def test_admin_sets_a_password_from_the_user_management_panel(page):
     assert 'signs the employee out' in modal_text.lower(), modal_text[:300]
 
     # And it really works: sign in as EMP002 with the generated password.
-    page.goto(BASE_URL + '/login')
+    page.goto(BASE_URL + '/login', wait_until='commit')
     _login(page, 'EMP002', generated)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  React UI — Phase 1 / Phase 2 pilot of docs/REACT_UI_MIGRATION.md
+#
+#  These drive the real SPA against the real session and the real CSRF guard.
+#  The unit suite proves the serving contracts; only a browser proves the shell
+#  mounts, renders the policy-filtered navigation and can complete a
+#  CSRF-protected write — each of which fails silently (a blank page, a missing
+#  header, a 403) rather than loudly.
+# ══════════════════════════════════════════════════════════════════════════
+
+REACT_BUILT = (pathlib.Path(__file__).resolve().parent.parent / 'static' / 'app'
+               / 'index.html').exists()
+
+requires_react_build = pytest.mark.skipif(
+    not REACT_BUILT,
+    reason='React bundle not built; run `npm --prefix frontend run build`',
+)
+
+
+@requires_react_build
+def test_react_shell_mounts_and_renders_the_policy_navigation(page):
+    """The shell boots, and its navbar is the policy-filtered one.
+
+    EMP001 is an Admin, so the tree is the full one. The assertion that matters
+    is not the labels but that the *Modules* group exists at all: it is dropped
+    entirely when no child is permitted, so its presence means the SPA rendered
+    what the server decided rather than a hard-coded list.
+    """
+    _login(page)
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    assert 'Welcome back' in page.inner_text('h1.page__title')
+
+    labels = page.eval_on_selector_all(
+        '.navbar__links > li > a, .navbar__links > li > button',
+        'els => els.map(e => e.innerText.trim())')
+    assert 'Dashboard' in labels, labels
+    assert 'Modules' in labels, labels
+    assert 'Profile' in labels, labels
+
+    children = page.eval_on_selector_all(
+        '.navbar__dropdown .dropdown-item', 'els => els.map(e => e.innerText.trim())')
+    assert children, 'the Modules dropdown is empty'
+
+    # `Users` is a top-level entry, not a dropdown child, so it is asserted
+    # against every link. Hrefs are *router* paths, which the `/app` basename
+    # has already prefixed — checking for a bare `/admin/users` fails against
+    # correct output.
+    all_hrefs = page.eval_on_selector_all(
+        '.navbar__links a', 'els => els.map(e => e.getAttribute("href"))')
+    assert '/app/admin/users' in all_hrefs, all_hrefs
+    assert '/app/admin/payroll' in all_hrefs, all_hrefs
+
+    assert page.eval_on_selector_all('[role="separator"]', 'els => els.length') >= 1, (
+        'navigation_for() forwards a divider entry; the React navbar must render it '
+        'as a separator rather than an item with no label'
+    )
+
+
+@requires_react_build
+def test_react_dashboard_panels_load_without_console_errors(page):
+    """Every panel resolves, and nothing is left spinning or errored.
+
+    Each panel owns its own request, so one failing endpoint shows as one failed
+    panel rather than a blank page — which means the page can look fine while a
+    panel is silently stuck. Waiting for the elements is the signal.
+    """
+    _login(page)
+    errors = []
+    page.on('pageerror', lambda e: errors.append(str(e)))
+
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+    for title in ['Your profile', 'Notifications', 'Upcoming holidays',
+                 'Login sessions', 'Breaks', 'Leave']:
+        page.locator('.panel__title', has_text=title).first.wait_for(
+            state='visible', timeout=15000)
+
+    page.wait_for_function(
+        '() => document.querySelectorAll(".state--loading").length === 0', timeout=15000)
+    assert page.eval_on_selector_all('.state--error', 'els => els.length') == 0, (
+        page.eval_on_selector_all('.state--error', 'els => els.map(e => e.innerText)'))
+    assert not errors, f'uncaught JS errors in the SPA: {errors}'
+
+
+@requires_react_build
+def test_react_links_carry_the_mount_prefix_exactly_once(page):
+    """Every rendered href is `/app/<route>`, never `/app/app/<route>`.
+
+    The router runs with `basename="/app"` and react-router prepends it itself.
+    Prefixing the `to`/`path` values as well produces a doubled path that still
+    *renders* — the shell matches the stripped path — while every link points
+    somewhere that 404s. A test that only asserted "the dashboard rendered"
+    passed straight through that bug.
+    """
+    _login(page)
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+    hrefs = page.eval_on_selector_all(
+        '.navbar__brand, .navbar__links a',
+        'els => els.map(e => e.getAttribute("href"))')
+    assert hrefs, 'no navigation links rendered'
+    for href in hrefs:
+        assert not href.startswith('/app/app/'), f'doubled mount prefix: {href}'
+        assert href.startswith('/app/'), f'link is not inside the SPA mount: {href}'
+    assert '/app/dashboard' in hrefs
+
+
+@requires_react_build
+def test_react_client_route_survives_a_hard_refresh(page):
+    """A browser refresh on a client-side route must boot the SPA.
+
+    `/app/<route>` has no file behind it; the Flask fallback answers with the
+    entry point and the router takes over. Without that, every shared link and
+    every refresh is a 404.
+
+    Both outcomes are asserted, because there are now two kinds of route: a
+    migrated screen resolves to itself, and an unmigrated one resolves to the
+    explicit "not yet migrated" page. What must never happen is the third thing
+    — a silent redirect that makes an unbuilt screen look like it worked.
+    """
+    _login(page)
+
+    # A migrated route stays put across a hard refresh.
+    page.goto(BASE_URL + '/app/leaves', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    assert 'Leave' in page.inner_text('h1.page__title')
+    assert page.url.endswith('/app/leaves'), page.url
+
+    page.reload(wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    assert page.url.endswith('/app/leaves'), page.url
+    assert 'Leave' in page.inner_text('h1.page__title')
+
+    # A genuinely unknown route says so rather than pretending to be the
+    # dashboard.
+    page.goto(BASE_URL + '/app/nope-not-a-page', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    assert 'Not yet migrated' in page.inner_text('h1.page__title')
+    assert page.url.endswith('/app/nope-not-a-page'), page.url
+
+
+@requires_react_build
+def test_react_requires_a_session_and_redirects_to_the_login_page(page):
+    """No session means the server's login page, not an empty shell.
+
+    The SPA does not render its own sign-in form: that flow is still a Jinja
+    template owning the deferred MFA step and the session/attendance
+    bookkeeping, and migrating it is Phase 3.
+    """
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.wait_for_url(BASE_URL + '/login', timeout=15000)
+    page.locator('#empId').wait_for(state='visible', timeout=15000)
+
+
+@requires_react_build
+def test_react_completes_a_csrf_protected_write(page):
+    """The typed API client can perform an unsafe request.
+
+    This is the Phase 1 exit criterion the legacy templates get for free: they
+    rely on `security.init_csrf` injecting a `window.fetch` wrapper into every
+    HTML response, which an SPA does not have. So the client acquires the token
+    from `/api/csrf-token` and sends the header itself — and the pair of
+    requests below asserts the write is genuinely CSRF-checked, not merely
+    accepted, by showing the same call refused without the header.
+    """
+    _login(page)
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+    result = page.evaluate("""async () => {
+        const tok = await (await fetch('/api/csrf-token', {credentials: 'same-origin'})).json();
+        const accepted = await fetch('/api/notifications/read', {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json', 'X-CSRF-Token': tok.csrf_token},
+            body: JSON.stringify({}),
+        });
+        const refused = await fetch('/api/notifications/read', {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({}),
+        });
+        return {accepted: accepted.status, refused: refused.status};
+    }""")
+    assert result['accepted'] == 200, result
+    assert result['refused'] == 403, result
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  Pilot workflows at parity — UI-07 (docs/REACT_UI_MIGRATION.md, Phase 2)
+#
+#  These drive the break and leave workflows through the real React UI. The
+#  refusal cases are the reason they exist: a migrated screen that only ever
+#  exercises its happy path passes while being unable to show an employee *why*
+#  their Lunch break needs approval or *why* their leave was refused, and both of
+#  those are the failure an employee actually experiences.
+#
+#  Every fixture row carries a marker in `reason`, and the cleanup deletes it —
+#  unconditionally, in a `finally`, so a failing run does not leave leave
+#  requests behind for the next one to collide with.
+# ══════════════════════════════════════════════════════════════════════════
+
+_PROBE_MARKER = 'zz-react-parity-probe'
+
+
+def _next_monday(offset_weeks=0):
+    """A Monday `offset_weeks` weeks out.
+
+    Monday-to-Tuesday is guaranteed two working days, which is what several
+    assertions need. A naive `today + N` lands on a weekend often enough to be
+# refused by FR-LEA-09's working-day check, which would look like a UI failure.
+    """
+    today = datetime.now().date()
+    ahead = (7 - today.weekday()) % 7 or 7
+    return today + timedelta(days=ahead + 7 * offset_weeks)
+
+
+def _next_saturday():
+    today = datetime.now().date()
+    return today + timedelta(days=(5 - today.weekday()) % 7 or 7)
+
+
+def _next_friday(offset_weeks=0):
+    """A Friday `offset_weeks` weeks out.
+
+    Friday-to-Monday is the range FR-LEA-09 exists for: it spans four calendar
+    days but charges two, so it is the only shape where the two figures the API
+    returns actually differ.
+    """
+    today = datetime.now().date()
+    ahead = (5 - today.weekday()) % 7 or 7
+    return today + timedelta(days=ahead + 7 * offset_weeks)
+
+
+def _cleanup_probe_leaves():
+    """Remove probe leave requests. Safe to call when none exist."""
+    from app import get_db
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM leave_requests WHERE reason LIKE ?", [f'%{_PROBE_MARKER}%'])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _react_dashboard(page, emp_id='EMP001', password='pass123'):
+    """Sign in and land on the React dashboard with every panel settled."""
+    _login(page, emp_id, password)
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    return page
+
+
+@requires_react_build
+def test_react_break_start_and_end_through_the_ui(page):
+    """Start a break, see it as active, end it. The pilot's first write path."""
+    _react_dashboard(page)
+    panel = page.locator('.panel', has_text='Breaks')
+
+    panel.locator('.break-btn', has_text='Personal').click()
+    panel.locator('.break-active').wait_for(state='visible', timeout=15000)
+    assert 'Personal' in panel.locator('.break-active__name').inner_text()
+
+    # The elapsed timer is part of the panel, not decoration.
+    assert 'min' in panel.locator('.break-active__elapsed').inner_text()
+
+    panel.locator('.btn--danger').click()
+    page.wait_for_function(
+        '() => !document.querySelector(".break-active")', timeout=15000)
+    # Ending is reported with the recorded duration.
+    assert 'Break ended' in panel.locator('.notice').inner_text()
+
+
+@requires_react_build
+def test_react_break_moves_focus_to_end_on_start(page):
+    """Starting a break replaces panel content; focus must follow it.
+
+    The button the employee pressed ceases to exist, so without this their next
+    Tab lands somewhere unpredictable and a screen reader is left pointing at a
+    removed node. The End button is the only sensible successor.
+    """
+    _react_dashboard(page)
+    panel = page.locator('.panel', has_text='Breaks')
+    panel.locator('.break-btn', has_text='Personal').click()
+    panel.locator('.break-active').wait_for(state='visible', timeout=15000)
+    assert page.evaluate('() => document.activeElement.innerText').strip() == 'End break'
+
+    panel.locator('.btn--danger').click()
+    page.wait_for_function(
+        '() => !document.querySelector(".break-active")', timeout=15000)
+
+
+@requires_react_build
+def test_react_break_panel_is_operable_from_the_keyboard(page):
+    """A break can be started without a mouse.
+
+    The legacy panel's buttons were real `<button>`s too, but the migrated panel
+    is new markup and could have used a div — so it is asserted, not assumed.
+    """
+    _react_dashboard(page)
+    panel = page.locator('.panel', has_text='Breaks')
+    panel.locator('.break-btn', has_text='Personal').focus()
+    assert 'Personal' in page.evaluate('() => document.activeElement.innerText')
+    page.keyboard.press('Enter')
+    panel.locator('.break-active').wait_for(state='visible', timeout=15000)
+    panel.locator('.btn--danger').click()
+    page.wait_for_function(
+        '() => !document.querySelector(".break-active")', timeout=15000)
+
+
+@requires_react_build
+def test_react_leave_apply_reports_working_days_not_calendar_days(page):
+    """FR-LEA-09: leave is charged in working days, and the UI must say so.
+
+    The response carries both `days_requested` and `calendar_days`. Showing only
+    the working-day figure would look like a bug to anyone used to paying four
+    days for Friday-to-Monday, so both are rendered.
+    """
+    _cleanup_probe_leaves()
+    try:
+        _react_dashboard(page)
+        panel = page.locator('.panel', has_text='Leave').last
+        # Friday to Monday: four calendar days, two working days. Any other range
+        # has the two figures equal, so the clause this test is checking would
+        # legitimately be absent and the assertion would fail on correct output.
+        friday = _next_friday(4)
+
+        panel.locator('#leave-start').fill(friday.isoformat())
+        panel.locator('#leave-end').fill((friday + timedelta(days=3)).isoformat())
+        panel.locator('#leave-reason').fill(f'{_PROBE_MARKER} apply')
+
+        with page.expect_response(
+            lambda r: '/api/leaves' in r.url and r.request.method == 'POST', timeout=20000
+        ) as resp:
+            panel.locator('button[type="submit"]').click()
+        assert resp.value.status == 201, resp.value.text()
+
+        payload = resp.value.json()
+        assert payload['calendar_days'] > payload['days_requested'], payload
+
+        panel.locator('.notice--applied').wait_for(state='visible', timeout=15000)
+        outcome = panel.locator('.notice--applied').inner_text()
+        assert 'working day' in outcome, outcome
+        # Both figures, because only one of them explains the charge.
+        assert 'calendar days' in outcome, outcome
+        assert str(payload['days_requested']) in outcome, outcome
+        assert str(payload['calendar_days']) in outcome, outcome
+
+        row = panel.locator('.leave-row', has_text=_PROBE_MARKER)
+        row.wait_for(state='visible', timeout=15000)
+        assert 'PENDING' in row.first.inner_text().upper()
+
+        # Cancel it and confirm the ledger action is surfaced: releasing a
+        # Pending reservation and un-consuming an Approved one are different
+        # outcomes and the employee is told which happened.
+        with page.expect_response(lambda r: '/cancel' in r.url, timeout=20000) as cresp:
+            row.first.locator('button', has_text='Cancel').click()
+        assert cresp.value.status == 200, cresp.value.text()
+        panel.locator('.notice--cancelled').wait_for(state='visible', timeout=15000)
+        cancelled = panel.locator('.notice--cancelled').inner_text().lower()
+        assert 'cancelled' in cancelled, cancelled
+        assert 'balance' in cancelled or 'usage' in cancelled, cancelled
+        row.first.locator('.status--cancelled').wait_for(state='visible', timeout=15000)
+    finally:
+        _cleanup_probe_leaves()
+
+
+@requires_react_build
+def test_react_leave_refusals_are_explained(page):
+    """Both server refusals must reach the employee, announced as alerts.
+
+    A weekend-only range is refused with a `hint`, and an overlap is a 409. These
+    are the two an employee actually hits, and a screen that renders neither is
+    indistinguishable from one that is broken.
+    """
+    _cleanup_probe_leaves()
+    try:
+        _react_dashboard(page)
+        panel = page.locator('.panel', has_text='Leave').last
+
+        def submit(start, end, reason):
+            panel.locator('#leave-start').fill(start)
+            panel.locator('#leave-end').fill(end)
+            panel.locator('#leave-reason').fill(reason)
+            with page.expect_response(
+                lambda r: '/api/leaves' in r.url and r.request.method == 'POST', timeout=20000
+            ) as resp:
+                panel.locator('button[type="submit"]').click()
+            return resp.value
+
+        saturday = _next_saturday()
+        refused = submit(saturday.isoformat(), saturday.isoformat(),
+                         f'{_PROBE_MARKER} weekend')
+        assert refused.status == 400, refused.text()
+        panel.locator('.state--validation').wait_for(state='visible', timeout=15000)
+        message = panel.locator('.state--validation').inner_text()
+        assert 'weekly off' in message or 'holiday' in message, message
+        # Announced, and interrupting: a refused request is not a polite update.
+        assert panel.locator('.state--validation').get_attribute('role') == 'alert'
+
+        monday = _next_monday(6)
+        first = submit(monday.isoformat(), (monday + timedelta(days=1)).isoformat(),
+                       f'{_PROBE_MARKER} overlap')
+        assert first.status == 201, first.text()
+        second = submit(monday.isoformat(), (monday + timedelta(days=1)).isoformat(),
+                        f'{_PROBE_MARKER} overlap-again')
+        assert second.status == 409, second.text()
+        panel.locator('.state--validation').wait_for(state='visible', timeout=15000)
+        assert 'Overlapping' in panel.locator('.state--validation').inner_text()
+    finally:
+        _cleanup_probe_leaves()
+
+
+@requires_react_build
+def test_react_leave_list_heading_matches_the_scope_it_receives(page):
+    """The list must not claim to be the caller's own when it is not.
+
+    `GET /api/leaves` is scoped by policy: an employee receives their own
+    requests, an Admin receives the company's. The heading said "Your requests"
+    unconditionally, so an Admin reading their own dashboard saw four
+    colleagues' leave filed under a heading that claimed otherwise. The scope is
+    observed from the payload rather than guessed from a role the client would
+    have to re-derive.
+    """
+    _react_dashboard(page)
+    panel = page.locator('.panel', has_text='Leave').last
+
+    # Wait for the list to populate. The heading is derived from the payload, so
+    # reading it mid-load shows the empty-state version and the assertion would
+    # pass or fail for the wrong reason.
+    panel.locator('.leave-row').first.wait_for(state='visible', timeout=20000)
+
+    # Read who is signed in from the rendered page rather than assuming EMP001,
+    # so the test says something about the viewer's own rows.
+    actor_id = page.evaluate(
+        '() => document.querySelector(".page__subtitle strong").innerText.trim()')
+
+    rows = panel.locator('.leave-row').count()
+    heading = panel.locator('.panel__subhead').nth(2).inner_text().strip().lower()
+
+    # The invariant is per-row, not a count comparison: every row that is
+    # somebody else's must be attributed. (An earlier version asserted
+    # `rows > owners`, which is only true when the caller happens to have at
+    # leave of their own — an Admin with none fails it.)
+    rows = page.evaluate("""(viewer) => {
+        return Array.from(document.querySelectorAll('.leave-row')).map(row => ({
+            empId: row.getAttribute('data-emp-id'),
+            hasChip: Boolean(row.querySelector('.list__meta--owner')),
+        }));
+    }""", actor_id)
+
+    assert len(rows) > 0, 'no rows to check'
+    # The owner chip is shown for exactly the rows that are somebody else's, and
+    # omitted for the viewer's own — which is what makes the "Leave requests"
+    # heading honest rather than a claim about every row in the list.
+    for row in rows:
+        is_foreign = row['empId'] != actor_id
+        assert row['hasChip'] == is_foreign, (row, actor_id)
+
+    if any(row['hasChip'] for row in rows):
+        assert heading == 'leave requests', heading
+    else:
+        assert heading == 'your requests', heading
+
+
+@requires_react_build
+def test_react_every_form_control_has_an_associated_label(page):
+    """Every leave control is labelled.
+
+    An unlabelled date input reads as "MM/DD/YYYY" with no indication of whether
+    it is the start or the end — the two are interchangeable-looking and not
+    interchangeable in meaning.
+    """
+    _react_dashboard(page)
+    labels = page.evaluate("""() => {
+        const ids = ['leave-type', 'leave-session', 'leave-start', 'leave-end', 'leave-reason'];
+        return ids.map(id => {
+            const el = document.getElementById(id);
+            if (!el) return `${id}: MISSING`;
+            const lab = document.querySelector(`label[for="${id}"]`);
+            return lab ? null : `${id}: NO LABEL`;
+        }).filter(Boolean);
+    }""")
+    assert labels == [], labels
+
+
+@requires_react_build
+def test_react_notifications_render_the_unread_count(page):
+    """Regression: this panel was silently empty while a notification existed.
+
+    `GET /api/notifications` returns `{unread, data}`, not a bare array. It was
+    modelled as an array, `Array.isArray(payload)` was false, and the fallback
+    rendered "You have no notifications" next to a live unread notification. A
+    wrong response shape does not throw here — it renders an empty state, which
+    is indistinguishable from a genuine one.
+    """
+    from app import add_notification, get_db
+
+    conn = get_db()
+    try:
+        # `add_notification` reports whether the row was actually written, which
+        # is false when a notification preference suppresses the category. If it
+        # were suppressed the assertion below would fail for a reason that has
+        # nothing to do with the panel.
+        written = add_notification('EMP001', 'LEAVE_APPLIED',
+                                   f'{_PROBE_MARKER} notification probe', '/leaves')
+        assert written, 'the probe notification was suppressed, not missing'
+    finally:
+        conn.close()
+
+    _react_dashboard(page)
+    panel = page.locator('.panel', has_text='Notifications')
+    panel.locator('.badge-inline').wait_for(state='visible', timeout=15000)
+    body = panel.inner_text()
+    assert 'unread' in body, body
+    assert _PROBE_MARKER in body, (
+        'the notification message is missing, so the panel is rendering an empty '
+        f'state: {body}'
+    )
+
+
+@requires_react_build
+def test_react_modules_dropdown_is_keyboard_operable(page):
+    """The Modules menu follows the ARIA disclosure pattern, not just CSS.
+
+    CSS `:hover`/`:focus-within` reveals the menu, but that leaves `aria-expanded`
+    describing nothing — a screen reader is told the menu is collapsed while it is
+    on screen, and a keyboard user who opened it is trapped with no Escape. All
+    three are asserted because all three are the failure mode.
+    """
+    _react_dashboard(page)
+    trigger = page.locator('.navbar__link--group')
+
+    assert trigger.get_attribute('aria-expanded') == 'false'
+    assert not page.locator('.navbar__dropdown').is_visible(), 'menu starts closed'
+
+    # ArrowDown opens and moves focus into the first item.
+    trigger.focus()
+    page.keyboard.press('ArrowDown')
+    page.locator('.navbar__dropdown').wait_for(state='visible', timeout=10000)
+    assert trigger.get_attribute('aria-expanded') == 'true'
+    assert 'Assets' in page.evaluate('() => document.activeElement.innerText')
+
+    # ArrowDown advances.
+    page.keyboard.press('ArrowDown')
+    assert 'Jobs' in page.evaluate('() => document.activeElement.innerText')
+
+    # Escape closes and returns focus to the trigger, so the keyboard is not
+    # left inside a hidden element.
+    page.keyboard.press('Escape')
+    assert trigger.evaluate('el => el === document.activeElement'), (
+        'focus was not returned to the trigger after Escape'
+    )
+    assert trigger.get_attribute('aria-expanded') == 'false'
+    assert not page.locator('.navbar__dropdown').is_visible()
+
+
+@requires_react_build
+def test_react_dropdown_navigation_matches_the_server_tree(page):
+    """Every Modules link is reachable, and each maps to the route it names.
+
+    A group rendered with fewer children than the server sent means something
+    filtered them client-side — which would be a client-side authorization
+    decision, the one thing this migration is not allowed to make.
+    """
+    _react_dashboard(page)
+    page.locator('.navbar__link--group').click()
+    page.locator('.navbar__dropdown').wait_for(state='visible', timeout=10000)
+
+    hrefs = page.eval_on_selector_all(
+        '.navbar__dropdown .dropdown-item',
+        'els => els.map(e => e.getAttribute("href"))')
+    served = page.evaluate("""async () => {
+        const r = await fetch('/api/navigation', {credentials: 'same-origin'});
+        const d = await r.json();
+        const group = d.navigation.find(e => e.group);
+        if (!group) return [];
+        return group.children.filter(c => !c.divider).map(c => c.href);
+    }""")
+
+    assert served, 'no Modules group was served to this actor'
+    assert hrefs == ['/app' + h for h in served], (hrefs, served)
+
+
+@requires_react_build
+def test_react_dropdown_click_is_not_swallowed_by_hover(page):
+    """Clicking the trigger must open the menu, not close a hover-opened one.
+
+    A click is always preceded by a mouseenter, so a naive `toggle` opens the
+    menu on the way to the button and shuts it on the button itself — the
+    trigger looks broken to every mouse user. Found by this very suite: the test
+    that clicks the dropdown passed alone and failed in a full run, because a
+    preceding test had left the pointer over the navbar.
+
+    Three assertions, because the state has three legitimate outcomes: opened by
+    hover and pinned by click, closed by a second click, and re-opened by hover
+    after the pointer leaves and returns.
+    """
+    _react_dashboard(page)
+    trigger = page.locator('.navbar__link--group')
+    menu = page.locator('.navbar__dropdown')
+    away = page.locator('.page__title')
+
+    # `click` moves the pointer onto the trigger, firing mouseenter first.
+    trigger.click()
+    menu.wait_for(state='visible', timeout=10000)
+    assert trigger.get_attribute('aria-expanded') == 'true', (
+        'the click closed a menu that hover had just opened'
+    )
+
+    # A second click closes it: the first click pinned it, the second toggles.
+    trigger.click()
+    page.wait_for_function(
+        '() => !document.querySelector(".navbar__dropdown").classList'
+        '.contains("is-open")', timeout=5000)
+    assert not menu.is_visible()
+
+    # And hover alone opens it for a mouse user who never clicks. The pointer
+    # must leave the trigger first — `hover()` is a no-op while it is already
+    # over the element, so no mouseenter can fire and asserting without the move
+    # away would fail on correct behaviour.
+    away.hover()
+    trigger.hover()
+    menu.wait_for(state='visible', timeout=10000)
+    assert trigger.get_attribute('aria-expanded') == 'true'
+
+    # Leaving closes a hover-opened menu.
+    away.hover()
+    page.wait_for_function(
+        '() => !document.querySelector(".navbar__dropdown").classList'
+        '.contains("is-open")', timeout=5000)
+    assert not menu.is_visible()
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  UI-08 — self-service screens (docs/REACT_UI_MIGRATION.md, Phase 3)
+#
+#  /profile, /tickets, /regularization, /goals, /leaves.
+#
+#  These run as EMP002, a plain Employee, on purpose. An Admin sees a different
+#  set of nav links and a company-wide version of three of these lists, so a test
+#  that only ever signed in as an administrator would never prove that a plain
+#  employee can use the self-service UI at all — which is the majority case.
+# ══════════════════════════════════════════════════════════════════════════
+
+_UI08_MARK = 'zz-ui08'
+
+# Unique per run. Playwright's `fill()` on a field that already holds the value
+# fires no React change event, so a fixed value stops marking the form dirty on
+# the second run and a "Save is enabled" assertion fails for a reason that has
+# nothing to do with the product.
+_UI08_UNIQUE = str(int(datetime.now().timestamp()) % 1000000)
+# Day offset for the "free date" fixture, distinct per test so two runs in the
+# same session cannot collide on a Pending regularization row.
+_UI08_OFFSET = int(datetime.now().timestamp()) % 20
+
+
+def _cleanup_ui08():
+    """Remove every UI-08 fixture row. Safe when there are none."""
+    from app import get_db
+    conn = get_db()
+    try:
+        conn.execute('DELETE FROM tickets WHERE subject LIKE ?', [f'%{_UI08_MARK}%'])
+        conn.execute(
+            'DELETE FROM regularization_requests WHERE reason LIKE ?', [f'%{_UI08_MARK}%'])
+        conn.execute('DELETE FROM goals WHERE title LIKE ?', [f'%{_UI08_MARK}%'])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _employee_dashboard(page):
+    _login(page, 'EMP002', 'pass123')
+    page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    return page
+
+
+@requires_react_build
+def test_react_self_service_nav_is_rendered_for_a_plain_employee(page):
+    """The navbar an employee receives is the one they can actually use.
+
+    `Tickets` and `Goals` are Modules children gated on their own SRS module, so
+    they are absent for an Employee — correctly. A test asserting only that the
+    link exists would be asserting the admin's navbar, and would pass while every
+    employee saw a broken set of links.
+    """
+    _employee_dashboard(page)
+    labels = page.eval_on_selector_all(
+        '.navbar__links > li > a', 'els => els.map(e => e.innerText.trim())')
+    for expected in ['Dashboard', 'Leaves', 'Regularization', 'Profile']:
+        assert expected in labels, (expected, labels)
+    assert 'Tickets' not in labels, (
+        'an Employee was offered the Tickets link, which is gated on the '
+        f'`tickets` module: {labels}'
+    )
+
+
+@requires_react_build
+def test_react_self_service_pages_reachable_by_client_side_navigation(page):
+    """Each screen resolves through a real navbar click, not a raw goto.
+
+    A raw `goto` proves the route matches; it does not prove the nav hrefs point
+    at it. Clicking does both, and it is the path a person actually takes.
+    """
+    _employee_dashboard(page)
+    for label, want in [('Profile', 'Profile'), ('Regularization', 'Regularization'),
+                        ('Leaves', 'Leave')]:
+        page.locator(f'.navbar__links a:has-text("{label}")').first.click()
+        page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+        assert want in page.inner_text('h1.page__title'), (label, page.url)
+        # Still inside the SPA, i.e. no full page load happened.
+        assert page.url.startswith(BASE_URL + '/app/'), page.url
+
+
+@requires_react_build
+def test_react_ticket_can_be_raised(page):
+    _cleanup_ui08()
+    try:
+        _employee_dashboard(page)
+        page.goto(BASE_URL + '/app/tickets', wait_until='commit')
+        page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+        subject = f'{_UI08_MARK} ticket {_UI08_UNIQUE}'
+        page.locator('#t-subject').fill(subject)
+        page.locator('#t-description').fill('Created by the UI-08 migration tests')
+        page.locator('#t-priority').select_option('High')
+
+        with page.expect_response(
+            lambda r: '/api/tickets' in r.url and r.request.method == 'POST', timeout=20000
+        ) as resp:
+            page.locator('button[type="submit"]').click()
+        assert resp.value.status == 201, resp.value.text()
+
+        page.locator('.notice--ok').wait_for(state='visible', timeout=15000)
+        row = page.locator('.list__item', has_text=subject)
+        row.first.wait_for(state='visible', timeout=15000)
+        assert 'OPEN' in row.first.inner_text().upper()
+        # The form clears after a successful create, so a second submit cannot
+        # silently file the same ticket twice.
+        assert page.input_value('#t-subject') == ''
+    finally:
+        _cleanup_ui08()
+
+
+@requires_react_build
+def test_react_regularization_requires_a_reason_and_reports_refusals(page):
+    """Client guard for the reason, and the server's own 409 rendered verbatim.
+
+    The server refuses a second Pending request for the same date (409) — seeded
+    data makes that the *default* outcome for today, so it is not an edge case
+    and must not vanish into a failed request.
+    """
+    _cleanup_ui08()
+    try:
+        _employee_dashboard(page)
+        page.goto(BASE_URL + '/app/regularization', wait_until='commit')
+        page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+        # Client-side: no reason.
+        page.locator('button[type="submit"]').click()
+        page.locator('.state--validation').wait_for(state='visible', timeout=15000)
+        assert 'reason' in page.inner_text('.state--validation').lower()
+
+        # Server-side: today's date already has a Pending request.
+        page.locator('#r-reason').fill(f'{_UI08_MARK} duplicate')
+        with page.expect_response(
+            lambda r: '/api/regularization' in r.url and r.request.method == 'POST',
+            timeout=20000,
+        ) as dup:
+            page.locator('button[type="submit"]').click()
+        if dup.value.status == 409:
+            page.locator('.state--validation').wait_for(state='visible', timeout=15000)
+            assert 'already exists' in page.inner_text('.state--validation')
+            assert page.locator('.state--validation').get_attribute('role') == 'alert'
+
+        # A free date succeeds.
+        free = (datetime.now().date() + timedelta(days=40 + _UI08_OFFSET)).isoformat()
+        page.locator('#r-date').fill(free)
+        page.locator('#r-reason').fill(f'{_UI08_MARK} forgot to punch in')
+        with page.expect_response(
+            lambda r: '/api/regularization' in r.url and r.request.method == 'POST',
+            timeout=20000,
+        ) as ok:
+            page.locator('button[type="submit"]').click()
+        assert ok.value.status == 201, ok.value.text()
+        page.locator('.list__item', has_text=_UI08_MARK).first.wait_for(
+            state='visible', timeout=15000)
+    finally:
+        _cleanup_ui08()
+
+
+@requires_react_build
+def test_react_goal_creation_has_no_employee_picker_and_no_self_rating(page):
+    """Two controls are deliberately absent, and both absences are the point.
+
+    * The legacy page fetched `/api/users?per_page=200` to populate an employee
+      picker. That endpoint is `admin_required`, so an Employee got a **403** and
+      a form that silently could not be submitted. `POST /api/goals` takes
+      `emp_id` from the session (CC-10), so there is nothing to pick.
+    * `goals.check_rating` refuses the goal's **owner** (FR-PERF-01). A "Rate"
+      button on your own goal would offer an action the server permanently
+      rejects.
+    """
+    _cleanup_ui08()
+    try:
+        _employee_dashboard(page)
+        page.goto(BASE_URL + '/app/goals', wait_until='commit')
+        page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+        # No dropdown of employees anywhere on the page.
+        assert page.locator('select').count() == 0, (
+            'a select appeared on the goals form; /api/users is admin-only, so an '
+            'employee picker cannot work'
+        )
+        assert page.locator('button:has-text("Rate")').count() == 0
+
+        title = f'{_UI08_MARK} goal {_UI08_UNIQUE}'
+        page.locator('#g-title').fill(title)
+        page.locator('#g-weight').fill('7')
+        with page.expect_response(
+            lambda r: '/api/goals' in r.url and r.request.method == 'POST', timeout=20000
+        ) as resp:
+            page.locator('button[type="submit"]').click()
+        assert resp.value.status == 201, resp.value.text()
+
+        row = page.locator('.list__item', has_text=title)
+        row.first.wait_for(state='visible', timeout=15000)
+        assert 'weight 7' in row.first.inner_text()
+        # An unrated goal says so, rather than showing a blank.
+        assert 'not yet rated' in row.first.inner_text()
+    finally:
+        _cleanup_ui08()
+
+
+@requires_react_build
+def test_react_profile_edit_and_password_guards(page):
+    """Profile save is gated on an actual change, and the password form guards."""
+    _employee_dashboard(page)
+    page.goto(BASE_URL + '/app/profile', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+
+    save = page.locator('button[type="submit"]:has-text("Save changes")')
+    # Pristine: nothing to save, so the button is disabled. Offering a save that
+    # silently writes nothing is how "my change did not stick" happens.
+    assert save.is_disabled()
+
+    # Unique value — see the note on _UI08_UNIQUE.
+    phone = f'9{_UI08_UNIQUE}'
+    original = page.input_value('#p-phone')
+    page.locator('#p-phone').fill(phone)
+    assert not save.is_disabled()
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/profile') and r.request.method == 'PUT', timeout=20000
+    ) as resp:
+        save.click()
+    assert resp.value.status == 200, resp.value.text()
+    page.locator('.notice--ok').wait_for(state='visible', timeout=15000)
+
+    # Mismatch is caught before a request is made.
+    page.locator('#pw-current').fill('pass123')
+    page.locator('#pw-new').fill('abcdefghijk')
+    page.locator('#pw-confirm').fill('something-else')
+    page.locator('button[type="submit"]:has-text("Change password")').click()
+    page.wait_for_selector('.field__error', timeout=10000)
+    assert 'do not match' in page.inner_text('.field__error')
+
+    # Restore, so this test does not leave the shared fixture employee changed.
+    page.locator('#p-phone').fill(original)
+    with page.expect_response(
+        lambda r: r.url.endswith('/api/profile') and r.request.method == 'PUT', timeout=20000
+    ):
+        save.click()
+
+
+@requires_react_build
+def test_react_unmigrated_route_says_so_and_links_to_the_legacy_page(page):
+    """A route with no React screen must not silently redirect to the dashboard.
+
+    Redirecting makes a nav link look present and do nothing, which is how a
+    half-migrated app becomes indistinguishable from a broken one. The page
+    should name the gap and offer the legacy URL, which still works.
+    """
+    _employee_dashboard(page)
+    page.goto(BASE_URL + '/app/documents', wait_until='commit')
+    page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
+    assert 'Not yet migrated' in page.inner_text('h1.page__title')
+
+    link = page.locator('a:has-text("Open the current page")')
+    link.wait_for(state='visible', timeout=10000)
+    # A full navigation, not a router push: there is no React bundle at /documents.
+    assert link.get_attribute('href') == '/documents', link.get_attribute('href')

@@ -173,6 +173,20 @@ def init_csrf(app) -> None:
     @app.after_request
     def _csrf_deliver(response):  # noqa: ANN001
         token = session.get(CSRF_KEY)
+        # `send_from_directory` (and any file wrapper) returns a response in
+        # *direct passthrough* mode, where the body is a file handle and calling
+        # `get_data()` raises RuntimeError rather than reading it. Serving an
+        # HTML file from disk therefore crashed this hook outright -- it took
+        # the first `/app/` request to find out, because until the React UI
+        # landed every HTML response came from `render_template` and was
+        # buffered.
+        #
+        # Skipping is also the correct behaviour, not just the safe one: there
+        # is nothing to inject a token into on a response we are not rewriting.
+        # The SPA shell acquires its token explicitly from `/api/csrf-token`,
+        # so it does not depend on this injection at all.
+        if getattr(response, "direct_passthrough", False):
+            return response
         if token and response.mimetype == "text/html":
             patch = _fetch_patcher(token)
             body = response.get_data(as_text=True)

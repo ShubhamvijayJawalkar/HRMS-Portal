@@ -1,5 +1,85 @@
 # HRMS Project Guide
 
+## React UI migration (in progress — Phases 1 and 2 complete, Phase 3 next)
+
+The incremental migration from Jinja to React is specified in
+[`docs/REACT_UI_MIGRATION.md`](docs/REACT_UI_MIGRATION.md). Flask stays the
+backend and keeps ownership of auth, authorization, sessions, CSRF, business
+rules and every `/api/*` contract. **The SPA is mounted at `/app/` and no legacy
+page route moved**, which is what makes the migration incremental: a screen can
+be migrated and verified while its Jinja counterpart keeps serving.
+
+- **The inventory is generated, not written** —
+  `scripts/ui_inventory.py --markdown docs/UI_INVENTORY.md` reads `app.py`
+  (routes, gates, `_ROUTE_MODULES`), every template (its `/api/*` calls and CDN
+  dependencies) and `policy.NAV_ENTRIES`, then exits non-zero on drift.
+  `test_ui_inventory_generator_reports_no_drift` runs it in the unit suite, and
+  CI runs it as its own step. A hand-maintained inventory would be stale the
+  moment a route changed, and it is what the migration order is planned from.
+- **One implementation of "which links may this actor see."**
+  `GET /api/navigation` returns `navigation_for(actor)` — the *same* call the
+  Jinja context processor makes — rather than a second implementation that would
+  drift from the policy matrix, the route gates and `_ROUTE_MODULES`.
+  `test_navigation_matches_the_jinja_navbar_exactly` asserts the two agree.
+  `NavBar` holds no permission logic of its own; hiding a link is a usability
+  affordance and never authorization.
+- **`frontend/src/lib/api.ts` is the only thing that fetches.** Same-origin
+  credentials, the CSRF token held in memory from `GET /api/csrf-token`, and one
+  retry on a CSRF rejection (the session cookie rotates on logout, so a cached
+  token can be stale by the time a screen writes). The legacy templates get CSRF
+  for free from an injected `window.fetch` wrapper; an SPA does not have one.
+- **A 401 renders a full navigation to `/login`, not a React route.** The
+  sign-in flow is still a Jinja template owning the deferred MFA step and the
+  session/attendance bookkeeping; migrating it is UI-12.
+
+### Two defects this work found, both of which were latent
+
+1. **`security._csrf_deliver` crashed on any file-served HTML response.** It
+   called `get_data()` on every `text/html` response, which raises `RuntimeError`
+   on a direct-passthrough response — and `send_from_directory` returns exactly
+   that. Every page here renders through `render_template` and is buffered, so
+   nothing hit it until the shell began serving `index.html` off disk and the
+   first `/app/` request 500'd. Fixed by skipping passthrough responses (also
+   the correct behaviour: there is nothing to inject into). Guard:
+   `test_csrf_delivery_does_not_break_file_served_html`.
+2. **The doubled mount prefix.** The router carries `basename="/app"` and
+   react-router prepends it itself; the routes were *also* written as
+   `/app/dashboard`, producing `/app/app/dashboard`. The shell still rendered —
+   react-router matched the stripped path — while every link 404'd, so "the
+   dashboard rendered" passed straight through it. Guard:
+   `test_react_links_carry_the_mount_prefix_exactly_once`.
+
+### The browser flake `AGENTS.md` kept re-recording, actually fixed
+
+The repeated "`Page.goto: Timeout 30000ms exceeded` (CDN load)" flake had a
+cause that was never addressed: **19 `page.goto` calls used the default
+`wait_until='load'`**, which waits for every subresource, and all 32 legacy
+templates load Bootstrap, icons and a Google webfont from CDNs. All are now
+`wait_until='commit'`; `fill`/`click`/`wait_for_*` auto-wait, so the signal is
+still the element the test wants and the CDN is out of the critical path.
+
+That change then exposed a real coupling the default had been hiding: tests that
+call `fetch` from `page.evaluate` only work because `init_csrf` injects a
+`window.fetch` wrapper into the HTML. Under `commit` the document is not parsed,
+the wrapper is absent, the request goes out un-tokened and is refused with a 403
+that surfaced as a password-reset failure three hundred lines from the cause.
+`_await_page_js()` now waits explicitly on the `__hrmsCsrf` flag. Browser suite
+is **31/31 on three consecutive runs**.
+
+### Working on the frontend
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build     # -> static/app/
+npm --prefix frontend run dev       # Vite on :5173, proxying /api and /app to Flask
+npm --prefix frontend run typecheck
+```
+
+`node_modules/` and `static/app/` are gitignored; the bundle is built in CI and
+in a Node stage of the Dockerfile. **npm ≥ 11 blocks postinstall scripts** —
+`npm install-scripts approve esbuild` is required or Vite fails with a message
+about a missing platform binary that does not point at the cause.
+
 ## Testing
 
 ### Running all tests
@@ -8,12 +88,34 @@ python -m pytest tests/test_app.py -v && python -m pytest tests/test_playwright.
 ```
 **Note:** Run test suites separately — they share an `app` module and separate DB env vars, causing 403 login failures if combined.
 
+**Counts were stale here for a long time** (they read 217 unit / 21 browser
+against a suite that had long since grown). A hand-copied number has nothing to
+compare itself to, which is the same failure the traceability matrix kept
+finding in requirement rows. Current: **365 unit passed / 12 skipped**,
+**31 browser passed** (three consecutive clean runs after the `wait_until`
+fix), 10 Redis-session tests.
+
 ### Running specific test files
 ```bash
-python -m pytest tests/test_app.py -v   # Unit tests (217 passed, 1 skipped, ~70s)
-python -m pytest tests/test_playwright.py -v  # Browser tests (21 tests)
+python -m pytest tests/test_app.py -v   # Unit tests (365 passed, 12 skipped, ~110s)
+python -m pytest tests/test_playwright.py -v  # Browser tests (31 tests)
 python -m pytest tests/test_redis_sessions.py -v  # Redis session store (10, skip without REDIS_URL)
 ```
+
+### Browser tests: wait for signals, never for time
+The suite's recurring flake was never a flake. **Do not reintroduce a bare
+`page.goto(url)`** — the default `wait_until='load'` waits for every subresource,
+and every legacy template loads Bootstrap, icons and a webfont from CDNs, so one
+slow CDN segment fails an arbitrary test at page load. Use
+`wait_until='commit'` and let `fill`/`click`/`wait_for_*` auto-wait for the
+element.
+
+Related, and the subtler half: many tests call `fetch` from `page.evaluate`,
+which only works because `init_csrf` injects a `window.fetch` wrapper into the
+HTML. Under `commit` that wrapper is not installed yet and the request goes out
+un-tokened, refused with a 403 that surfaces far from its cause. Call
+`_await_page_js(page)` after any navigation followed by a bare `fetch`. The
+React shell does not need any of this — it acquires the token explicitly.
 
 ### The suites are PostgreSQL-only
 There is no `APP_DB` and no `DB_FILE`. `tests/test_app.py` defaults
@@ -257,6 +359,73 @@ DATABASE_URL=postgresql+psycopg://postgres:postgres@localhost:55432/hrms \
   complete until the traffic switch is verified.
 - The DuckDB read-only audit lock it also listed is gone: the backend was
   removed at Phase 6, so there is no fallback file left to lock.
+
+## React UI Phase 2 — the pilot reached feature parity (UI-07)
+
+Phase 1's foundation was followed by the Phase 2 pilot. Full plan and status in
+[`docs/REACT_UI_MIGRATION.md`](docs/REACT_UI_MIGRATION.md); this is the working
+detail.
+
+- **Pilot screens:** dashboard reads (shift, breaks, notifications, holidays,
+  login sessions, admin org stats) plus the two write workflows — **break
+  start/end** and **leave balance / apply / cancel**. 17 React browser tests;
+  the full browser suite is **42/42 on two consecutive runs**.
+- **Parity is claimed on refusal paths too.** A screen that only exercises its
+  happy path passes while being unable to explain *why* a Lunch break needs
+  approval or *why* a leave request was refused. Both server refusals (400
+  weekend-only range with its `hint`, 409 overlap) are asserted to reach the
+  employee as `role="alert"`.
+
+### Four defects the pilot found
+
+1. **The notifications panel was silently empty.** `GET /api/notifications`
+   returns `{unread, data}`, not a bare array; it was modelled as an array,
+   `Array.isArray(payload)` was false, and the fallback rendered "You have no
+   notifications" beside a live unread notification. **A wrong response shape
+   does not throw — it renders an empty state, which is indistinguishable from a
+   genuine one.** Found by probing the live endpoint's shapes rather than reading
+   the legacy template, because the legacy template reads it correctly and looks
+   authoritative. When porting a screen, verify each endpoint's shape against the
+   running server; do not infer it from the old JavaScript.
+2. **The leave list claimed "Your requests" while showing the whole company.**
+   `GET /api/leaves` is scoped by policy — an employee gets their own, an Admin
+   gets everyone's. The heading was unconditional, so an Admin saw four
+   colleagues' leave under a heading claiming otherwise. The scope is now
+   **observed from the payload** (a row belonging to someone else ⇒ company-wide)
+   rather than guessed from a role the client would have to re-derive.
+3. **An uncapped break type would have been permanently disabled.** `null` means
+   "no daily cap", and `remaining_minutes` is `null` too; a `=== 0` test reads
+   that as spent. Same class as #1 — a falsy-vs-absent distinction that fails
+   silently.
+4. **The Modules dropdown looked broken to every mouse user.** A click is always
+   preceded by a `mouseenter`, and the menu opened on hover — so clicking the
+   trigger opened the menu on the way to the button and then *toggled it shut on
+   the button itself*. Now `openedBy`-aware: hover opens, first click pins,
+   second closes.
+
+**Defect 4 is worth reading for how it was found.** The dropdown test passed
+alone and failed in a full run, because an earlier test had left the pointer over
+the navbar. That is the test-order interference this file has catalogued several
+times, and in every previous instance the recorded response was to harden the
+sleep. It was not a sleep this time — it was a real bug that only reproduces when
+the pointer reaches the element *before* the click. Chasing the interference
+instead of shrugging at it is what found it.
+
+### Deliberate departure from the legacy panel: no `localStorage`
+
+The Jinja break panel stored `activeBreakId` and needed a **self-heal** — a
+stale or cleared value left *End Break* pointing at a break already over. The
+React panel derives it from the same summary payload that renders it, so the two
+cannot disagree and the self-heal is not needed at all.
+
+### Two rules for migrating the next screen
+
+- **`usePanel(path)` per panel, never one bundled fetch.** A dashboard that waits
+  for all requests shows one slow endpoint as a blank page; a panel that fails
+  shows a failed panel. Polling pauses while the tab is hidden.
+- **Reuse `page.current_emp_id`** (already exposed to every Jinja template) for
+  `X-Current-Emp-Id`. It is a **labelling hint only** — entirely client-supplied
+  and ignored by the server. Nothing may branch on it for access.
 
 ## FR-USR employee-management hardening (in progress)
 - The first safe slice replaces destructive user deletion with status-based

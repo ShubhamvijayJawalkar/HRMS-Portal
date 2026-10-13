@@ -10,3 +10,9 @@ __pycache__
 uploads
 reports
 *.pyc
+# React UI: node_modules is reinstalled from the lockfile in the build stage, and
+# the built assets come from that stage too. Copying either in would defeat the
+# layer caching the two-stage build exists for.
+node_modules
+frontend/node_modules
+static/app

@@ -1,23 +1,186 @@
 <style>
-.app-navbar { background: linear-gradient(135deg, #0f172a, #111827) !important; box-shadow: 0 10px 35px rgba(15, 23, 42, 0.18); }
-.app-navbar .navbar-brand { font-weight: 800; font-size: 20px; color: white !important; letter-spacing: -0.3px; }
-.app-navbar .navbar-brand i { color: #60a5fa; margin-right: 8px; }
-.app-navbar .nav-link { color: #cbd5e1 !important; font-weight: 600; transition: all 0.2s ease; font-size: 13px; padding: 16px 14px !important; border-bottom: 2px solid transparent; }
-.app-navbar .nav-link:hover { color: white !important; }
-.app-navbar .nav-link.active { color: white !important; border-bottom-color: #60a5fa; }
-.app-navbar .nav-link i { margin-right: 6px; }
-.app-navbar .dropdown-menu-dark { background: #111827; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 8px; }
-.app-navbar .dropdown-item { color: #d1d5db; border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 500; }
-.app-navbar .dropdown-item:hover { background: rgba(255,255,255,0.08); }
-.app-navbar .dropdown-item i { margin-right: 8px; width: 18px; text-align: center; color: #60a5fa; }
-.app-navbar .dropdown-divider { border-color: rgba(255,255,255,0.08); }
-.app-navbar .user-pill { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); border-radius: 999px; padding: 6px 12px 6px 6px; }
-.app-navbar .user-initial { width: 32px; height: 32px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; background: #0ea5e9; color: white; font-weight: 700; margin-right: 8px; font-size: 13px; }
-.app-navbar .user-meta { display: flex; flex-direction: column; text-align: left; line-height: 1.2; }
+:root {
+    --ui-ink: #17243b;
+    --ui-muted: #66758b;
+    --ui-line: #e4eaf2;
+    --ui-canvas: #f4f7fb;
+    --ui-brand: #3157c8;
+    --ui-brand-dark: #2446ad;
+    --ui-radius: 16px;
+    --ui-shadow: 0 8px 24px rgba(31, 48, 78, .06);
+}
+body {
+    background: var(--ui-canvas);
+    color: var(--ui-ink);
+    -webkit-font-smoothing: antialiased;
+}
+::selection { background: #dce7ff; color: #173682; }
+a { text-underline-offset: 3px; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible,
+textarea:focus-visible, [tabindex]:focus-visible {
+    outline: 3px solid rgba(49, 87, 200, .35);
+    outline-offset: 2px;
+}
+.app-navbar {
+    min-height: 70px;
+    padding: 0 1.25rem;
+    background: rgba(19, 31, 56, .97) !important;
+    box-shadow: 0 4px 20px rgba(14, 28, 55, .14);
+    border-bottom: 1px solid rgba(255, 255, 255, .08);
+}
+.app-navbar .container-fluid { max-width: 1680px; }
+.app-navbar .navbar-brand {
+    font-weight: 800;
+    font-size: 21px;
+    color: white !important;
+    letter-spacing: -.6px;
+    margin-right: 1.5rem;
+}
+.app-navbar .navbar-brand i { color: #8eb4ff; margin-right: 9px; }
+.app-navbar .nav-link {
+    display: flex;
+    align-items: center;
+    color: #c4cede !important;
+    font-weight: 600;
+    transition: color .18s ease, background .18s ease;
+    font-size: 13px;
+    padding: 11px 13px !important;
+    margin: 0 2px;
+    border-radius: 9px;
+    border-bottom: 0;
+}
+.app-navbar .nav-link:hover, .app-navbar .nav-link:focus-visible {
+    color: #fff !important;
+    background: rgba(255, 255, 255, .09);
+}
+.app-navbar .nav-link.active {
+    color: #fff !important;
+    background: rgba(113, 157, 255, .18);
+}
+.app-navbar .nav-link i { margin-right: 7px; color: #a9c4ff; }
+.app-navbar .dropdown-menu-dark {
+    min-width: 220px;
+    margin-top: 8px;
+    background: #17243b;
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 13px;
+    padding: 7px;
+    box-shadow: 0 16px 36px rgba(8, 18, 38, .25);
+}
+.app-navbar .dropdown-item {
+    color: #d5ddec;
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 13px;
+    font-weight: 500;
+}
+.app-navbar .dropdown-item:hover, .app-navbar .dropdown-item:focus {
+    background: rgba(255,255,255,.09);
+    color: white;
+}
+.app-navbar .dropdown-item.active { background: rgba(113,157,255,.2); color: white; }
+.app-navbar .dropdown-item i { margin-right: 9px; width: 18px; text-align: center; color: #9ebcff; }
+.app-navbar .dropdown-divider { border-color: rgba(255,255,255,.1); }
+.app-navbar .user-pill {
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.12);
+    border-radius: 12px;
+    padding: 5px 11px 5px 6px;
+}
+.app-navbar .user-initial {
+    width: 35px; height: 35px; border-radius: 11px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: linear-gradient(145deg, #79a9ff, #4875e5);
+    color: white; font-weight: 800; margin-right: 9px; font-size: 13px;
+}
+.app-navbar .user-meta { display: flex; flex-direction: column; text-align: left; line-height: 1.35; }
 .app-navbar .user-name { font-size: 12px; color: white; font-weight: 700; }
-.app-navbar .user-role { font-size: 10px; color: #94a3b8; }
-.app-navbar .dept-badge { font-size: 9px; background: rgba(96,165,250,0.15); color: #93c5fd; padding: 1px 6px; border-radius: 4px; font-weight: 600; }
-@media (max-width: 991px) { .app-navbar .navbar-collapse { background: #0f172a; padding: 1rem; border-radius: 0 0 16px 16px; } }
+.app-navbar .user-role { font-size: 10px; color: #b2bfd3; }
+.app-navbar .dept-badge { font-size: 9px; background: rgba(142,180,255,.16); color: #c4d6ff; padding: 2px 6px; border-radius: 5px; font-weight: 600; }
+.app-navbar .btn-outline-light {
+    border-color: rgba(255,255,255,.22);
+    border-radius: 9px;
+    color: #e7edfa;
+    font-weight: 600;
+    padding: 7px 12px;
+}
+.app-navbar .btn-outline-light:hover { background: rgba(255,255,255,.12); color: white; }
+.container-fluid { max-width: 1680px; }
+.card:not(.module-card) {
+    border: 1px solid var(--ui-line) !important;
+    border-radius: var(--ui-radius) !important;
+    box-shadow: var(--ui-shadow) !important;
+    overflow: hidden;
+}
+.card-header-custom {
+    background: linear-gradient(110deg, #1a2b4b, #253a61) !important;
+    padding: 14px 18px !important;
+    font-size: 13px !important;
+    letter-spacing: .1px;
+}
+.page-title, h1.page-title {
+    color: var(--ui-ink);
+    letter-spacing: -.55px;
+}
+.form-control, .form-select {
+    min-height: 40px;
+    border-color: #d9e1ec;
+    border-radius: 9px;
+    color: var(--ui-ink);
+    box-shadow: none;
+}
+.form-control:focus, .form-select:focus {
+    border-color: #7292eb;
+    box-shadow: 0 0 0 3px rgba(49,87,200,.11);
+}
+textarea.form-control { min-height: 90px; }
+.btn {
+    border-radius: 9px;
+    font-weight: 600;
+    transition: transform .16s ease, box-shadow .16s ease, background-color .16s ease;
+}
+.btn:hover { transform: translateY(-1px); }
+.btn:active { transform: translateY(0); }
+.btn-primary {
+    background: var(--ui-brand);
+    border-color: var(--ui-brand);
+    box-shadow: 0 3px 8px rgba(49,87,200,.16);
+}
+.btn-primary:hover, .btn-primary:focus { background: var(--ui-brand-dark); border-color: var(--ui-brand-dark); }
+.table { --bs-table-border-color: var(--ui-line); }
+.table th {
+    background: #f5f7fb;
+    color: #52627b;
+    font-size: 10px;
+    letter-spacing: .55px;
+}
+.modal-content {
+    border: 1px solid var(--ui-line);
+    border-radius: 16px;
+    box-shadow: 0 22px 70px rgba(19,31,56,.2);
+    overflow: hidden;
+}
+.modal-header { border-bottom-color: var(--ui-line); }
+.modal-footer { border-top-color: var(--ui-line); }
+@media (max-width: 991px) {
+    .app-navbar { min-height: 62px; padding: 0 .75rem; }
+    .app-navbar .navbar-collapse {
+        background: #17243b;
+        margin: 0 -.75rem;
+        padding: 12px 16px 16px;
+        border-radius: 0 0 16px 16px;
+        box-shadow: 0 14px 24px rgba(8,18,38,.18);
+    }
+    .app-navbar .nav-link { margin: 2px 0; }
+    .app-navbar .user-pill { margin-top: 10px; }
+}
+@media (max-width: 575px) {
+    .container-fluid { padding-left: 14px !important; padding-right: 14px !important; }
+    .app-navbar .navbar-brand { font-size: 19px; }
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
 </style>
 <nav class="navbar navbar-expand-lg navbar-dark sticky-top app-navbar">
     <div class="container-fluid">

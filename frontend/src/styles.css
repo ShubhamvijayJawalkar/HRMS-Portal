@@ -1,0 +1,850 @@
+/*
+ * Self-contained shell styles. No CDN, no webfont, no Bootstrap.
+ *
+ * The legacy templates all load Bootstrap, bootstrap-icons and Google Fonts
+ * from external origins. The migration plan makes "no CDN required for core
+ * application behavior" a Phase 1 exit criterion, and a React screen that
+ * still fetched a stylesheet from a third party would not meet it -- so the
+ * tokens below are the ones already defined on :root in templates/_navbar.html,
+ * carried over so the two interfaces look the same during the overlap window.
+ *
+ * Icons are not imported. The navbar's `bi-*` icon names are decorative, so
+ * omitting the glyph keeps the meaning in the label text and removes a render
+ * path that depends on a network the app does not control.
+ */
+
+:root {
+  --ui-ink: #17243b;
+  --ui-muted: #66758b;
+  --ui-line: #e4eaf2;
+  --ui-canvas: #f4f7fb;
+  --ui-brand: #3157c8;
+  --ui-brand-dark: #2446ad;
+  --ui-radius: 16px;
+  --ui-shadow: 0 8px 24px rgba(31, 48, 78, 0.06);
+  --ui-danger: #b3261e;
+  --ui-danger-bg: #fdecea;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ui-canvas);
+  color: var(--ui-ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--ui-brand);
+  text-underline-offset: 3px;
+}
+
+/*
+ * A visible focus ring on every interactive element. The legacy navbar had one
+ * too; keeping it means keyboard users do not lose the affordance when the
+ * React shell replaces the Jinja page.
+ */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid rgba(49, 87, 200, 0.35);
+  outline-offset: 2px;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-block;
+  padding: 8px 14px;
+  border: 1px solid var(--ui-brand);
+  border-radius: 9px;
+  background: var(--ui-brand);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.btn:hover {
+  background: var(--ui-brand-dark);
+  border-color: var(--ui-brand-dark);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: #e7edfa;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.btn--ghost:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.btn--small {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.btn[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ── Navbar ──────────────────────────────────────────────────────────── */
+
+.navbar {
+  background: rgba(19, 31, 56, 0.97);
+  box-shadow: 0 4px 20px rgba(14, 28, 55, 0.14);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.navbar__inner {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 0 1.25rem;
+  min-height: 70px;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.navbar__brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 800;
+  font-size: 21px;
+  letter-spacing: -0.6px;
+  color: #fff;
+  text-decoration: none;
+}
+
+.navbar__logo {
+  width: 10px;
+  height: 18px;
+  border-radius: 3px;
+  background: #8eb4ff;
+}
+
+.navbar__toggle {
+  display: none;
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 9px;
+  color: #fff;
+  padding: 6px 10px;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.navbar__links {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex-wrap: wrap;
+}
+
+.navbar__link {
+  display: inline-block;
+  padding: 11px 13px;
+  color: #c4cede;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  border-radius: 9px;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.navbar__link:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.09);
+}
+
+.navbar__link.is-active {
+  color: #fff;
+  background: rgba(113, 157, 255, 0.18);
+}
+
+.navbar__group {
+  position: relative;
+}
+
+.navbar__dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 220px;
+  margin: 8px 0 0;
+  padding: 7px;
+  list-style: none;
+  background: #17243b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 13px;
+  box-shadow: 0 16px 36px rgba(8, 18, 38, 0.25);
+  z-index: 20;
+}
+
+/*
+ * Hover and focus-within, not hover alone. A dropdown that only opens on hover
+ * is unreachable by keyboard, which is why the legacy navbar used Bootstrap's
+ * JS: it toggles on click. focus-within covers keyboard, hover covers mouse.
+ */
+/*
+ * Open state comes from the component alone (`is-open`), which is set by hover,
+ * click, and the keyboard handlers.
+ *
+ * `:hover` and `:focus-within` are deliberately NOT used to reveal the menu.
+ * `:focus-within` in particular cannot be closed: Escape sets the state to
+ * closed and moves focus *back to the trigger*, which re-triggers
+ * `:focus-within` and leaves the menu on screen while `aria-expanded` says
+ * "false" — a screen reader is told the menu is collapsed while it is visible,
+ * which is precisely the mismatch the disclosure pattern exists to prevent.
+ *
+ * Hover still opens it, because `onMouseEnter` sets the same state.
+ */
+.navbar__dropdown.is-open {
+  display: block;
+}
+
+.dropdown-item {
+  display: block;
+  padding: 9px 11px;
+  color: #d5ddec;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+
+.dropdown-item.is-active {
+  background: rgba(113, 157, 255, 0.2);
+  color: #fff;
+}
+
+/* ── Shell ───────────────────────────────────────────────────────────── */
+
+.shell__header {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 1rem 1.25rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.shell__identity {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.shell__avatar {
+  width: 35px;
+  height: 35px;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, #79a9ff, #4875e5);
+  color: #fff;
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.shell__meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.shell__name {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.shell__role {
+  font-size: 11px;
+  color: var(--ui-muted);
+}
+
+.shell__dept {
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(49, 87, 200, 0.12);
+  color: var(--ui-brand-dark);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.shell__main {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 1.25rem;
+}
+
+/* ── Page + panels ───────────────────────────────────────────────────── */
+
+.page__title {
+  margin: 0 0 4px;
+  font-size: 24px;
+  letter-spacing: -0.4px;
+}
+
+.page__subtitle {
+  margin: 0 0 1.25rem;
+  color: var(--ui-muted);
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  box-shadow: var(--ui-shadow);
+  overflow: hidden;
+}
+
+.panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 14px 18px;
+  background: linear-gradient(110deg, #1a2b4b, #253a61);
+}
+
+.panel__title {
+  margin: 0;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.panel__body {
+  padding: 16px 18px;
+  min-height: 80px;
+}
+
+.metric {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+
+.metric__note {
+  margin: 4px 0 0;
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.kv__row {
+  display: contents;
+}
+
+.kv dt {
+  color: var(--ui-muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.list__item {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--ui-line);
+  font-size: 13px;
+}
+
+.list__item:last-child {
+  border-bottom: 0;
+}
+
+.list__meta {
+  display: block;
+  color: var(--ui-muted);
+  font-size: 12px;
+}
+
+/* ── States ──────────────────────────────────────────────────────────── */
+
+.state {
+  padding: 14px 0;
+  font-size: 13px;
+}
+
+.state--loading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ui-muted);
+}
+
+.spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid var(--ui-line);
+  border-top-color: var(--ui-brand);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect a stated preference to reduce motion -- a spinner that never stops is
+   a real accessibility problem, not a cosmetic one. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 3s;
+  }
+}
+
+.state__title {
+  margin: 0;
+  font-weight: 700;
+}
+
+.state__hint {
+  margin: 4px 0 10px;
+  color: var(--ui-muted);
+}
+
+.state__list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.state--error,
+.state--validation {
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: var(--ui-danger-bg);
+  color: var(--ui-danger);
+}
+
+.state--error .state__hint,
+.state--validation .state__hint {
+  color: inherit;
+  opacity: 0.85;
+}
+
+.state--denied {
+  padding: 12px 14px;
+  border-radius: 11px;
+  background: #fff8e6;
+  color: #7a5300;
+}
+
+.state--denied .state__hint {
+  color: inherit;
+  opacity: 0.85;
+}
+
+.state--empty .btn {
+  margin-top: 4px;
+}
+
+.boot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 2rem;
+}
+
+/* ── Narrow screens ──────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .navbar__toggle {
+    display: block;
+  }
+
+  .navbar__links {
+    display: none;
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    padding-bottom: 0.75rem;
+  }
+
+  /*
+   * A CSS-only disclosure would need :has() or a checkbox hack; both are worse
+   * than saying plainly that the mobile menu is Phase 2 work, rather than
+   * shipping a toggle button that does nothing. It is hidden at this width so
+   * it is not a visible dead control.
+   */
+  .navbar__toggle {
+    display: none;
+  }
+
+  .shell__main {
+    padding: 1rem;
+  }
+}
+/* ── Screen-reader-only ─────────────────────────────────────────────── */
+
+/*
+ * Used for table captions, per-button descriptions and anything else that
+ * should reach a screen reader but not take up space. The `clip` path rather
+ * than `display: none`, because a hidden element is also removed from the
+ * accessibility tree — which defeats the entire point.
+ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Stat tiles ─────────────────────────────────────────────────────── */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.stat {
+  background: #fff;
+  border: 1px solid var(--ui-line);
+  border-radius: var(--ui-radius);
+  box-shadow: var(--ui-shadow);
+  padding: 16px;
+}
+
+.panel--wide {
+  margin-top: 1rem;
+}
+
+.panel__subhead {
+  margin: 18px 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--ui-muted);
+}
+
+.panel__subhead:first-child {
+  margin-top: 0;
+}
+
+/* ── Notices ────────────────────────────────────────────────────────── */
+
+.notice {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  border-radius: 11px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.notice--ok {
+  background: #e9f7ef;
+  color: #166534;
+}
+
+.notice--bad {
+  background: var(--ui-danger-bg);
+  color: var(--ui-danger);
+}
+
+.badge-inline {
+  display: inline-block;
+  margin: 0 0 8px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(49, 87, 200, 0.12);
+  color: var(--ui-brand-dark);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+/* ── Breaks ─────────────────────────────────────────────────────────── */
+
+.break-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1.25rem;
+}
+
+.break-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.break-btn {
+  background: #fff;
+  color: var(--ui-ink);
+  border-color: var(--ui-line);
+}
+
+.break-btn:hover:not([disabled]) {
+  background: var(--ui-brand);
+  border-color: var(--ui-brand);
+  color: #fff;
+}
+
+/*
+ * An exhausted break type is `disabled`, which removes it from the tab order and
+ * — in most browsers — from the accessibility tree entirely. An employee using a
+ * screen reader would then not be able to discover *why* Tea is unavailable, so
+ * the per-type description list carries it in text (see BreakPanel).
+ */
+.btn[disabled] {
+  opacity: 0.55;
+}
+
+.break-active {
+  padding: 12px;
+  border-radius: 11px;
+  background: #fff8e6;
+  border: 1px solid #f3e2b3;
+}
+
+.break-active__name {
+  margin: 0;
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.break-active__meta {
+  margin: 2px 0 0;
+  color: var(--ui-muted);
+  font-size: 11px;
+}
+
+.break-active__elapsed {
+  margin: 8px 0 12px;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+}
+
+.btn--danger {
+  background: var(--ui-danger);
+  border-color: var(--ui-danger);
+}
+
+.btn--danger:hover {
+  background: #8f1e17;
+  border-color: #8f1e17;
+}
+
+.status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.status--active {
+  background: #fff8e6;
+  color: #92400e;
+}
+
+.status--completed,
+.status--approved {
+  background: #e9f7ef;
+  color: #166534;
+}
+
+.status--pending {
+  background: #fff4e0;
+  color: #92400e;
+}
+
+.status--rejected,
+.status--cancelled {
+  background: var(--ui-danger-bg);
+  color: var(--ui-danger);
+}
+
+/* ── Forms ──────────────────────────────────────────────────────────── */
+
+.form {
+  margin-bottom: 8px;
+}
+
+.form__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.field label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ui-muted);
+}
+
+.field input,
+.field select,
+.field textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--ui-line);
+  border-radius: 9px;
+  font: inherit;
+  font-size: 13px;
+  background: #fff;
+  color: var(--ui-ink);
+}
+
+.field input[aria-invalid='true'],
+.field select[aria-invalid='true'] {
+  border-color: var(--ui-danger);
+}
+
+.field__error {
+  margin: 0;
+  color: var(--ui-danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* ── Tables ─────────────────────────────────────────────────────────── */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--ui-line);
+}
+
+.table thead th {
+  background: #f8fafc;
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.table tbody th {
+  font-weight: 600;
+}
+
+.list__item--unread {
+  border-left: 3px solid var(--ui-brand);
+  padding-left: 9px;
+  font-weight: 700;
+}
+
+.leave-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.list__meta--owner {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(49, 87, 200, 0.12);
+  color: var(--ui-brand-dark);
+  font-weight: 700;
+}
+
+/* ── Page header / panel actions ───────────────────────────────────── */
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.page-header__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.panel__actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* Keeps a form visually attached to the list it creates rows for. */
+.form--inline {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--ui-line);
+}

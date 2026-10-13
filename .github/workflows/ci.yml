@@ -61,6 +61,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -68,6 +75,30 @@ jobs:
 
       - name: Lint with ruff
         run: ruff check . --ignore E501
+
+      # Type checking and the production bundle. Run before the Python suites
+      # because a TypeScript error or a broken build should fail in seconds,
+      # not after the browser suite has spent three minutes on a version of the
+      # app that could never have shipped.
+      #
+      # `npm ci` rather than `npm install` so the lockfile is authoritative --
+      # an unlocked dependency graph means the build can pass locally and fail in
+      # CI on a transitive bump.
+      - name: Build the React UI
+        run: |
+          npm ci --prefix frontend --no-audit --no-fund
+          # npm >= 11 blocks postinstall scripts unless approved. esbuild's
+          # postinstall places the platform binary Vite needs; without it the
+          # build fails with a message about installing a platform binary,
+          # which does not point at the real cause.
+          npm install-scripts approve esbuild --prefix frontend || true
+          npm run build --prefix frontend
+
+      # The bundle must exist before the Python suites run: several React tests
+      # assert on real served assets rather than skipping quietly, and the
+      # Docker build below copies this same output.
+      - name: Verify the React bundle
+        run: test -f static/app/index.html && ls static/app/assets
 
       - name: Validate cutover tooling
         run: |
@@ -91,6 +122,13 @@ jobs:
       # v1.0 shape the app code still speaks.
       - name: Create the v2.0 public schema
         run: python -m alembic -c migrations/alembic.ini upgrade head
+
+      # Phase 0 of docs/REACT_UI_MIGRATION.md: the inventory is generated from
+      # app.py, the templates and policy.py, and a generated document that has
+      # gone stale is worse than none -- it is what the migration order is
+      # planned from. The suite asserts the generator reports no drift.
+      - name: Check the UI inventory is in step with the code
+        run: python scripts/ui_inventory.py --markdown docs/UI_INVENTORY.md
 
       - name: Run unit tests on the compatibility schema
         run: python -m pytest tests/test_app.py -v
@@ -145,5 +183,36 @@ jobs:
             MFA_ENCRYPTION_KEY="3CkZThJOKnNbJkL2ksuJN8gsQ7cJi5FAFPt3g50KmsE=" \
             python scripts/probe_public_flip.py
 
+      # The image build is the real test of the multi-stage Dockerfile: the SPA is
+      # built in a Node stage and copied into the Python image, and a
+      # .dockerignore mistake would drop it while every earlier step still
+      # passed — they all build on the host, not inside the image.
+      #
+      # This inspects the image's contents rather than booting it. Booting
+      # would need a reachable PostgreSQL, which turns a "did the bundle get
+      # copied in" check into a database-fixture dependency and fails for a
+      # reason unrelated to the thing being verified.
       - name: Build Docker image
         run: docker build -t hrms .
+
+      - name: Verify the image contains the built React shell
+        run: |
+          docker run --rm --entrypoint sh hrms -c '
+            set -e
+            test -f /app/static/app/index.html || {
+              echo "index.html missing from the image"; exit 1; }
+            # The shell must reference a fingerprinted asset, and that asset
+            # must actually be in the image. An index.html whose script tag
+            # points at a file the image does not contain is the failure mode
+            # a missing COPY produces, and it renders as a blank page.
+            asset=$(sed -n "s/.*src=\"\(\/app\/assets\/[^\"]*\.js\)\".*/\1/p" \
+              /app/static/app/index.html | head -1)
+            [ -n "$asset" ] || { echo "shell references no built asset"; exit 1; }
+            file="/app/static${asset}"
+            test -f "$file" || { echo "referenced asset $file is not in the image"; exit 1; }
+            echo "shell asset present: $file"
+            # node_modules must not have leaked into the runtime image.
+            test ! -d /app/frontend/node_modules || {
+              echo "node_modules leaked into the runtime image"; exit 1; }
+            echo "image contents OK"
+          '

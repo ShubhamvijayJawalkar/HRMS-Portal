@@ -45,7 +45,24 @@ Then open <http://localhost:5000>. The local demo login is `EMP001` /
 The incremental React migration strategy and separate UI task list are tracked
 in [`docs/REACT_UI_MIGRATION.md`](docs/REACT_UI_MIGRATION.md). The plan keeps
 Flask as the backend and preserves existing API, session, and authorization
-behavior while screens are migrated in phases.
+behavior while screens are migrated in phases. The generated page/API/permission
+map is [`docs/UI_INVENTORY.md`](docs/UI_INVENTORY.md); regenerate it with
+`python scripts/ui_inventory.py --markdown docs/UI_INVENTORY.md`.
+
+### Running the React UI
+
+The SPA lives in `frontend/` and is served by Flask at `/app/`. Build it before
+starting the app:
+
+```bash
+npm --prefix frontend ci
+npm --prefix frontend run build   # writes static/app/
+```
+
+`npm run dev` starts a Vite dev server on port 5173 that proxies `/api` and
+`/app` to Flask on 5000, so the app under development talks to the real session
+and the real CSRF guard rather than a mock. During the migration the legacy
+Jinja pages remain live at their original URLs.
 
 ## Cutover preflight
 

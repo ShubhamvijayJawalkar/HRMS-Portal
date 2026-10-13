@@ -2,6 +2,7 @@ import io
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import textwrap
@@ -111,6 +112,7 @@ import pytest  # noqa: E402
 import document_security  # noqa: E402
 import lockout  # noqa: E402
 import mfa  # noqa: E402
+import policy  # noqa: E402
 from app import (  # noqa: E402
     SECURITY_CSP,
     _decrypt_lifecycle_secret,
@@ -122,6 +124,7 @@ from app import (  # noqa: E402
     gen_id,
     get_db,
     hash_password,
+    navigation_for,
 )
 
 
@@ -13429,6 +13432,258 @@ def test_mfa_is_disabled_for_every_role():
     assert mfa.MFA_ENABLED is False
     assert all(not mfa.requires_enrolment(role) for role in mfa.MANDATORY_ROLES)
     assert not mfa.requires_enrolment('Employee')
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  React UI — Phase 1 of docs/REACT_UI_MIGRATION.md
+#
+#  Three things are tested here, and the third is the one that matters most.
+#
+#  1. /app/ serves the built SPA: entry point, hashed assets with safe caching,
+#     and the history-API fallback that lets a client-side route boot. A missing
+#     build answers 503 rather than something that looks like a working page.
+#
+#  2. /api/navigation is the shell's bootstrap payload.
+#
+#  3. **The navbar the SPA renders is the same navbar the Jinja page renders.**
+#     That is the invariant worth locking down. The policy matrix, the route
+#     gates and _ROUTE_MODULES all feed navigation_for(); a second
+#     implementation of "which links may this actor see" would drift from all
+#     three the first time any of them changed — which is how FR-USR-15's
+#     "nav == API" guarantee regressed once already.
+#
+#  Nothing here asserts that the SPA *renders*; that needs a browser and lives
+#  in tests/test_playwright.py. These are the contracts whose absence otherwise
+#  shows up only as a blank screen.
+# ══════════════════════════════════════════════════════════════════════════
+
+REACT_DIR = pathlib.Path(__file__).resolve().parent.parent / 'static' / 'app'
+SPA_BUILT = (REACT_DIR / 'index.html').exists()
+
+requires_build = pytest.mark.skipif(
+    not SPA_BUILT,
+    reason='React bundle not built; run `npm --prefix frontend run build`',
+)
+
+
+@requires_build
+def test_app_serves_the_built_entry_point(client):
+    """`/app/` returns the shell, uncached so a deploy is picked up."""
+    resp = client.get('/app/')
+    assert resp.status_code == 200, resp.status_code
+    assert resp.mimetype == 'text/html'
+    # index.html names hashed asset URLs; caching it would ship an HTML file
+    # pointing at hashes that do not exist on the next deploy.
+    assert 'no-cache' in resp.headers.get('Cache-Control', ''), resp.headers.get('Cache-Control')
+    body = resp.get_data(as_text=True)
+    assert 'id="root"' in body
+    assert '/app/assets/' in body, 'the shell must reference a built asset'
+
+
+@requires_build
+def test_hashed_assets_are_cached_safely(client):
+    """Fingerprint-named assets get an immutable cache and `nosniff`.
+
+    The plan makes safe asset caching a Phase 1 exit criterion. `nosniff`
+    matters because the SPA fallback answers unknown paths under /app/ with
+    HTML: without it a mistyped asset URL is sniffed as a script and reported as
+    a syntax error instead of a 404 an operator can find in the logs.
+    """
+    body = client.get('/app/').get_data(as_text=True)
+    marker = '/app/assets/'
+    # Reconstruct the full URL: slicing past the marker yields the bare filename,
+    # and requesting that is a 404 that looks like a serving bug rather than a
+    # bug in the extraction.
+    asset = marker + body[body.index(marker) + len(marker):].split('"')[0]
+
+    resp = client.get(asset)
+    assert resp.status_code == 200, f'{asset} -> {resp.status_code}'
+    assert 'immutable' in resp.headers.get('Cache-Control', '')
+    assert resp.headers.get('X-Content-Type-Options') == 'nosniff'
+    # A content hash in the name is what makes an immutable cache safe.
+    #
+    # Asserted structurally, not by looking for a digit: Vite's hashes are
+    # base64url, so `DBMRxTTw` contains no digits at all and a "must have a
+    # digit" check fails on a correctly fingerprinted build roughly 40% of the
+    # time. What actually matters is that there *is* a hash-shaped segment
+    # between the base name and the extension, so the URL changes when the
+    # contents do.
+    stem = asset.rsplit('/', 1)[-1]
+    assert re.match(r'^.+-[A-Za-z0-9_-]{6,}\.[a-z0-9]+$', stem), (
+        f'asset name has no hash segment, so caching it immutably is unsafe: {stem}'
+    )
+
+
+@requires_build
+@pytest.mark.parametrize('client_route', ['/app/leaves', '/app/admin/users', '/app/nope'])
+def test_client_side_routes_fall_back_to_the_entry_point(client, client_route):
+    """History-API routes have no file; they must still boot the app.
+
+    Without this a browser refresh on /app/leaves — or a shared link, or the
+    back button — is a 404, which is the classic SPA-serving mistake.
+    """
+    resp = client.get(client_route)
+    assert resp.status_code == 200
+    assert 'id="root"' in resp.get_data(as_text=True)
+
+
+def test_unbuilt_react_app_says_so_loudly(client):
+    """Without a build, /app/ is a 503 that names the fix.
+
+    Not a redirect to a Jinja page and not a directory listing: both would pass
+    a smoke test that only checks for a 200 and then fail in a browser.
+    Skipped when a build is present, since this asserts the *absence* of one.
+    """
+    if SPA_BUILT:
+        pytest.skip('a build is present; this asserts the unbuilt behaviour')
+
+    resp = client.get('/app/')
+    assert resp.status_code == 503
+    body = json.loads(resp.get_data(as_text=True))
+    assert 'npm' in body['detail'], body
+
+
+def test_app_prefix_shadows_nothing(client):
+    """`/app/` must not capture an API or legacy page route.
+
+    The whole migration strategy depends on the legacy pages continuing to serve
+    exactly where they always did, so a regression that made /app/ a catch-all
+    would quietly take out /api/... and /login with it.
+    """
+    assert client.get('/api/csrf-token').status_code == 200
+    assert client.get('/login').status_code == 200
+    # A signed-out page route still redirects to login, i.e. is still its own route.
+    assert client.get('/dashboard').status_code == 302
+
+
+def test_csrf_delivery_does_not_break_file_served_html(client):
+    """Regression: `send_from_directory` returns a direct-passthrough response.
+
+    `security._csrf_deliver` used to call `get_data()` on any HTML response,
+    which raises RuntimeError in passthrough mode — so serving an HTML *file*
+    from disk crashed the whole request. Every page in this app renders through
+    `render_template` and is buffered, so nothing hit it until the React shell
+    began serving index.html off disk.
+
+    Fixed by skipping passthrough responses, which is also the correct
+    behaviour: there is nothing to inject a token into, and the SPA acquires its
+    token explicitly from /api/csrf-token rather than depending on the injection.
+    """
+    resp = client.get('/app/')
+    # 503 when not built, 200 when built. Either is fine; a 500 is the defect.
+    assert resp.status_code in (200, 503), (
+        f'unexpected {resp.status_code}: {resp.get_data(as_text=True)[:200]}'
+    )
+    assert 'RuntimeError' not in resp.get_data(as_text=True)
+
+
+def test_navigation_requires_a_session(client):
+    resp = client.get('/api/navigation')
+    assert resp.status_code == 401
+    assert resp.get_json()['error']
+
+
+@requires_build
+def test_navigation_is_served_after_sign_in(auth_client):
+    payload = auth_client.get('/api/navigation').get_json()
+    assert set(payload) == {'actor', 'navigation', 'sees_admin_surface'}
+
+    actor = payload['actor']
+    # Read from the database, not the session copy: the session caches role at
+    # login time, so a stale session copy is what a role change leaves behind.
+    assert actor['emp_id'] == 'EMP001'
+    assert actor['name']
+    assert actor['role'] == 'Admin'
+
+
+def test_navigation_matches_the_jinja_navbar_exactly(auth_client):
+    """The invariant: one implementation of "which links may this actor see".
+
+    The SPA and the Jinja pages coexist for the whole migration, so if they
+    disagreed about visibility an employee would see a link in one and not the
+    other. The endpoint is asserted equal to what the context processor feeds
+    templates/_navbar.html.
+    """
+    conn = get_db()
+    try:
+        actor = policy.current_actor(conn)
+        rendered = navigation_for(actor, conn=conn)
+    finally:
+        conn.close()
+
+    served = auth_client.get('/api/navigation').get_json()['navigation']
+    assert served == rendered, (
+        'the React navbar and the Jinja navbar disagree',
+        json.dumps(served, indent=2),
+        json.dumps(rendered, indent=2),
+    )
+
+
+def test_navigation_hides_modules_the_actor_may_not_use(client):
+    """A signed-in employee must not receive admin links.
+
+    Hiding a link is a usability affordance, never authorization — but shipping
+    admin links to every employee would be a real information leak, and would
+    make the navbar a lie.
+    """
+    login_as(client, 'EMP002', 'pass123')
+    payload = client.get('/api/navigation').get_json()
+    hrefs = {e['href'] for e in payload['navigation']}
+    for child in (e for e in payload['navigation'] if e.get('group')):
+        hrefs.update(c['href'] for c in child['children'] if not c.get('divider'))
+
+    assert '/admin/users' not in hrefs, 'EMP002 was handed the admin directory link'
+    # Self-service links are `always` and belong to everyone.
+    assert '/dashboard' in hrefs
+    assert '/profile' in hrefs
+
+
+def test_navigation_divider_entries_are_passed_through_intact(auth_client):
+    """`{'divider': True}` children carry no href or label.
+
+    navigation_for() forwards them untouched and the Jinja template branches on
+    them to draw an <hr>. The React navbar does the same; an endpoint that
+    stripped them — or filled in blanks — would render a dead item instead.
+    """
+    modules = [
+        e for e in auth_client.get('/api/navigation').get_json()['navigation']
+        if e.get('group')
+    ]
+    assert modules, 'admin should see the Modules group'
+    dividers = [c for c in modules[0]['children'] if c.get('divider')]
+    assert dividers, 'the divider between the admin and workplace modules was lost'
+    for divider in dividers:
+        assert 'href' not in divider or divider.get('href') is None
+
+
+def test_ui_inventory_generator_reports_no_drift():
+    """Phase 0's inventory is generated, and a generated document must agree.
+
+    Hand-written, the inventory would be stale the moment a route or an API call
+    changed — and it is the thing the migration order is planned from.
+    """
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / 'scripts'))
+    import ui_inventory
+
+    data = ui_inventory.build()
+    problems = ui_inventory.check_drift(data)
+    assert problems == [], 'docs/UI_INVENTORY.md is out of date:\n' + '\n'.join(problems)
+    assert len(data['routes']) >= 30, 'the page inventory lost routes'
+
+    # Every page route is either phased or explicitly declared un-migrated. A
+    # third category -- a route nobody decided about -- is how a page ends up
+    # still being served by Jinja after the templates are deleted.
+    unmapped = [
+        r['rule'] for r in data['routes']
+        if r['rule'] not in ui_inventory.PHASE_OF_ROUTE
+        and r['rule'] not in ui_inventory.NOT_MIGRATED
+    ]
+    assert not unmapped, f'no migration phase or NOT_MIGRATED reason for: {unmapped}'
+
+    # A NOT_MIGRATED entry with no route, or a route nobody listed, is drift too.
+    real_rules = {r['rule'] for r in data['routes']}
+    stale = sorted(set(ui_inventory.NOT_MIGRATED) - real_rules)
+    assert not stale, f'NOT_MIGRATED names routes that no longer exist: {stale}'
 
 
 if __name__ == '__main__':

@@ -25,6 +25,7 @@ from flask import (
     render_template,
     request,
     send_file,
+    send_from_directory,
     session,
     url_for,
 )
@@ -3188,6 +3189,51 @@ def navigation_for(actor, conn=None) -> list[dict]:
     finally:
         if own_conn:
             conn.close()
+
+
+@app.route('/api/navigation', methods=['GET'])
+@login_required
+def get_navigation():
+    """Bootstrap payload for the React shell: who the caller is, and their nav.
+
+    The React UI needs the policy-filtered navigation, but the Jinja navbar gets
+    it from a *context processor* -- server-side rendering only. This endpoint is
+    the SPA's equivalent, and it deliberately returns the output of
+    :func:`navigation_for` rather than a second, parallel implementation.
+
+    That is the whole point. A second implementation of "which links may this
+    actor see" is a second thing to keep in step with `policy.NAV_ENTRIES`, the
+    route gates and `_ROUTE_MODULES`, and the two would disagree the first time
+    any of the three changed -- which is precisely how FR-USR-15's "nav == API"
+    invariant regressed before.
+
+    The actor is read from the **database** for the same reason the context
+    processor does it: the session caches `role` at login time, so a role change
+    would otherwise leave the SPA showing links the server has already stopped
+    honouring.
+
+    Hiding a link is a usability affordance, never authorization: every route
+    behind it re-checks the gate and the module server-side.
+    """
+    conn = get_db()
+    try:
+        actor = policy.current_actor(conn)
+        emp_id = actor.get('emp_id')
+        row = conn.execute(
+            "SELECT name, role, department FROM users WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        return jsonify({
+            'actor': {
+                'emp_id': emp_id,
+                'name': row[0] if row else '',
+                'role': actor.get('role'),
+                'department': actor.get('department'),
+            },
+            'navigation': navigation_for(actor, conn=conn),
+            'sees_admin_surface': policy.sees_admin_surface(actor, conn=conn),
+        }), 200
+    finally:
+        conn.close()
 
 
 @app.context_processor
@@ -13684,6 +13730,90 @@ if not STARTED:
             scheduler.start()
             STARTED = True
             logger.info("Scheduler started")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  REACT UI  (docs/REACT_UI_MIGRATION.md, Phase 1)
+#
+#  The SPA is mounted under /app/ so every legacy page route stays exactly
+#  where it is. That is what makes an incremental migration possible: a screen
+#  can be migrated, verified and only then have its Jinja counterpart retired,
+#  with a working interface available throughout.
+#
+#  Nothing here shadows /api/* or an existing page route -- /app was unused, and
+#  the asset route only answers paths below /app/assets/.
+# ══════════════════════════════════════════════════════════════════════
+
+#: Where `npm run build` writes (see frontend/vite.config.ts outDir).
+REACT_BUILD_DIR = 'app'
+REACT_ASSET_SUBDIR = 'assets'
+
+#: Fingerprinted by Vite at build time, so the contents cannot change under a
+#: given name. index.html is the exception and must never be cached, or a deploy
+#: ships an HTML file pointing at hashed assets that do not exist yet.
+_IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+_NO_STORE_CACHE = 'no-cache, must-revalidate'
+
+
+def _react_index_response():
+    """Serve the built SPA entry point, or an explanation if it is not built.
+
+    The 503 is deliberate. Falling back to a Jinja page or a bare directory
+    listing would look like a working app in a smoke test and fail in the
+    browser, so the failure is made loud at the route that caused it -- a
+    deployment that skipped `npm run build` says so instead of 404ing on an
+    asset 20 lines later.
+    """
+    index = os.path.join(app.static_folder, REACT_BUILD_DIR, 'index.html')
+    if not os.path.exists(index):
+        return Response(
+            json.dumps({
+                'error': 'React UI is not built',
+                'detail': (
+                    'Run `npm --prefix frontend ci && npm --prefix frontend run build` '
+                    'to produce static/app/. The legacy Jinja UI is unaffected and '
+                    'remains available at its original routes.'
+                ),
+            }),
+            status=503,
+            mimetype='application/json',
+        )
+    response = send_from_directory(os.path.join(app.static_folder, REACT_BUILD_DIR), 'index.html')
+    response.headers['Cache-Control'] = _NO_STORE_CACHE
+    return response
+
+
+@app.route('/app/', defaults={'path': ''})
+@app.route('/app/<path:path>')
+def react_app(path):
+    """Serve built SPA assets, with a history-API fallback to the entry point.
+
+    Two distinct jobs, in order:
+
+    * ``/app/assets/<name>-<hash>.js`` is a real file on disk. It is served
+      with an immutable one-year cache and a **nosniff** header.
+    * anything else under /app/ is a client-side route (``/app/leaves``), which
+      has no file. It gets the entry point so the router can take over on load.
+
+    The split matters for the nosniff header: an unknown path under /app/ is
+      answered with HTML, and letting the browser sniff that as a script would
+      turn a mistyped asset URL into a confusing syntax error instead of the
+      404 an operator needs to see in the logs.
+    """
+    if path.startswith(REACT_ASSET_SUBDIR + '/'):
+        directory = os.path.join(app.static_folder, REACT_BUILD_DIR, REACT_ASSET_SUBDIR)
+        response = send_from_directory(directory, path[len(REACT_ASSET_SUBDIR) + 1:])
+        # Vite fingerprints these names at build time.
+        response.headers['Cache-Control'] = _IMMUTABLE_CACHE
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    if path and os.path.exists(os.path.join(app.static_folder, REACT_BUILD_DIR, path)):
+        response = send_from_directory(os.path.join(app.static_folder, REACT_BUILD_DIR), path)
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        return response
+
+    return _react_index_response()
 
 
 # ── Entry point ──────────────────────────────────────────────────────

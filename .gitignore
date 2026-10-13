@@ -27,6 +27,13 @@ ppt_screenshots/
 HRMS_Deployment_Guide.docx
 reports/
 
+# React UI (docs/REACT_UI_MIGRATION.md)
+node_modules/
+# Build output. Vite fingerprints these filenames, so committing them would mean
+# committing a hash that is no longer reproducible from the source. `npm run
+# build` runs in CI and in the Docker build instead.
+static/app/
+
 # IDE / Config
 .DS_Store
 .opencode/
