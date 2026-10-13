@@ -1816,11 +1816,12 @@ def test_react_unmigrated_route_says_so_and_links_to_the_legacy_page(page):
     should name the gap and offer the legacy URL, which still works.
     """
     _employee_dashboard(page)
-    page.goto(BASE_URL + '/app/documents', wait_until='commit')
+    page.goto(BASE_URL + '/app/analytics', wait_until='commit')
     page.locator('h1.page__title').wait_for(state='visible', timeout=15000)
     assert 'Not yet migrated' in page.inner_text('h1.page__title')
 
     link = page.locator('a:has-text("Open the current page")')
     link.wait_for(state='visible', timeout=10000)
-    # A full navigation, not a router push: there is no React bundle at /documents.
-    assert link.get_attribute('href') == '/documents', link.get_attribute('href')
+    # A full navigation, not a router push: there is no React bundle at
+    # /analytics.
+    assert link.get_attribute('href') == '/analytics', link.get_attribute('href')

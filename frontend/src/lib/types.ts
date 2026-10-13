@@ -278,9 +278,14 @@ export interface Expense {
 
 export interface DocumentRecord {
   id: number;
-  file_name: string;
+  name: string;
+  file_name?: string | null;
   doc_type?: string | null;
+  category?: string | null;
+  file_size?: number | null;
   uploaded_at?: string | null;
+  emp_id?: string;
+  employee?: string;
 }
 
 export interface LoginSession {
@@ -288,5 +293,213 @@ export interface LoginSession {
   login_time?: string;
   logout_time?: string | null;
   total_hours?: number;
+  [key: string]: unknown;
+}
+
+export interface AuditLogEntry {
+  log_id?: number;
+  created_at?: string | null;
+  emp_id?: string | null;
+  action?: string;
+  details?: string | null;
+  ip_address?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AuditLogPayload {
+  data: AuditLogEntry[];
+  total: number;
+}
+
+export interface AssetRecord {
+  id: number;
+  emp_id: string;
+  employee?: string;
+  type: string;
+  tag?: string | null;
+  brand?: string | null;
+  model?: string | null;
+  serial?: string | null;
+  issued?: string | null;
+  returned?: string | null;
+  status: string;
+  notes?: string | null;
+}
+
+export interface JobRecord {
+  id: number;
+  title: string;
+  department?: string | null;
+  location?: string | null;
+  description?: string | null;
+  status: string;
+  created_at?: string | null;
+}
+
+export interface ReviewRecord {
+  id: number;
+  emp_id: string;
+  employee: string;
+  reviewer_id: string;
+  reviewer: string;
+  period: string;
+  rating?: number | null;
+  status: string;
+  submitted_at?: string | null;
+}
+
+export interface CandidateRecord {
+  id: number;
+  name: string;
+  email: string;
+  phone?: string | null;
+  job_id?: number | null;
+  job_title?: string | null;
+  status: string;
+  applied_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface ImportJob {
+  job_id: number;
+  filename?: string;
+  status: string;
+  total_rows?: number;
+  processed_rows?: number;
+  imported?: number;
+  skipped?: number;
+  errors?: string[] | null;
+  failure_reason?: string | null;
+  cancel_requested?: boolean | number;
+}
+
+export interface OnboardingWorkflow {
+  workflow_id: number;
+  emp_id: string;
+  employee: string;
+  current_step?: number;
+  completed?: boolean;
+  steps?: Record<string, string>;
+  days_in_step?: number;
+  checklist?: Array<{
+    id: number;
+    doc_type: string;
+    status: string;
+    uploaded_at?: string | null;
+    reviewed_by?: string | null;
+    review_note?: string | null;
+    reviewed_at?: string | null;
+  }>;
+  tasks?: Array<{
+    id: number;
+    task: string;
+    assigned_to?: string | null;
+    status: string;
+    due_date?: string | null;
+    completed_at?: string | null;
+    stage?: number;
+  }>;
+  [key: string]: unknown;
+}
+
+export interface PayrollRun {
+  id: number;
+  month: number;
+  year: number;
+  status: string;
+  processed_at?: string | null;
+  submitted_by?: string | null;
+  approved_by?: string | null;
+  finalized_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface PayrollItem {
+  id: number;
+  emp_id: string;
+  employee: string;
+  gross: number;
+  deductions: number;
+  net: number;
+  pf: number;
+  esi: number;
+  pt: number;
+  payslip_generated?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SalaryStructureRecord {
+  id: number;
+  emp_id: string;
+  employee?: string;
+  basic: number;
+  hra: number;
+  allowances: number;
+  deductions: number;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  [key: string]: unknown;
+}
+
+export interface UserRecord {
+  emp_id: string;
+  name?: string | null;
+  email?: string | null;
+  role?: string;
+  status?: string;
+  department?: string | null;
+  first_login?: string | null;
+  locked?: boolean;
+  attempts?: number;
+  allow_login?: number;
+  allow_breaks?: number;
+  [key: string]: unknown;
+}
+
+export interface HolidayRecord {
+  id: number;
+  name: string;
+  date: string;
+  type: string;
+  location?: string | null;
+  year?: number;
+  [key: string]: unknown;
+}
+
+export interface HolidayOptIn {
+  optin_id: number;
+  emp_id: string;
+  holiday_id: number;
+  status: string;
+  created_at?: string | null;
+  holiday_name?: string | null;
+  holiday_date?: string | null;
+  type?: string | null;
+  [key: string]: unknown;
+}
+
+export interface OffboardingTaskRecord {
+  id: number;
+  emp_id: string;
+  employee: string;
+  task: string;
+  assigned_to?: string | null;
+  status: string;
+  due_date?: string | null;
+  completed_at?: string | null;
+  stage?: number;
+  [key: string]: unknown;
+}
+
+export interface OnboardingTaskRecord {
+  id: number;
+  emp_id: string;
+  employee: string;
+  task: string;
+  assigned_to?: string | null;
+  status: string;
+  due_date?: string | null;
+  completed_at?: string | null;
+  stage?: number;
   [key: string]: unknown;
 }

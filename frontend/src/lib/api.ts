@@ -210,6 +210,37 @@ export async function request<T = unknown>(
   throw new ApiError(response.status, payload);
 }
 
+export async function upload<T = unknown>(path: string, formData: FormData, _retried = false): Promise<T> {
+  const method = 'POST';
+  const headers: Record<string, string> = { Accept: 'application/json' };
+  if (currentEmpId) headers['X-Current-Emp-Id'] = currentEmpId;
+  if (UNSAFE.has(method)) headers['X-CSRF-Token'] = await csrf();
+
+  const response = await fetch(path, {
+    method,
+    headers,
+    credentials: 'same-origin',
+    body: formData,
+  });
+
+  if (response.ok) return (await readBody(response)) as T;
+
+  const payload = await readBody(response);
+  const isCsrfRejection =
+    response.status === 403 &&
+    payload !== null &&
+    typeof payload === 'object' &&
+    'error' in payload &&
+    /csrf/i.test(String((payload as { error: unknown }).error));
+
+  if (isCsrfRejection && !_retried) {
+    resetCsrfToken();
+    return upload<T>(path, formData, true);
+  }
+
+  throw new ApiError(response.status, payload);
+}
+
 export const api = {
   get: <T>(path: string, query?: Query, signal?: AbortSignal) =>
     request<T>(path, { method: 'GET', ...(query ? { query } : {}), ...(signal ? { signal } : {}) }),
@@ -217,4 +248,5 @@ export const api = {
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT', body }),
   patch: <T>(path: string, body?: unknown) => request<T>(path, { method: 'PATCH', body }),
   del: <T>(path: string) => request<T>(path, { method: 'DELETE' }),
+  upload: <T>(path: string, formData: FormData) => upload<T>(path, formData, false),
 };

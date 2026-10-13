@@ -158,7 +158,7 @@ export function ErrorBoundaryState({
  */
 export function RedirectToLogin() {
   if (typeof window !== 'undefined') {
-    window.location.assign('/login');
+    window.location.assign('/app/login');
   }
   return <Loading label="Redirecting to sign in…" />;
 }
