@@ -428,6 +428,14 @@ def test_admin_anonymises_an_archived_user_with_two_people(page):
 def test_breaks_tab_shows_on_user_dashboard(page):
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(3000)
+    with page.expect_response(
+        lambda response: response.url.endswith('/api/user/break-summary')
+        and response.request.method == 'GET',
+        timeout=15000,
+    ) as summary_response:
+        page.reload(wait_until='domcontentloaded')
+    summary = summary_response.value.json()
+    assert {'date', 'break_types', 'breaks'} <= summary.keys()
     page.locator('#breaktab').wait_for(state='visible', timeout=15000)
     page.click('#breaktab')
     btns = page.locator('.break-type-btn')

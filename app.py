@@ -11417,6 +11417,75 @@ def get_user_breaks():
     } for b in breaks]), 200
 
 
+@app.route('/api/v1/user/break-summary')
+@app.route('/api/user/break-summary')
+@login_required
+def get_user_break_summary():
+    emp_id = session['emp_id']
+    conn = get_db()
+    try:
+        now = datetime.now()
+        shift_date = _get_shift_date_for_dt(emp_id, now, conn)
+        shift_start_dt = _get_shift_start_dt(emp_id, conn, shift_date)
+        location = _break_employee_location(emp_id, now.date(), conn)
+        type_rows = conn.execute(
+            "SELECT bt.break_type, bt.daily_limit_minutes, bt.description, "
+            "bt.requires_approval, "
+            "COALESCE((SELECT SUM(COALESCE(b.duration_minutes, 0)) FROM breaks b "
+            "WHERE b.emp_id = ? AND b.break_type = bt.break_type "
+            "AND b.break_date = ? AND b.status != 'Active'), 0), "
+            "(SELECT a.status FROM break_approvals a WHERE a.emp_id = ? "
+            "AND a.break_type = bt.break_type AND a.break_date = ? "
+            "ORDER BY a.created_at DESC LIMIT 1) "
+            "FROM break_types bt "
+            "WHERE bt.location IS NULL OR bt.location = '' OR LOWER(bt.location) = LOWER(?) "
+            "ORDER BY CASE LOWER(bt.break_type) WHEN 'tea' THEN 0 "
+            "WHEN 'lunch' THEN 1 WHEN 'personal' THEN 2 ELSE 3 END, "
+            "LOWER(bt.break_type)",
+            [emp_id, shift_date, emp_id, shift_date, location or ''],
+        ).fetchall()
+        break_rows = conn.execute(
+            "SELECT break_id, break_type, start_time, end_time, duration_minutes, status, break_date "
+            "FROM breaks WHERE emp_id = ? AND (status = 'Active' OR start_time >= ?) "
+            "ORDER BY start_time DESC",
+            [emp_id, shift_start_dt],
+        ).fetchall()
+    finally:
+        conn.close()
+
+    recent_breaks = [{
+        'break_id': row[0], 'break_type': row[1],
+        'start_time': row[2].isoformat() + 'Z' if row[2] else None,
+        'end_time': row[3].isoformat() + 'Z' if row[3] else None,
+        'duration_minutes': int(row[4] or 0), 'status': row[5],
+    } for row in break_rows]
+    active_minutes = {}
+    for row in break_rows:
+        if row[5] != 'Active' or not row[2] or row[6] != shift_date:
+            continue
+        elapsed = max(0, int((now - row[2]).total_seconds() // 60))
+        active_minutes[row[1]] = active_minutes.get(row[1], 0) + elapsed
+
+    return jsonify({
+        'date': shift_date.isoformat(),
+        'break_types': [{
+            'break_type': row[0],
+            'daily_limit_minutes': row[1],
+            'description': row[2],
+            'requires_approval': bool(row[3]),
+            'recorded_minutes': int(row[4] or 0),
+            'active_minutes': active_minutes.get(row[0], 0),
+            'used_minutes': int(row[4] or 0) + active_minutes.get(row[0], 0),
+            'remaining_minutes': (
+                max(0, int(row[1]) - int(row[4] or 0) - active_minutes.get(row[0], 0))
+                if row[1] is not None else None
+            ),
+            'approval_status': row[5],
+        } for row in type_rows],
+        'breaks': recent_breaks,
+    }), 200
+
+
 @app.route('/api/break-approvals', methods=['GET', 'POST'])
 @login_required
 @idempotent

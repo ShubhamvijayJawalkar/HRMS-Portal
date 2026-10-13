@@ -10659,6 +10659,78 @@ def test_break_types_api(client):
     assert len(data) >= 1
 
 
+def test_user_break_summary_combines_shift_break_data(client):
+    from datetime import date, timedelta
+
+    emp_id = 'EMP001'
+    break_type = 'BreakSummaryTest'
+    approval_id = completed_break_id = active_break_id = None
+    with client.session_transaction() as sess:
+        sess['emp_id'] = emp_id
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = 99995
+
+    initial = client.get('/api/user/break-summary')
+    assert initial.status_code == 200
+    shift_date = date.fromisoformat(initial.get_json()['date'])
+    conn = get_db()
+    try:
+        conn.execute(
+            'INSERT INTO break_types (break_type, daily_limit_minutes, description, '
+            'location, requires_approval) VALUES (?, ?, ?, ?, ?)',
+            [break_type, 90, 'Summary test type', None, 1],
+        )
+        approval_id = _next_generated_id(conn, 'break_approvals', 'approval_id')
+        conn.execute(
+            "INSERT INTO break_approvals (approval_id, emp_id, break_type, break_date, "
+            "reason, status) VALUES (?, ?, ?, ?, ?, 'Approved')",
+            [approval_id, emp_id, break_type, shift_date, 'Summary test'],
+        )
+        completed_break_id = _next_generated_id(conn, 'breaks', 'break_id')
+        now = datetime.now()
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, end_time, "
+            "duration_minutes, break_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'Completed')",
+            [completed_break_id, emp_id, break_type, now - timedelta(minutes=40),
+             now - timedelta(minutes=33), 7, shift_date],
+        )
+        active_break_id = _next_generated_id(conn, 'breaks', 'break_id')
+        conn.execute(
+            "INSERT INTO breaks (break_id, emp_id, break_type, start_time, break_date, status) "
+            "VALUES (?, ?, ?, ?, ?, 'Active')",
+            [active_break_id, emp_id, break_type, now - timedelta(minutes=9), shift_date],
+        )
+    finally:
+        conn.close()
+
+    try:
+        response = client.get('/api/v1/user/break-summary')
+        assert response.status_code == 200
+        summary = response.get_json()
+        item = next(b for b in summary['break_types'] if b['break_type'] == break_type)
+        assert item['daily_limit_minutes'] == 90
+        assert item['requires_approval'] is True
+        assert item['recorded_minutes'] == 7
+        assert item['active_minutes'] >= 8
+        assert item['used_minutes'] == item['recorded_minutes'] + item['active_minutes']
+        assert item['remaining_minutes'] == max(0, 90 - item['used_minutes'])
+        assert item['approval_status'] == 'Approved'
+        assert any(b['break_id'] == active_break_id and b['status'] == 'Active' for b in summary['breaks'])
+        assert summary['date'] == shift_date.isoformat()
+    finally:
+        conn = get_db()
+        conn.execute('DELETE FROM breaks WHERE break_id IN (?, ?)', [completed_break_id, active_break_id])
+        conn.execute('DELETE FROM break_approvals WHERE approval_id = ?', [approval_id])
+        conn.execute('DELETE FROM break_types WHERE break_type = ?', [break_type])
+        conn.close()
+
+
+def test_user_break_summary_requires_login():
+    response = app.test_client().get('/api/user/break-summary')
+    assert response.status_code in (302, 401)
+
+
 def test_dashboard_stats_requires_admin(client):
     with client.session_transaction() as sess:
         sess['emp_id'] = 'EMP001'

@@ -52,10 +52,15 @@ VERDICT_BADGE_COLOURS = {
 
 # ── Update log (append newest first) ────────────────────────────────────
 UPDATE_LOG = [
+    ("2026-10-13", "FR-ATT-07 (Low): added an authenticated, shift-scoped break summary "
+     "projection with location-eligible types, per-type recorded/active/remaining minutes "
+     "and approval status, plus recent break history. The dashboard now uses this one "
+     "response instead of composing its panel from separate type and history calls. "
+     "Overnight shifts use the resolved shift date for both history and totals."),
     ("2026-10-13", "FR-AUTH-11 is deferred by product decision and removed from the "
      "actionable ToDo list for now; it remains NOT_STARTED in SRS traceability so the "
-     "coverage report does not imply the control exists. Development proceeds with "
-     "FR-EXP-02, the next actionable requirement."),
+     "coverage report does not imply the control exists. At the time, development "
+     "proceeded with FR-EXP-02, the next actionable requirement."),
     ("2026-10-13", "FR-EXP-02 (Medium): expense claims now accept a receipt upload "
      "with the claim, validate extension, magic bytes, MIME, category-specific size "
      "and ClamAV through the shared document pipeline, then store it under a random "
@@ -1569,8 +1574,6 @@ _NEXT_STEPS = {
     'FR-USR-14': 'Rotate the session id on password change and revoke the old one, so a '
                  'stolen cookie dies with the old password.',
     # ── Low ─────────────────────────────────────────────────────────────
-    'FR-ATT-07': 'Add a single per-type attendance summary endpoint and switch the client off '
-                 'the two-call assembly.',
     'FR-AUTH-13': 'Require a recent re-authentication for a credential read and write the '
                  'audit row the SRS names.',
     'FR-USR-08': 'Add the metadata endpoint and the async CSV export, and render the last 50 '

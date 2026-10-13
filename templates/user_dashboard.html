@@ -213,7 +213,7 @@
 let calMonth=new Date().getMonth()+1, calYear=new Date().getFullYear(), calData={};
 
 document.addEventListener('DOMContentLoaded', () => {
-    loadUserInfo(); loadAvailableBreaks(); loadUserBreaks(); loadLoginHours(); loadShiftSummary(); checkActiveBreak(); loadHolidays(); loadNotifications();
+    loadUserInfo(); loadBreakSummary(); loadLoginHours(); loadShiftSummary(); loadHolidays(); loadNotifications();
     loadCalendar();
     const loginDateFilter=document.getElementById('loginDateFilter');
     if(loginDateFilter){
@@ -223,13 +223,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('calPrev').addEventListener('click',()=>{calMonth--;if(calMonth<1){calMonth=12;calYear--;}loadCalendar()});
     document.getElementById('calNext').addEventListener('click',()=>{calMonth++;if(calMonth>12){calMonth=1;calYear++;}loadCalendar()});
     document.getElementById('calToday').addEventListener('click',()=>{calMonth=new Date().getMonth()+1;calYear=new Date().getFullYear();loadCalendar()});
-    setInterval(checkActiveBreak, 5000); setInterval(loadUserBreaks, 10000);
+    setInterval(loadBreakSummary, 10000);
     document.addEventListener('click', function(e){
         const btn=e.target.closest('.endBreakBtn');
         if(btn){e.preventDefault();endBreak();}
     });
     const breakTab = document.querySelector('#breaktab');
-    if(breakTab) breakTab.addEventListener('shown.bs.tab', checkActiveBreak);
+    if(breakTab) breakTab.addEventListener('shown.bs.tab', loadBreakSummary);
 });
 function loadUserInfo() {
     fetch('/api/profile').then(r=>r.json()).then(d=>{
@@ -238,18 +238,47 @@ function loadUserInfo() {
         localStorage.setItem('userName',localStorage.getItem('userName')||'Employee');
     });
 }
-function loadAvailableBreaks() {
-    fetch('/api/break-types').then(r=>r.json()).then(breaks=>{
-        if(!Array.isArray(breaks))return;
+function loadBreakSummary() {
+    fetch('/api/user/break-summary').then(r=>r.json()).then(summary=>{
+        if(!summary||!Array.isArray(summary.break_types)||!Array.isArray(summary.breaks))return;
         const c1=document.getElementById('breakTypesContainer'), c2=document.getElementById('availableBreaksContainer');
-        if(!c1||!c2)return;
-        c1.innerHTML=''; c2.innerHTML='';
-        breaks.forEach(b=>{
-            const btn=document.createElement('button'); btn.className='btn break-type-btn';
-            btn.textContent=`${b.break_type} (${b.daily_limit_minutes} min)`;
-            btn.onclick=()=>startBreak(b.break_type); c1.appendChild(btn);
-            c2.innerHTML+=`<div class="break-item py-2 px-3 mb-2"><strong>${b.break_type}</strong><br><small class="text-muted" style="font-size:11px;">${b.description}</small></div>`;
-        });
+        const history=document.getElementById('breaksHistoryContainer');
+        const activeInfo=document.getElementById('activeBreakInfo');
+        if(c1){
+            c1.innerHTML='';
+            summary.break_types.forEach(b=>{
+                const btn=document.createElement('button'); btn.className='btn break-type-btn';
+                const cap=b.daily_limit_minutes==null?'No daily cap':`${b.remaining_minutes} min left`;
+                const usage=b.daily_limit_minutes==null?`${b.used_minutes} min used`:`${b.used_minutes}/${b.daily_limit_minutes} min used`;
+                btn.textContent=`${b.break_type} (${usage})`;
+                btn.disabled=b.remaining_minutes===0;
+                btn.title=b.requires_approval?'Requires manager approval':cap;
+                btn.onclick=()=>startBreak(b.break_type); c1.appendChild(btn);
+            });
+        }
+        if(c2){
+            c2.innerHTML=summary.break_types.map(b=>{
+                const approval=b.requires_approval?`Approval required${b.approval_status?` (${b.approval_status})`:''}`:'No approval required';
+                const used=b.daily_limit_minutes==null?`${b.used_minutes} min used`:`${b.used_minutes}/${b.daily_limit_minutes} min used`;
+                return `<div class="break-item py-2 px-3 mb-2"><strong>${esc(b.break_type)}</strong><br><small class="text-muted" style="font-size:11px;">${esc(b.description||'')} · ${used} · ${approval}</small></div>`;
+            }).join('');
+        }
+        if(history){
+            if(!summary.breaks.length)history.innerHTML='<p class="text-muted mb-0">No breaks this shift</p>';
+            else history.innerHTML=summary.breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${esc(b.break_type)}</strong> <span class="status-badge ${b.status.toLowerCase()}">${esc(b.status)}</span></div><div class="text-end"><small class="text-muted">${fmtHMSShort(b.start_time)} - ${b.end_time?fmtHMSShort(b.end_time):'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
+        }
+        if(activeInfo){
+            const active=summary.breaks.find(b=>b.status==='Active');
+            if(active){
+                const elapsed=calcElapsed(active.start_time), started=fmtHMSShort(active.start_time);
+                activeInfo.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${esc(active.break_type)} Break</h5><small class="text-muted" style="font-size:10px;">Started ${started}</small><div class="time-display">${elapsed} min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;
+                localStorage.setItem('activeBreakId',active.break_id);
+                const message=document.getElementById('breakMessage'); if(message)message.style.display='none';
+            }else{
+                activeInfo.innerHTML='<p class="text-muted mb-0">No active break</p>';
+                localStorage.removeItem('activeBreakId');
+            }
+        }
     }).catch(()=>{});
 }
 function startBreak(breakType) {
@@ -258,40 +287,21 @@ function startBreak(breakType) {
             if(d.break_id){
                 localStorage.setItem('activeBreakId',d.break_id);
                 const c=document.getElementById('activeBreakInfo');
-                c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${d.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started now</small><div class="time-display">0 min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;
+                c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${esc(d.break_type)} Break</h5><small class="text-muted" style="font-size:10px;">Started now</small><div class="time-display">0 min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;
                 showMsg('Break started!','success');
+                loadBreakSummary();
             }else showMsg(d.error||'Failed','error');
         }).catch(()=>showMsg('Error starting break','error'));
 }
 function endBreak() {
     let id=localStorage.getItem('activeBreakId');
     if(!id){
-        fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
-            const ab=breaks.find(b=>b.status==='Active');
+        fetch('/api/user/break-summary').then(r=>r.json()).then(summary=>{
+            const ab=summary.breaks.find(b=>b.status==='Active');
             if(ab){localStorage.setItem('activeBreakId',ab.break_id);endBreak();}
         });return;
     }
-    fetch(`/api/end-break/${id}`,{method:'POST'}).then(r=>r.json()).then(d=>{localStorage.removeItem('activeBreakId');checkActiveBreak();loadUserBreaks();showMsg(`Break ended: ${d.duration_minutes} min`,'success');}).catch(()=>showMsg('Failed to end break','error'));
-}
-function checkActiveBreak() {
-    fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
-        if(!Array.isArray(breaks))return;
-        const c=document.getElementById('activeBreakInfo');
-        if(!c)return;
-        const ab=breaks.find(b=>b.status==='Active');
-        if(ab){            const el=calcElapsed(ab.start_time);const st=fmtHMSShort(ab.start_time);c.innerHTML=`<div class="p-2"><h5 class="mb-1" style="font-weight:700;font-size:14px;">${ab.break_type} Break</h5><small class="text-muted" style="font-size:10px;">Started ${st}</small><div class="time-display">${el} min</div><button class="btn endBreakBtn" style="background:var(--destructive);color:white;border-radius:var(--button-radius);font-weight:600;padding:6px 18px;font-size:11px;"><i class="bi bi-stop-circle me-1"></i>End Break</button></div>`;localStorage.setItem('activeBreakId',ab.break_id);
-            const bm=document.getElementById('breakMessage');if(bm)bm.style.display='none';
-        }else{c.innerHTML='<p class="text-muted mb-0">No active break</p>';localStorage.removeItem('activeBreakId');}
-    }).catch(()=>{setTimeout(checkActiveBreak,2000);});
-}
-function loadUserBreaks() {
-    fetch('/api/user-breaks').then(r=>r.json()).then(breaks=>{
-        if(!Array.isArray(breaks))return;
-        const c=document.getElementById('breaksHistoryContainer');
-        if(!c)return;
-        if(!breaks.length){c.innerHTML='<p class="text-muted mb-0">No breaks this shift</p>';return;}
-        c.innerHTML=breaks.map(b=>`<div class="break-item ${b.status.toLowerCase()}"><div class="d-flex justify-content-between align-items-center"><div><strong>${b.break_type}</strong> <span class="status-badge ${b.status.toLowerCase()}">${b.status}</span></div><div class="text-end"><small class="text-muted">${fmtHMSShort(b.start_time)} - ${b.end_time?fmtHMSShort(b.end_time):'now'}<br>${b.duration_minutes||'...'} min</small></div></div></div>`).join('');
-    }).catch(()=>{});
+    fetch(`/api/end-break/${id}`,{method:'POST'}).then(r=>r.json()).then(d=>{localStorage.removeItem('activeBreakId');loadBreakSummary();showMsg(`Break ended: ${d.duration_minutes} min`,'success');}).catch(()=>showMsg('Failed to end break','error'));
 }
 function loadLoginHours() {
     const dateFilter=document.getElementById('loginDateFilter');

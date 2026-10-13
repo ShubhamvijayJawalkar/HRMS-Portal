@@ -364,10 +364,11 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'delegations.can_approve_for/approval_note rule the leave and '
                   'regularization routes use - so the SRS wording "including an active '
                   'delegate, FR-LEA-08a" is literally the actor rule, not a comment.'),
-    'FR-ATT-07': ('L', 'R', 'PARTIAL', ('/api/break-types', '/api/user-breaks',),
-                  'Minutes used and the approval flag are exposed. The per-type summary '
-                  'is assembled by the client from two calls rather than served as one '
-                  'projection.'),
+    'FR-ATT-07': ('L', 'R', 'IMPLEMENTED', ('/api/user/break-summary',),
+                  'One shift-scoped projection returns location-eligible break types, '
+                  'recorded and active minutes, remaining limits, approval state, and '
+                  "the employee's break history. The dashboard consumes this response "
+                  'instead of assembling it from separate type and history calls.'),
     'FR-ATT-08': ('M', 'R', 'IMPLEMENTED', ('/api/login-hours',),
                   'First login to last logout, scoped to a shift date.'),
     'FR-ATT-09': ('H', 'C', 'IMPLEMENTED', ('/api/user/shift-summary',),
