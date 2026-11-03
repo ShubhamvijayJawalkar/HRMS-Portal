@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 
 import { Shell } from '@/components/Shell';
 import { ErrorBoundaryState, Loading, NotFound, RedirectToLogin } from '@/components/states';
@@ -40,11 +40,10 @@ import './styles.css';
 /**
  * The application root.
  *
- * One decision lives here and is worth stating: a 401 does not render a React
- * login form. The sign-in flow is still a Jinja template -- it owns the deferred
- * MFA step and the session/attendance bookkeeping -- so an unauthenticated
- * visitor is sent there by the server, not by a client-side route. Migrating it
- * is UI-12; until then the two coexist without either pretending to be the other.
+ * One decision lives here and is worth stating: a 401 on a *protected* screen
+ * sends the browser to the sign-in route. That screen is reachable without a
+ * session and therefore renders outside the session gate and outside `Shell`
+ * (see `publicPath` below); `/api/navigation` is expected to 401 there.
  *
  * Paths are **bare**: the router carries `basename="/app"` below, which prepends
  * the mount prefix itself. Writing `/app/dashboard` here as well would match
@@ -57,6 +56,27 @@ import './styles.css';
  */
 function AppRoutes() {
   const { loading, unauthenticated, error, reload } = useSession();
+  const location = useLocation();
+
+  // The sign-in, reset and pre-boarding screens are reachable *without* a
+  // session. They must render outside the session gate and outside `Shell`:
+  // `/api/navigation` answers 401 for them by definition, and feeding that 401
+  // to `RedirectToLogin` sent the browser to `/app/login`, which mounted this
+  // component again and answered 401 again — an unbounded redirect loop that
+  // only a browser test could see.
+  const publicPath =
+    location.pathname === '/login' ||
+    location.pathname === '/reset-password' ||
+    location.pathname.startsWith('/preboarding/');
+  if (publicPath) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/preboarding/:token" element={<PreboardingPage />} />
+      </Routes>
+    );
+  }
 
   if (loading) {
     return (
@@ -108,13 +128,10 @@ function AppRoutes() {
         <Route path="/expenses" element={<ExpensesPage />} />
         <Route path="/leaves" element={<LeavesPage />} />
         <Route path="/profile" element={<ProfilePage />} />
-        <Route path="/preboarding/:token" element={<PreboardingPage />} />
         <Route path="/tickets" element={<TicketsPage />} />
         <Route path="/regularization" element={<RegularizationPage />} />
         <Route path="/goals" element={<GoalsPage />} />
 
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

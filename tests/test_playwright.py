@@ -149,6 +149,30 @@ def page(browser):
     yield p
     ctx.close()
 
+
+@pytest.fixture
+def restore_emp002_password():
+    """Put the seeded employee's password back after a test changes it.
+
+    Two browser tests deliberately change EMP002's password — the reset journey
+    and the admin-set recovery path — and both verify the new one by signing in.
+    Later tests sign in with the seeded password, so leaving a generated one
+    behind produced an unexplained 401 in an unrelated React test. `pass123` is
+    refused by the policy, so the seed hash is restored directly (the same
+    approach the unit suite uses for `test_change_password`).
+    """
+    yield
+    from app import get_db, hash_password
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE users SET password = ? WHERE emp_id = 'EMP002'",
+            [hash_password('pass123')],
+        )
+    finally:
+        conn.close()
+
 def test_login_page(page):
     page.goto(BASE_URL + '/login', wait_until='commit')
     assert page.title() == 'HRMS - Login'
@@ -767,7 +791,7 @@ def test_ats_offer_and_preboarding_browser_flow(page):
     assert page.locator('option[value="Hired"]').first.is_disabled()
 
 
-def test_password_reset_page_completes_the_journey(page):
+def test_password_reset_page_completes_the_journey(page, restore_emp002_password):
     """FR-AUTH-08/09: the link in the email lands on a page that works.
 
     The token used to come back in the `forgot-password` *response*, which is why
@@ -858,7 +882,7 @@ def test_password_reset_page_completes_the_journey(page):
     _login(page, 'EMP002', 'jade-marlin-quilt-77')
 
 
-def test_admin_sets_a_password_from_the_user_management_panel(page):
+def test_admin_sets_a_password_from_the_user_management_panel(page, restore_emp002_password):
     """The recovery path when there is no mail server.
 
     `/api/forgot-password` can only deliver its link by email, so on a deployment
@@ -1075,15 +1099,16 @@ def test_react_client_route_survives_a_hard_refresh(page):
 
 @requires_react_build
 def test_react_requires_a_session_and_redirects_to_the_login_page(page):
-    """No session means the server's login page, not an empty shell.
+    """No session means the sign-in screen, not an empty shell.
 
-    The SPA does not render its own sign-in form: that flow is still a Jinja
-    template owning the deferred MFA step and the session/attendance
-    bookkeeping, and migrating it is Phase 3.
+    UI-12 moved the sign-in form into the SPA (`/app/login`), which drives the
+    same server-side auth endpoints, so the redirect target is the React route
+    rather than the Jinja `/login` template. What must not happen is a rendered
+    dashboard with no session behind it.
     """
     page.goto(BASE_URL + '/app/dashboard', wait_until='commit')
-    page.wait_for_url(BASE_URL + '/login', timeout=15000)
-    page.locator('#empId').wait_for(state='visible', timeout=15000)
+    page.wait_for_url(BASE_URL + '/app/login', timeout=15000)
+    page.locator('#login-emp-id').wait_for(state='visible', timeout=15000)
 
 
 @requires_react_build

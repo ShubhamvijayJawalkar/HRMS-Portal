@@ -470,6 +470,16 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
         pc.execute("DELETE FROM tickets WHERE subject = 'public write probe'")
         pc.execute("DELETE FROM payroll_approvals WHERE run_id IN "
                    "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
+        # Finalisation marks reimbursed claims `Paid` and links them to the run
+        # (`expense_claims.reimbursed_in_run_id`, FR-PAY-03/04). Unlink and put
+        # them back to `Approved` **before** deleting the run, or the delete is a
+        # foreign-key violation and a second probe run fails in its cleanup — which
+        # is exactly how this was found.
+        pc.execute("UPDATE expense_claims SET status = 'Approved', reimbursed_in_run_id = NULL "
+                   "WHERE reimbursed_in_run_id IN "
+                   "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
+        pc.execute("DELETE FROM payroll_run_jobs WHERE run_id IN "
+                   "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_items WHERE run_id IN "
                    "(SELECT run_id FROM payroll_runs WHERE year >= 2099)")
         pc.execute("DELETE FROM payroll_runs WHERE year >= 2099")
@@ -1682,17 +1692,30 @@ def _write_flows(app_mod, dsn) -> dict[str, tuple[str, str]]:
 
     def payroll_create():
         r = _post(cl_a, tok_a, "/api/payroll-runs", {"month": 1, "year": pay_year})
-        if r.status_code != 201:
+        if r.status_code != 202:
             return r.status_code
+        body = r.get_json() or {}
+        rid = body.get("run_id")
+        job_id = body.get("job_id")
+        if not rid or not job_id:
+            return 409
+        # The SRS (§6.8) specifies a queued background job; the probe processes
+        # it through the same endpoint an operator would use.
+        processed = _post(cl_a, tok_a, f"/api/payroll-runs/{rid}/run", {})
+        if processed.status_code != 200:
+            return processed.status_code
+        polled = cl_a.get(f"/api/payroll-run-jobs/{job_id}")
+        if polled.status_code != 200 or (polled.get_json() or {}).get("status") != "completed":
+            return 409
         with psycopg.connect(dsn.replace("postgresql+psycopg://", "postgresql://"), autocommit=True) as pc:
             row = pc.execute(
-                "SELECT run_id FROM payroll_runs WHERE month = 1 AND year = %s", [pay_year],
+                "SELECT status FROM payroll_runs WHERE run_id = %s", [rid],
             ).fetchone()
-        if not row:
+        if not row or row[0] != 'Draft':
             return 409
-        state["run_id"] = row[0]
-        return 201
-    run("payroll(run create)", payroll_create)
+        state["run_id"] = rid
+        return 202
+    run("payroll(run create + process)", payroll_create)
 
     def payroll_submit():
         rid = state.get("run_id")
@@ -2432,6 +2455,17 @@ def main() -> int:
         lambda emp_id, doc_id, filename, content, content_type:
         f"documents/public-probe-{doc_id}"
     )
+    # Leave exports use the same object-storage client. The probe is measuring
+    # the database contract, and CI has no S3/MinIO, so the two calls it makes
+    # are stubbed the same way the document upload is: the route still has to
+    # generate the file, record the canonical row and answer with a redirect.
+    object_storage.upload_leave_export = (
+        lambda job_id, content: f"leave-exports/public-probe-{job_id}.xlsx"
+    )
+    object_storage.get_leave_export_presigned_url = (
+        lambda object_key, expires_in=900: f"https://example.invalid/{object_key}"
+    )
+    object_storage.delete_leave_export = lambda _object_key: True
 
     with psycopg.connect(dsn, autocommit=True) as pconn:
         ph = hash_password("pass123")

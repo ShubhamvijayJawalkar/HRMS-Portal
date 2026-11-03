@@ -414,6 +414,34 @@ export interface PayrollRun {
   [key: string]: unknown;
 }
 
+export interface PayrollRunJob {
+  job_id: number;
+  run_id: number;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  employees_total: number;
+  employees_done: number;
+  failure_reason?: string | null;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface PayrollRatesVersion {
+  version_id: number;
+  effective_from: string;
+  effective_to?: string | null;
+  pf_rate: number;
+  pf_max: number;
+  esi_rate: number;
+  esi_max: number;
+  pt_amount: number;
+  pt_threshold: number;
+  tds_slabs: { from_amount: number; rate: number }[];
+  note?: string | null;
+  created_by?: string | null;
+  [key: string]: unknown;
+}
+
 export interface PayrollItem {
   id: number;
   emp_id: string;
@@ -424,6 +452,9 @@ export interface PayrollItem {
   pf: number;
   esi: number;
   pt: number;
+  tds?: number;
+  lop_amount?: number;
+  reimbursements?: number;
   payslip_generated?: boolean;
   [key: string]: unknown;
 }

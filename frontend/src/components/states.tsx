@@ -149,12 +149,13 @@ export function ErrorBoundaryState({
 }
 
 /**
- * A no-session response sends the browser to the Flask login page.
+ * A no-session response sends the browser to the sign-in screen.
  *
- * A full navigation, not a client-side route change: the login page is a Jinja
- * template that still owns the sign-in flow (including the deferred MFA step),
- * and migrating it is UI-12. A `<Navigate>` here would land on a React route
- * that has no login screen yet.
+ * A full navigation, not a client-side route change: the sign-in screen has no
+ * session behind it, so the session provider must be re-created from scratch
+ * afterwards (and a stale CSRF token discarded). `AppRoutes` renders that route
+ * outside the session gate; without that the 401 fetched by the login screen
+ * itself redirects to the login screen, which is an infinite loop.
  */
 export function RedirectToLogin() {
   if (typeof window !== 'undefined') {

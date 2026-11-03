@@ -73,7 +73,11 @@ _ROLE_MATRIX: dict[str, dict[str, bool]] = {
     'HR': {
         'users': False, 'import_users': True,
         'candidates': True, 'jobs': True, 'offers': True,
-        'payroll': False, 'salary_structures': False, 'payroll_rates': False,
+        # FR-PAY-01: HR has read access to the payroll surface. Every
+        # mutating payroll gate stays finance_or_admin, so this grants
+        # reach — never a write — even though the matrix cannot express
+        # read/write. The company-wide *scope* (can_view_all) is unaffected.
+        'payroll': True, 'salary_structures': True, 'payroll_rates': True,
         'payroll_approve': False,
         'leaves': True, 'regularization': True, 'breaks': True, 'holidays': True,
         'expenses': True,

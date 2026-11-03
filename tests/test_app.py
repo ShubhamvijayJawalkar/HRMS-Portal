@@ -823,11 +823,7 @@ def test_finalize_payroll_enqueues_and_dispatch_notifies(client):
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99991
-    resp = client.post('/api/payroll-runs', json={'month': 11, 'year': 2099})
-    assert resp.status_code == 201, resp.get_json()
-    conn = get_db()
-    rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2099").fetchone()[0]
-    conn.close()
+    rid = _queue_payroll_run(client, 11, 2099)
     assert _payroll_submit_and_approve(client, rid, 99091).status_code == 200
     resp = client.post(f'/api/payroll-runs/{rid}/finalize')
     assert resp.status_code == 200, resp.get_json()
@@ -873,6 +869,29 @@ def _ensure_finance_approver():
             [hash_password('pass123')],
         )
     conn.close()
+
+
+def _queue_payroll_run(client, month, year, **extra):
+    """POST /api/payroll-runs then process the job synchronously.
+
+    The SRS (§6.8) specifies a queued background job: the POST answers 202 and
+    the worker computes the items. The unit suite keeps the scheduler on, so
+    the test drives the worker through the same admin retry endpoint and
+    tolerates the scheduler winning the claim (as the import tests do); the DB
+    assertion is what proves the outcome.
+    """
+    response = client.post('/api/payroll-runs', json={'month': month, 'year': year, **extra})
+    assert response.status_code == 202, response.get_json()
+    rid = response.get_json()['run_id']
+    processed = client.post(f'/api/payroll-runs/{rid}/run')
+    assert processed.status_code in (200, 409), processed.get_json()  # 409 = already processed
+    conn = get_db()
+    status = conn.execute(
+        "SELECT status FROM payroll_runs WHERE run_id = ?", [rid]
+    ).fetchone()[0]
+    conn.close()
+    assert status == 'Draft'
+    return rid
 
 
 def _payroll_submit_and_approve(client, rid, session_id=99090):
@@ -2397,9 +2416,7 @@ def test_payroll_asset_and_salary_writes_are_audited_without_copying_the_amounts
     `salary_structures` remains the record of what it is.
     """
     _set_admin_session(client, 99172)
-    run = client.post('/api/payroll-runs', json={'month': 6, 'year': 2033})
-    assert run.status_code == 201, run.get_json()
-    rid = run.get_json()['run_id']
+    rid = _queue_payroll_run(client, 6, 2033)
 
     asset = client.post('/api/assets', json={
         'emp_id': 'EMP002', 'asset_type': 'Laptop', 'asset_tag': 'LT-9',
@@ -2435,6 +2452,7 @@ def test_payroll_asset_and_salary_writes_are_audited_without_copying_the_amounts
         conn = get_db()
         try:
             conn.execute('DELETE FROM payroll_items WHERE run_id = ?', [rid])
+            conn.execute('DELETE FROM payroll_run_jobs WHERE run_id = ?', [rid])
             conn.execute('DELETE FROM payroll_runs WHERE run_id = ?', [rid])
             conn.execute('DELETE FROM assets WHERE asset_tag = ?', ['LT-9'])
             conn.execute('DELETE FROM salary_structures WHERE struct_id = ?', [sid])
@@ -5184,11 +5202,13 @@ def test_one_shift_length_rule_serves_the_summary_and_payroll():
 #: Mutating handlers that write no audit row, found by an AST sweep of `app.py` with
 #: delegation resolved (a handler counts as audited if it calls `audit_log` directly
 #: or calls a module-level function that does). FR-AUD-01 says "every mutating
-#: action"; keep the empty set asserted so a future handler cannot silently evade it.
+#: action", so anything here must be a documented exemption rather than an omission:
 #:
-#: This ratchet requires the unaudited set to remain empty. The read-receipt
-#: exemption is gone: it records one aggregate change without notification contents.
-KNOWN_UNAUDITED_MUTATIONS = set()
+#: * ``preview_salary_structure`` — a POST because it carries a prospective salary
+#:   structure, but FR-PAY-02 requires it to write **nothing**; it is the read path
+#:   the run shares a function with (Appendix A-07). Auditing a preview would put a
+#:   row in the trail per keystroke and still not record a change to the business.
+KNOWN_UNAUDITED_MUTATIONS = {'preview_salary_structure'}
 
 
 def _mutating_handlers_without_an_audit_row():
@@ -9981,14 +10001,16 @@ def test_permission_override_deny_removes_route_and_navbar_access(client):
         assert '/admin/tickets' not in [href for href, _label in nav_after], nav_after
         assert '/admin/candidates' in [href for href, _label in nav_after], nav_after
 
-        # A grant row lifts a role-default deny for the same user.
+        # A grant row can lift a role-default deny, but it cannot widen the
+        # role/department gate: HR still cannot reach `/admin/users`.
         _set_admin_session(client, 99899)
         assert client.put(
-            '/api/users/EMP930/permissions', json={'modules': {'payroll': True}}
+            '/api/users/EMP930/permissions', json={'modules': {'users': True}}
         ).status_code == 200
         _login_as(client, 'EMP930', 'HR', 99896)
-        # payroll is still admin/finance-gated: the matrix can only narrow.
-        assert client.get('/admin/payroll').status_code == 403
+        # Page routes redirect a denied actor to the dashboard; the point is
+        # that the grant did not widen the role/department gate.
+        assert client.get('/admin/users').status_code == 302
     finally:
         _clear_permission_rows('EMP930')
         _cleanup_user_contract_rows('EMP930')
@@ -11109,12 +11131,10 @@ def test_idempotent_payroll_finalize_single_outbox_event(client):
     _idem_session(client, 99005)
     r = client.post('/api/payroll-runs', json={'month': 12, 'year': 2099},
                     headers={'Idempotency-Key': 'ik-pr-1'})
-    assert r.status_code == 201, r.get_json()
-    conn = get_db()
-    rid = conn.execute(
-        "SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2099"
-    ).fetchone()[0]
-    conn.close()
+    assert r.status_code == 202, r.get_json()
+    rid = r.get_json()['run_id']
+    processed = client.post(f'/api/payroll-runs/{rid}/run')
+    assert processed.status_code in (200, 409), processed.get_json()
     assert _payroll_submit_and_approve(client, rid, 99092).status_code == 200
     hdrs = {'Idempotency-Key': 'ik-finalize-1'}
     f1 = client.post(f'/api/payroll-runs/{rid}/finalize', headers=hdrs)
@@ -11252,10 +11272,7 @@ def test_outbox_payroll_notification_category(client):
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99013
-    client.post('/api/payroll-runs', json={'month': 12, 'year': 2098})
-    conn = get_db()
-    rid = conn.execute("SELECT run_id FROM payroll_runs WHERE month = 12 AND year = 2098").fetchone()[0]
-    conn.close()
+    rid = _queue_payroll_run(client, 12, 2098)
     assert _payroll_submit_and_approve(client, rid, 99093).status_code == 200
     assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 200
     conn = get_db()
@@ -11276,13 +11293,7 @@ def test_payroll_bank_file_is_binary_csv(client):
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99014
-    created = client.post('/api/payroll-runs', json={'month': 11, 'year': 2097})
-    assert created.status_code == 201, created.get_json()
-    conn = get_db()
-    run_id = conn.execute(
-        "SELECT run_id FROM payroll_runs WHERE month = 11 AND year = 2097"
-    ).fetchone()[0]
-    conn.close()
+    run_id = _queue_payroll_run(client, 11, 2097)
     assert _payroll_submit_and_approve(client, run_id, 99094).status_code == 200
     assert client.post(f'/api/payroll-runs/{run_id}/finalize').status_code == 200
 
@@ -11314,9 +11325,7 @@ def test_payroll_maker_checker_blocks_direct_and_self_approval(client):
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99095
-    created = client.post('/api/payroll-runs', json={'month': 10, 'year': 2096})
-    assert created.status_code == 201, created.get_json()
-    rid = created.get_json()['run_id']
+    rid = _queue_payroll_run(client, 10, 2096)
 
     assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 409
     assert client.post(f'/api/payroll-runs/{rid}/submit').status_code == 200
@@ -11359,23 +11368,388 @@ def test_payroll_adjustment_run_must_reference_finalized_run(client):
         sess['name'] = 'Admin'
         sess['role'] = 'Admin'
         sess['session_id'] = 99098
-    original = client.post('/api/payroll-runs', json={'month': 9, 'year': 2095})
-    assert original.status_code == 201, original.get_json()
-    original_id = original.get_json()['run_id']
+    original_id = _queue_payroll_run(client, 9, 2095)
     assert _payroll_submit_and_approve(client, original_id, 99099).status_code == 200
     assert client.post(f'/api/payroll-runs/{original_id}/finalize').status_code == 200
 
     adjustment = client.post('/api/payroll-runs', json={
         'month': 10, 'year': 2095, 'adjustment_of_run_id': original_id,
     })
-    assert adjustment.status_code == 201, adjustment.get_json()
+    assert adjustment.status_code == 202, adjustment.get_json()
+    adjustment_id = adjustment.get_json()['run_id']
+    processed = client.post(f'/api/payroll-runs/{adjustment_id}/run')
+    assert processed.status_code in (200, 409), processed.get_json()
     conn = get_db()
     row = conn.execute(
         "SELECT adjustment_of_run_id, status FROM payroll_runs WHERE run_id = ?",
-        [adjustment.get_json()['run_id']],
+        [adjustment_id],
     ).fetchone()
     conn.close()
     assert row == (original_id, 'Draft')
+
+
+# ── Payroll rates and item calculation (FR-PAY-02/03/04/05) ───────────
+
+def _make_payroll_employee(emp_id, basic=40000, hra=10000, department='Engineering'):
+    conn = get_db()
+    try:
+        if conn.execute("SELECT 1 FROM users WHERE emp_id = ?", [emp_id]).fetchone():
+            user_exists = True
+        else:
+            user_exists = False
+            conn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department, status) "
+                "VALUES (?, ?, ?, ?, 'Employee', ?, 'Active')",
+                [emp_id, f'Payroll Test {emp_id}', f'{emp_id.lower()}@company.test',
+                 hash_password('pass123'), department],
+            )
+        structure = conn.execute(
+            "SELECT 1 FROM salary_structures WHERE emp_id = ?", [emp_id]
+        ).fetchone()
+        if not structure:
+            sid = _next_generated_id(conn, 'salary_structures', 'struct_id')
+            conn.execute(
+                "INSERT INTO salary_structures (struct_id, emp_id, basic, hra, allowances, deductions, effective_from) "
+                "VALUES (?, ?, ?, ?, 0, 0, DATE '2020-01-01')",
+                [sid, emp_id, basic, hra],
+            )
+    finally:
+        conn.close()
+
+
+def _create_approved_claim(client, emp_id, session_id, cat_id, amount, description='test claim'):
+    with client.session_transaction() as sess:
+        sess['emp_id'] = emp_id
+        sess['name'] = f'Claimant {emp_id}'
+        sess['role'] = 'Employee'
+        sess['department'] = 'Engineering'
+        sess['session_id'] = session_id
+    created = client.post('/api/expenses', json={
+        'cat_id': cat_id, 'amount': amount, 'description': description,
+    })
+    assert created.status_code == 201, created.get_json()
+    claim_id = (created.get_json() or {}).get('id')
+    if claim_id is None:
+        conn = get_db()
+        try:
+            claim_id = conn.execute(
+                "SELECT claim_id FROM expense_claims WHERE emp_id = ? ORDER BY claim_id DESC LIMIT 1",
+                [emp_id],
+            ).fetchone()[0]
+        finally:
+            conn.close()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'EMP001'
+        sess['name'] = 'Admin'
+        sess['role'] = 'Admin'
+        sess['session_id'] = session_id + 1
+    approved = client.put(f'/api/expenses/{claim_id}/status', json={'status': 'Approved'})
+    assert approved.status_code == 200, approved.get_json()
+    return claim_id
+
+
+def _restore_payroll_rate_baseline():
+    """Drop every test-created rate version and re-open the seeded baseline.
+
+    Payroll tests must not depend on the order they run in: a leaked
+    open-ended test version (zero-rate TDS) would silently zero every later
+    run's tax, and the failure would look like a calculation bug.
+    """
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM payroll_rates WHERE effective_from > DATE '2000-01-01'"
+        )
+        conn.execute(
+            "UPDATE payroll_rates SET effective_to = NULL "
+            "WHERE effective_from = DATE '2000-01-01'"
+        )
+    finally:
+        conn.close()
+
+
+def test_payroll_rates_are_versioned_effective_dated_and_audited(client):
+    """FR-PAY-03: versions apply all-or-nothing; an overlap is refused."""
+    import payroll_engine
+
+    _restore_payroll_rate_baseline()
+    _set_admin_session(client, 99150)
+    before = client.get('/api/payroll-rates')
+    assert before.status_code == 200
+    baseline = before.get_json()
+    assert baseline, 'the compat baseline must be seeded'
+
+    # A new open-ended version effective in the future.
+    created = client.post('/api/payroll-rates', json={
+        'effective_from': '2027-04-01',
+        'pf_rate': 0.13, 'pf_max': 2000, 'esi_rate': 0.008, 'esi_max': 22000,
+        'pt_amount': 250, 'pt_threshold': 12000,
+        'tds_slabs': [{'from_amount': 0, 'rate': 0}, {'from_amount': 400000, 'rate': 0.1}],
+        'note': 'unit test version',
+    })
+    assert created.status_code == 201, created.get_json()
+    version_id = created.get_json()['version_id']
+
+    conn = get_db()
+    try:
+        rates = payroll_engine.rates_on(conn, datetime(2027, 5, 1).date())
+        assert rates.version_id == version_id
+        assert rates.pf_rate == pytest.approx(0.13)
+        # The baseline is still in force for dates before the version.
+        before_rates = payroll_engine.rates_on(conn, datetime(2027, 3, 31).date())
+        assert before_rates.version_id != version_id
+        assert before_rates.pf_rate == pytest.approx(0.12)
+    finally:
+        conn.close()
+
+    # An overlapping version is refused with 409, not silently applied.
+    overlapping = client.post('/api/payroll-rates', json={
+        'effective_from': '2027-02-01',
+        'pf_rate': 0.12, 'pf_max': 1800, 'esi_rate': 0.0075, 'esi_max': 21000,
+        'pt_amount': 200, 'pt_threshold': 10000,
+        'tds_slabs': [{'from_amount': 0, 'rate': 0}],
+    })
+    assert overlapping.status_code == 409
+
+    # An invalid slab table is refused with 400.
+    bad = client.post('/api/payroll-rates', json={
+        'effective_from': '2028-01-01',
+        'pf_rate': 0.12, 'pf_max': 1800, 'esi_rate': 0.0075, 'esi_max': 21000,
+        'pt_amount': 200, 'pt_threshold': 10000,
+        'tds_slabs': [{'from_amount': 100000, 'rate': 0.1}],
+    })
+    assert bad.status_code == 400
+
+    # Hermetic: drop the test version and re-open the baseline so later
+    # tests still resolve a rate for future periods.
+    _restore_payroll_rate_baseline()
+
+
+def test_payroll_rates_audit_row_records_who_and_what(client):
+    _restore_payroll_rate_baseline()
+    _set_admin_session(client, 99151)
+    created = client.post('/api/payroll-rates', json={
+        'effective_from': '2027-06-01',
+        'pf_rate': 0.12, 'pf_max': 1800, 'esi_rate': 0.0075, 'esi_max': 21000,
+        'pt_amount': 200, 'pt_threshold': 10000,
+        'tds_slabs': [{'from_amount': 0, 'rate': 0}],
+        'note': 'audit assertion',
+    })
+    assert created.status_code == 201, created.get_json()
+    try:
+        conn = get_db()
+        try:
+            # `emp_id` is the session identity that made the change; `actor`
+            # is the human-readable name (same convention as every audit row).
+            row = conn.execute(
+                "SELECT emp_id, actor, entity, entity_id FROM audit_log "
+                "WHERE action = 'PAYROLL_RATES_CREATE' ORDER BY log_id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row and row[0] == 'EMP001' and row[2] == 'payroll_rates'
+    finally:
+        # Cleanup in a `finally`: a failed assertion must not leave an
+        # open-ended zero-rate version behind for every later payroll test.
+        _restore_payroll_rate_baseline()
+
+
+def test_payroll_run_status_flow_and_progress_poll(client):
+    """FR-PAY-05: the POST enqueues; the worker processes; the poll reports it."""
+    _make_payroll_employee('PAYRL01', basic=40000, hra=10000)
+    _set_admin_session(client, 99152)
+    response = client.post('/api/payroll-runs', json={'month': 3, 'year': 2092})
+    assert response.status_code == 202, response.get_json()
+    body = response.get_json()
+    assert body['status'] == 'Queued'
+    assert body['job_id'] and body['poll'].endswith(str(body['job_id']))
+
+    job = client.get(f"/api/payroll-run-jobs/{body['job_id']}")
+    assert job.status_code == 200
+    assert job.get_json()['employees_total'] >= 1
+
+    # The scheduler may or may not have processed it; the admin retry path is
+    # idempotent either way.
+    processed = client.post(f"/api/payroll-runs/{body['run_id']}/run")
+    assert processed.status_code in (200, 409)
+
+    job = client.get(f"/api/payroll-run-jobs/{body['job_id']}").get_json()
+    assert job['status'] == 'completed'
+    assert job['employees_done'] == job['employees_total']
+
+    conn = get_db()
+    try:
+        status = conn.execute(
+            "SELECT status FROM payroll_runs WHERE run_id = ?", [body['run_id']]
+        ).fetchone()[0]
+        items = conn.execute(
+            "SELECT COUNT(*) FROM payroll_items WHERE run_id = ?", [body['run_id']]
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert status == 'Draft'
+    assert items >= 1
+
+    # Duplicate (month, year) is refused.
+    duplicate = client.post('/api/payroll-runs', json={'month': 3, 'year': 2092})
+    assert duplicate.status_code == 409
+
+
+def test_payroll_item_tds_lop_and_reimbursements_are_written(client):
+    """FR-PAY-04: the columns exist and are now actually written."""
+    import working_days
+
+    _restore_payroll_rate_baseline()
+    emp_id = 'PAYRL02'
+    _make_payroll_employee(emp_id, basic=50000, hra=20000)
+    conn = get_db()
+    try:
+        cur = conn.execute("SELECT COALESCE(MAX(attendance_id), 0) + 1 FROM attendance_days").fetchone()[0]
+        for offset, status in enumerate(['Absent', 'Half-day']):
+            conn.execute(
+                "INSERT INTO attendance_days (attendance_id, emp_id, attendance_date, status, source) "
+                "VALUES (?, ?, ?, ?, 'test')",
+                [cur + offset, emp_id, datetime(2092, 4, 3 + offset).date(), status],
+            )
+    finally:
+        conn.close()
+
+    cat = None
+    conn = get_db()
+    try:
+        cat = conn.execute("SELECT cat_id FROM expense_categories ORDER BY cat_id LIMIT 1").fetchone()[0]
+    finally:
+        conn.close()
+    claim_id = _create_approved_claim(client, emp_id, 99153, cat, 750.00, 'reimburse me')
+
+    rid = _queue_payroll_run(client, 4, 2092)
+    conn = get_db()
+    try:
+        item = conn.execute(
+            "SELECT gross_salary, pf, esi, pt, tds, lop_amount, reimbursements, "
+            "deductions_total, net_salary "
+            "FROM payroll_items WHERE run_id = ? AND emp_id = ?",
+            [rid, emp_id],
+        ).fetchone()
+        claim = conn.execute(
+            "SELECT reimbursed_in_run_id, status FROM expense_claims WHERE claim_id = ?",
+            [claim_id],
+        ).fetchone()
+        expected_wd = working_days.count_working_days_in_range(
+            conn, emp_id, datetime(2092, 4, 1).date(), datetime(2092, 4, 30).date())
+    finally:
+        conn.close()
+
+    gross = 70000.00
+    assert float(item[0]) == pytest.approx(gross, abs=0.01)
+    assert float(item[4]) > 0            # TDS is withheld, not zero-defaulted
+    expected_lop = round(gross / expected_wd * 1.5, 2)   # 1 Absent + 1 Half-day
+    assert float(item[5]) == pytest.approx(expected_lop, abs=0.01)
+    assert float(item[6]) == pytest.approx(750.00, abs=0.01)
+    assert float(item[7]) == pytest.approx(
+        float(item[1]) + float(item[2]) + float(item[3]) + float(item[4]), abs=0.01)
+    expected_net = gross - float(item[7]) - float(item[5]) + float(item[6])
+    assert float(item[8]) == pytest.approx(expected_net, abs=0.01)
+    assert claim[0] == rid
+    assert claim[1] == 'Approved'        # still unpaid until the run finalizes
+
+    # Finalize: the run's reimbursements are paid in the same transaction.
+    assert _payroll_submit_and_approve(client, rid, 99154).status_code == 200
+    assert client.post(f'/api/payroll-runs/{rid}/finalize').status_code == 200
+    conn = get_db()
+    try:
+        assert conn.execute(
+            "SELECT status FROM expense_claims WHERE claim_id = ?", [claim_id]
+        ).fetchone()[0] == 'Paid'
+    finally:
+        conn.close()
+
+    # The next run does not reimburse the claim again.
+    rid2 = _queue_payroll_run(client, 5, 2092)
+    conn = get_db()
+    try:
+        assert float(conn.execute(
+            "SELECT reimbursements FROM payroll_items WHERE run_id = ? AND emp_id = ?",
+            [rid2, emp_id],
+        ).fetchone()[0]) == pytest.approx(0.0, abs=0.01)
+    finally:
+        conn.close()
+
+
+def test_payroll_preview_matches_the_run_and_writes_nothing(client):
+    """FR-PAY-02: one function — the preview and the run cannot disagree."""
+    emp_id = 'PAYRL03'
+    _make_payroll_employee(emp_id, basic=60000, hra=20000)
+    _set_admin_session(client, 99155)
+    before = client.get('/api/payroll-runs').get_json()
+    preview = client.post('/api/salary-structures/preview', json={
+        'emp_id': emp_id, 'basic': 60000, 'hra': 20000,
+        'allowances': 0, 'deductions': 0, 'month': 6, 'year': 2092,
+    })
+    assert preview.status_code == 200, preview.get_json()
+    body = preview.get_json()
+    assert body['source'] == 'preview'
+    assert body['working_days_in_period'] >= 20
+    assert client.get('/api/payroll-runs').get_json() == before  # nothing written
+
+    rid = _queue_payroll_run(client, 6, 2092)
+    conn = get_db()
+    try:
+        item = conn.execute(
+            "SELECT gross_salary, tds, lop_amount, reimbursements, net_salary "
+            "FROM payroll_items WHERE run_id = ? AND emp_id = ?",
+            [rid, emp_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    assert float(item[0]) == pytest.approx(body['gross'], abs=0.01)
+    assert float(item[1]) == pytest.approx(body['tds'], abs=0.01)
+    assert float(item[2]) == pytest.approx(body['lop_amount'], abs=0.01)
+    assert float(item[3]) == pytest.approx(body['reimbursements'], abs=0.01)
+    assert float(item[4]) == pytest.approx(body['net'], abs=0.01)
+
+
+def test_hr_can_read_payroll_but_cannot_write(client):
+    """FR-PAY-01: HR has read access; every write stays Finance/Admin."""
+    conn = get_db()
+    try:
+        if not conn.execute("SELECT 1 FROM users WHERE emp_id = 'PAYRLHR'").fetchone():
+            conn.execute(
+                "INSERT INTO users (emp_id, name, email, password, role, department, status) "
+                "VALUES ('PAYRLHR', 'HR Reader', 'payrlhr@company.test', ?, 'HR', 'HR', 'Active')",
+                [hash_password('pass123')],
+            )
+    finally:
+        conn.close()
+    with client.session_transaction() as sess:
+        sess['emp_id'] = 'PAYRLHR'
+        sess['name'] = 'HR Reader'
+        sess['role'] = 'HR'
+        sess['department'] = 'HR'
+        sess['session_id'] = 99156
+    assert client.get('/api/payroll-runs').status_code == 200
+    assert client.get('/api/salary-structures').status_code == 200
+    assert client.get('/api/payroll-rates').status_code == 200
+    preview = client.post('/api/salary-structures/preview', json={
+        'emp_id': 'EMP001', 'basic': 1000, 'hra': 0,
+        'month': 7, 'year': 2092,
+    })
+    assert preview.status_code == 200
+    assert client.post('/api/payroll-runs', json={'month': 7, 'year': 2092}).status_code == 403
+    assert client.post('/api/payroll-rates', json={
+        'effective_from': '2027-01-01',
+        'pf_rate': 0.12, 'pf_max': 1800, 'esi_rate': 0.0075, 'esi_max': 21000,
+        'pt_amount': 200, 'pt_threshold': 10000,
+        'tds_slabs': [{'from_amount': 0, 'rate': 0}],
+    }).status_code == 403
+    assert client.post('/api/salary-structures', json={
+        'emp_id': 'EMP001', 'basic': 1000,
+    }).status_code == 403
+    nav = client.get('/api/navigation').get_json()
+    labels = [entry.get('label') for entry in nav.get('navigation', [])]
+    for entry in nav.get('navigation', []):
+        labels.extend(child.get('label') for child in entry.get('children', ()))
+    assert 'Payroll' in labels
 
 
 # ── Attendance finalisation (Phase 4 / FR-JOB-01) ─────────────────────
