@@ -1,31 +1,73 @@
+databases:
+  - name: hrms-postgres
+    databaseName: hrms
+    user: hrms
+    ipAllowList: []
+
+  - name: hrms-redis
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
+
 services:
   - type: web
     name: hrms-portal
-    runtime: python
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: sh -c 'alembic -c migrations/alembic.ini upgrade head && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120'
+    runtime: docker
+    dockerContext: .
+    dockerfilePath: Dockerfile
     envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: LOG_LEVEL
+        value: "WARNING"
+      - key: SECRET_KEY
+        generateValue: true
       - key: APP_DB
         value: postgres
       - key: APP_DB_SCHEMA
         value: public
       - key: DATABASE_URL
         sync: false
+        # Set this manually from the hrms-postgres service's connection string
+        # in the Render dashboard. Format: postgresql+psycopg://USER:PASS@HOST:5432/DB
       - key: REDIS_URL
         sync: false
-      - key: FLASK_DEBUG
-        value: "0"
-      - key: FLASK_ENV
-        value: "production"
-      - key: SECRET_KEY
+        # Set this manually from the hrms-redis service's connection string
+      - key: S3_ENDPOINT_URL
+        value: ""
+      - key: S3_ACCESS_KEY_ID
         generateValue: true
-      - key: LOG_LEVEL
-        value: "WARNING"
-      - key: PYTHON_VERSION
-        value: "3.12"
-    healthCheckPath: /login
+      - key: S3_SECRET_ACCESS_KEY
+        generateValue: true
+      - key: S3_BUCKET
+        value: hrms
+      - key: S3_REGION
+        value: us-east-1
+      - key: S3_PRESIGNED_EXPIRY
+        value: "3600"
+      - key: SMTP_HOST
+        value: ""
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        value: ""
+      - key: SMTP_PASS
+        value: ""
+      - key: EMAIL_FROM
+        value: noreply@hrms.com
+      - key: SMTP_TIMEOUT_SECONDS
+        value: "15"
+      - key: ANONYMISATION_SALT
+        generateValue: true
+      - key: HRMS_ALLOW_DEMO_SEED
+        value: "0"
+    envVarsFromServices:
+      - service: hrms-redis
+        type: redis
+    healthCheckPath: /app/
     autoDeploy: true
     disk:
-      name: data
+      name: hrms-data
       mountPath: /data
       sizeGB: 1

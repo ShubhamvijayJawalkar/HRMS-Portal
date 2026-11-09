@@ -694,12 +694,13 @@ def test_large_leave_export_polls_then_opens_download(page):
 
 def test_can_submit_regularization(page):
     from datetime import date, timedelta
-    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
     _login(page, 'EMP002', 'pass123')
     page.wait_for_timeout(5000)
     page.goto(BASE_URL + '/regularization', wait_until='commit')
     page.wait_for_timeout(2000)
-    page.fill('#regDate', tomorrow)
+    page.fill('#regDate', yesterday)
+    page.fill('#regLoginTime', '09:30')
     page.fill('#regReason', 'Test regularization request')
     with page.expect_response(lambda r: r.url.endswith('/api/regularization') and r.request.method == 'POST') as resp:
         page.click('button[type="submit"]')
@@ -707,6 +708,17 @@ def test_can_submit_regularization(page):
     page.wait_for_timeout(2000)
     msg = page.text_content('#regMsg')
     assert 'submitted' in msg.lower(), f'Expected success message, got "{msg}"'
+    # Clean up the pending request so it doesn't conflict with later tests.
+    from app import get_db
+    conn = get_db()
+    try:
+        conn.execute(
+            "DELETE FROM regularization_requests WHERE emp_id = 'EMP002' AND request_date = ? AND reason = 'Test regularization request'",
+            [yesterday],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def test_can_apply_leave(page):
     from datetime import date, timedelta
@@ -1723,6 +1735,7 @@ def test_react_regularization_requires_a_reason_and_reports_refusals(page):
 
         # Server-side: today's date already has a Pending request.
         page.locator('#r-reason').fill(f'{_UI08_MARK} duplicate')
+        page.locator('#r-login-time').fill('09:30')
         with page.expect_response(
             lambda r: '/api/regularization' in r.url and r.request.method == 'POST',
             timeout=20000,
@@ -1734,9 +1747,10 @@ def test_react_regularization_requires_a_reason_and_reports_refusals(page):
             assert page.locator('.state--validation').get_attribute('role') == 'alert'
 
         # A free date succeeds.
-        free = (datetime.now().date() + timedelta(days=40 + _UI08_OFFSET)).isoformat()
+        free = (datetime.now().date() - timedelta(days=1)).isoformat()
         page.locator('#r-date').fill(free)
         page.locator('#r-reason').fill(f'{_UI08_MARK} forgot to punch in')
+        page.locator('#r-login-time').fill('09:30')
         with page.expect_response(
             lambda r: '/api/regularization' in r.url and r.request.method == 'POST',
             timeout=20000,

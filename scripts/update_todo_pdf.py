@@ -1545,50 +1545,8 @@ _NEXT_STEPS = {
     # FR-DOC-03 is IMPLEMENTED (presigned URL for downloads + delete from object storage)
     # FR-EXP-01 is IMPLEMENTED (admin CRUD, audit trail and claim reference guard).
     # FR-ONB-04 is IMPLEMENTED (inherits completed FR-DOC-02)
-    'FR-PAY-01': 'Grant HR read access to the payroll and salary routes (read-only, module '
-                 '`payroll`) and land FR-PAY-03 so there is a rates surface to read.',
-    'FR-PAY-02': 'Add a preview endpoint that calls the same calculation function as run '
-                 'creation — the "one function, not two" rule of Appendix A-07.',
-    'FR-PAY-03': 'Create a `payroll_rates` table (effective-dated, versioned), move the seven '
-                 'literals out of `calc_payroll_item`, and add an admin screen for them.',
-    'FR-PAY-04': 'Write `tds` from configured slabs, `lop_amount` from the FR-LEA-09 '
-                 'working-day figure and `reimbursements` from approved claims, then assert '
-                 'all three in a payroll test.',
-    'FR-PAY-05': 'Add a partial unique index on (month, year) where status <> '
-                 "'Cancelled', and move run creation to a background job with progress to poll.",
-    'FR-REG-02': 'Reject a reason-only regularization request with a 400 unless a corrected '
-                 'time is supplied.',
-    'FR-REG-04': 'Add `/api/regularization/export` returning .xlsx, reusing the leave-export '
-                 'writer.',
-    'FR-RPT-01': 'Make every admin/HR report path read the same department parameter, and add '
-                 'a test that the filter is applied in all of them.',
-    'FR-RPT-02': 'Queue large exports as jobs and return 202 with a job id, as for FR-LEA-03.',
-    'FR-TKT-01': 'Move the per-priority SLA targets into configuration and add subcategories '
-                 'with an admin picker.',
-    'FR-TKT-02': 'Scope the list to a matching department for non-admin viewers and notify '
-                 'Super Admin when a ticket is created.',
-    'FR-USR-02': 'Seed `leave_policy_assignments` from grade and location at user creation '
-                 'instead of every new employee resolving to the default matrix.',
-    'FR-USR-13': 'Declare an explicit field allow-list for `/api/profile` and validate against '
-                 'it, so the boundary is data rather than implied by the handler.',
-    'FR-USR-14': 'Rotate the session id on password change and revoke the old one, so a '
-                 'stolen cookie dies with the old password.',
     # ── Low ─────────────────────────────────────────────────────────────
-    'FR-AUTH-13': 'Require a recent re-authentication for a credential read and write the '
-                 'audit row the SRS names.',
-    'FR-USR-08': 'Add the metadata endpoint and the async CSV export, and render the last 50 '
-                 'sessions on the admin user detail.',
     # ── Stretch ─────────────────────────────────────────────────────────
-    'FR-ANL-02': 'Land FR-ANL-04 first, then store each computed score alongside the weights '
-                 'that produced it.',
-    'FR-ANL-04': 'Move the four weights into a configuration table read by the scorer, and '
-                 'stamp the score with the weights used.',
-    'FR-JOB-03': 'Create the `review_cycles` row the job opens and register the quarterly '
-                 'scheduler job next to the monthly accrual one.',
-    'FR-NOT-03': 'Configure an SMTP provider and verify it with `scripts/check_smtp.py`; the '
-                 'outbox handler already consults the preference, so nothing else changes.',
-    'FR-PAY-09': 'Create `review_cycles`, group `performance_reviews` by cycle in the '
-                 'progress query, and let FR-JOB-03 open the next one.',
 }
 
 # Requirements explicitly deferred by product decision are not development

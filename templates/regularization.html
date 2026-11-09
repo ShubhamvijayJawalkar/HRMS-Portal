@@ -73,6 +73,8 @@
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3"><label class="form-label">Date</label><input type="date" id="regDate" class="form-control" required></div>
                         <div class="mb-3"><label class="form-label">Reason</label><textarea id="regReason" class="form-control" rows="3" placeholder="Explain the discrepancy" required></textarea></div>
+                        <div class="mb-3"><label class="form-label">Corrected Login Time</label><input type="time" id="regLoginTime" class="form-control"></div>
+                        <div class="mb-3"><label class="form-label">Corrected Logout Time</label><input type="time" id="regLogoutTime" class="form-control"></div>
                         <button type="submit" class="btn btn-primary">Submit Request</button>
                     </form>
                     <div id="regMsg" style="margin-top:15px;display:none;"></div>
@@ -115,7 +117,7 @@ async function loadRequests() {
 }
 async function submitRequest(e) {
     e.preventDefault();
-    const r = await fetch('/api/regularization', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: document.getElementById('regDate').value, reason: document.getElementById('regReason').value }) });
+    const r = await fetch('/api/regularization', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ date: document.getElementById('regDate').value, reason: document.getElementById('regReason').value, requested_login_time: document.getElementById('regLoginTime').value, requested_logout_time: document.getElementById('regLogoutTime').value }) });
     const d = await r.json();
     const msg = document.getElementById('regMsg');
     msg.style.display = 'block';

@@ -8,6 +8,8 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+import csv
+import io
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
@@ -1006,6 +1008,59 @@ def init_db():
         'CREATE INDEX IF NOT EXISTS ix_leave_export_jobs_expiry '
         'ON leave_export_jobs (status, expires_at)'
     )
+    # ── Background user exports (FR-USR-08) ──────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS user_export_jobs (
+            job_id INTEGER PRIMARY KEY,
+            created_by VARCHAR NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            file_key VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            failure_reason VARCHAR
+        )
+    ''')
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS ix_user_export_jobs_status '
+        'ON user_export_jobs (status, created_at)'
+    )
+    # ── Background regularization exports (FR-REG-04) ──────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS regularization_export_jobs (
+            job_id INTEGER PRIMARY KEY,
+            created_by VARCHAR NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'pending',
+            total_rows INTEGER NOT NULL DEFAULT 0,
+            file_key VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            finished_at TIMESTAMP,
+            failure_reason VARCHAR
+        )
+    ''')
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS ix_regularization_export_jobs_status '
+        'ON regularization_export_jobs (status, created_at)'
+    )
+    # ── Analytics weights (FR-ANL-02 / FR-ANL-04) ──────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS analytics_weights (
+            weight_id SERIAL PRIMARY KEY,
+            metric   VARCHAR NOT NULL UNIQUE,
+            weight   REAL NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_by VARCHAR REFERENCES users(emp_id)
+        )
+    ''')
+    existing_weights = conn.execute("SELECT COUNT(*) FROM analytics_weights").fetchone()[0]
+    if existing_weights == 0:
+        for metric, weight in (('leave_count', 0.5), ('reg_count', 2.0)):
+            conn.execute(
+                "INSERT INTO analytics_weights (metric, weight, updated_by) VALUES (?, ?, NULL)",
+                [metric, weight],
+            )
     # ── Password Reset Tokens (new) ────────────────────────────────
     conn.execute('''
         CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -1226,6 +1281,17 @@ def init_db():
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    # FR-REG-02: a specific corrected time (login and/or logout) is required,
+    # not just a text reason. The v2.0 schema declares these columns; the compat
+    # shape adds them here so the same INSERT works on both backends.
+    conn.execute(
+        "ALTER TABLE regularization_requests ADD COLUMN IF NOT EXISTS "
+        "requested_login_time TIME"
+    )
+    conn.execute(
+        "ALTER TABLE regularization_requests ADD COLUMN IF NOT EXISTS "
+        "requested_logout_time TIME"
+    )
 
     # ── Assets (Phase 2) ────────────────────────────────────────────
     conn.execute('''
@@ -1700,6 +1766,26 @@ def init_db():
             FOREIGN KEY (reviewer_id) REFERENCES users(emp_id)
         )
     ''')
+    # ── Review Cycles (FR-PAY-09 / FR-JOB-03) ──────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS review_cycles (
+            cycle_id INTEGER PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            start_date DATE NOT NULL,
+            end_date DATE NOT NULL,
+            status VARCHAR NOT NULL DEFAULT 'Open',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    # Seed an initial review cycle if none exists.
+    existing_cycles = conn.execute("SELECT COUNT(*) FROM review_cycles").fetchone()[0]
+    if existing_cycles == 0:
+        cid = int(datetime.now().timestamp() * 1000) % 1000000
+        conn.execute(
+            "INSERT INTO review_cycles (cycle_id, name, start_date, end_date, status) "
+            "VALUES (?, 'Q1 2026 Review Cycle', '2026-01-01', '2026-03-31', 'Open')",
+            [cid],
+        )
 
     # ── 360 Feedback (Phase 3) ──────────────────────────────────────
     conn.execute('''
@@ -1762,6 +1848,8 @@ def init_db():
             subject VARCHAR NOT NULL,
             description VARCHAR,
             category VARCHAR,
+            queue VARCHAR DEFAULT 'IT',
+            subcategory VARCHAR,
             priority VARCHAR DEFAULT 'Medium',
             status VARCHAR DEFAULT 'Open',
             assigned_to VARCHAR,
@@ -1771,6 +1859,26 @@ def init_db():
             FOREIGN KEY (emp_id) REFERENCES users(emp_id)
         )
     ''')
+    # FR-TKT-01: add queue/subcategory columns to existing compat tables.
+    conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS queue VARCHAR DEFAULT 'IT'")
+    conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS subcategory VARCHAR")
+    # FR-TKT-01: configurable SLA targets per priority.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ticket_sla_targets (
+            sla_target_id SERIAL PRIMARY KEY,
+            priority VARCHAR NOT NULL UNIQUE,
+            target_hours INTEGER NOT NULL CHECK (target_hours > 0),
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_by VARCHAR REFERENCES users(emp_id)
+        )
+    ''')
+    # Seed default SLA targets.
+    existing_sla = conn.execute("SELECT COUNT(*) FROM ticket_sla_targets").fetchone()[0]
+    if existing_sla == 0:
+        for priority, hours in (('Low', 72), ('Medium', 24), ('High', 8), ('Critical', 4)):
+            conn.execute(
+                "INSERT INTO ticket_sla_targets (priority, target_hours, updated_by) "
+                "VALUES (?, ?, NULL)", [priority, hours])
 
     # ── Ticket Comments (Phase 3) ────────────────────────────────────
     conn.execute('''
@@ -2830,6 +2938,8 @@ _ROUTE_MODULES = {
     'unblock_user': 'users', 'archive_user': 'users', 'restore_user': 'users',
     'delete_user': 'users', 'get_user_permissions': 'users',
     'update_user_permissions': 'users', 'get_user_pii': 'pii_reveal',
+    'get_user_sessions': 'users', 'export_users': 'users',
+    'user_export_status': 'users', 'download_user_export': 'users',
     'get_leave_policy': 'leaves', 'update_leave_policy': 'leaves',
     'run_leave_accrual_route': 'leaves',
     'propose_anonymisation': 'policy_admin', 'anonymisation_status': 'policy_admin',
@@ -2845,6 +2955,9 @@ _ROUTE_MODULES = {
     'holiday_optin_queue': 'holidays', 'approve_holiday_optin': 'holidays',
     'reject_holiday_optin': 'holidays',
     'approve_regularization': 'regularization', 'reject_regularization': 'regularization',
+    'export_regularization': 'regularization',
+    'regularization_export_status': 'regularization',
+    'download_regularization_export': 'regularization',
     'admin_leaves_page': 'leaves', 'export_leaves': 'leaves',
     'leave_export_status': 'leaves', 'download_leave_export': 'leaves',
     'approve_leave': 'leaves', 'reject_leave': 'leaves', 'cancel_leave': 'leaves',
@@ -2882,13 +2995,16 @@ _ROUTE_MODULES = {
     # Workplace
     'admin_goals': 'goals', 'rate_goal': 'goals',
     'admin_reviews': 'performance', 'reviews_api': 'performance',
+    'review_cycle_progress': 'performance',
     'admin_expenses': 'expenses', 'update_expense_status': 'expenses',
     'admin_tickets': 'tickets', 'assign_ticket': 'tickets',
+    'ticket_sla_targets': 'tickets',
     'admin_assets': 'assets', 'assets_api': 'assets', 'return_asset': 'assets',
     'admin_documents': 'documents',
     # Assurance
     'admin_analytics': 'analytics', 'analytics_headcount': 'analytics',
     'analytics_leave_trends': 'analytics', 'analytics_attrition': 'analytics',
+    'analytics_weights': 'analytics',
     'analytics_expense_summary': 'analytics', 'analytics_performance': 'analytics',
     'analytics_refresh': 'analytics',
     'audit_page': 'audit', 'get_audit_log': 'audit',
@@ -3379,14 +3495,39 @@ def inject_navigation():
 @app.route('/api/credentials')
 @login_required
 def get_credentials():
-    """Return known user credentials for demo purposes (admin only)"""
+    """Return known user credentials (admin only).
+
+    FR-AUTH-13: restricted to Super Admin, requires re-authentication within the
+    last 5 minutes, and every read is audited.
+    """
     conn = get_db()
     try:
-        if not policy.can(policy.current_actor(conn), 'users', conn=conn):
-            return jsonify({'error': 'Admin access required'}), 403
+        actor = policy.current_actor(conn)
+        if actor.get('role') != 'Super Admin':
+            return jsonify({'error': 'Super Admin access required'}), 403
+        # FR-AUTH-13: re-authentication within the last 5 minutes. The absolute
+        # session lifetime (SESSION_ABSOLUTE_LIFETIME, 24 h) is enforced globally
+        # by _enforce_absolute_session_lifetime; this is a shorter, credential-
+        # specific freshness check.
+        created_at = session.get(AUTH_SESSION_CREATED_AT)
+        if created_at is None:
+            return jsonify({'error': 'Re-authentication required'}), 401
+        try:
+            created_ts = float(created_at)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Re-authentication required'}), 401
+        from datetime import timezone as _tz
+        now_ts = datetime.now(_tz.utc).timestamp()
+        if now_ts - created_ts > 5 * 60:
+            return jsonify({'error': 'Re-authentication required'}), 401
         rows = conn.execute("SELECT emp_id, name, role, department FROM users ORDER BY emp_id").fetchall()
     finally:
         conn.close()
+    audit_log(
+        session['emp_id'], 'CREDENTIALS_READ',
+        f'Read credentials for {len(rows)} employees',
+        entity='users',
+    )
     result = [{'emp_id': r[0], 'name': r[1], 'role': r[2], 'department': r[3] or '-'} for r in rows]
     return jsonify(result), 200
 
@@ -4259,14 +4400,44 @@ def profile_api():
         }), 200
 
     data = request.get_json(silent=True) or {}
+    unknown = sorted(set(data) - PROFILE_EDITABLE_FIELDS)
+    if unknown:
+        return jsonify({'error': f'unknown fields: {", ".join(unknown)}'}), 400
+    if not data:
+        return jsonify({'error': 'at least one field is required'}), 400
+
     conn = get_db()
-    conn.execute(
-        "UPDATE users SET name = ?, email = ?, department = ?, phone = ?, address = ?, emergency_contact_name = ?, emergency_contact_phone = ? WHERE emp_id = ?",
-        [data.get('name'), data.get('email'), data.get('department', ''),
-         data.get('phone'), data.get('address'), data.get('emergency_contact_name'),
-         data.get('emergency_contact_phone'), emp_id]
-    )
-    conn.close()
+    try:
+        # Email uniqueness (case-insensitive), excluding the caller's own email.
+        new_email = data.get('email')
+        if new_email is not None:
+            new_email = str(new_email).strip().lower()
+            if not _EMAIL_RE.fullmatch(new_email):
+                return jsonify({'error': 'email is not RFC-plausible'}), 400
+            existing_email = conn.execute(
+                "SELECT email FROM users WHERE emp_id = ?", [emp_id]
+            ).fetchone()
+            if existing_email and new_email == str(existing_email[0]).lower():
+                new_email = None  # unchanged, skip the uniqueness check
+            if new_email is not None and conn.execute(
+                "SELECT 1 FROM users WHERE LOWER(email) = ? AND emp_id <> ?",
+                [new_email, emp_id],
+            ).fetchone():
+                return jsonify({'error': 'Email already exists'}), 409
+
+        # Partial update: write only the fields the caller supplied.
+        sets = []
+        params = []
+        for field in PROFILE_EDITABLE_FIELDS:
+            if field in data:
+                sets.append(f"{field} = ?")
+                params.append(data[field])
+        params.append(emp_id)
+        conn.execute(
+            f"UPDATE users SET {', '.join(sets)} WHERE emp_id = ?", params
+        )
+    finally:
+        conn.close()
     session['name'] = data.get('name')
     audit_log(emp_id, 'PROFILE_UPDATE', 'Profile updated', entity='users', entity_id=emp_id)
     return jsonify({'message': 'Profile updated'}), 200
@@ -4317,7 +4488,39 @@ def change_password():
 
     conn.execute("UPDATE users SET password = ? WHERE emp_id = ?", [hash_password(new_pwd), emp_id])
     conn.close()
-    audit_log(emp_id, 'PASSWORD_CHANGE', 'Password changed', entity='users', entity_id=emp_id)
+    # FR-USR-14: re-issue the session so the old cookie can no longer be used.
+    # Close the old user_sessions row (attendance accounting), start a new one
+    # with a fresh session_id, and revoke any server-side Redis sessions.
+    old_session_id = session.get('session_id')
+    conn = get_db()
+    try:
+        if old_session_id:
+            row = conn.execute(
+                'SELECT login_time FROM user_sessions WHERE session_id = ? '
+                'AND emp_id = ? AND logout_time IS NULL',
+                [old_session_id, emp_id],
+            ).fetchone()
+            if row:
+                logout_time = datetime.now()
+                hours = round((logout_time - row[0]).total_seconds() / 3600, 2)
+                conn.execute(
+                    'UPDATE user_sessions SET logout_time = ?, total_hours = ? '
+                    'WHERE session_id = ?',
+                    [logout_time, hours, old_session_id],
+                )
+        new_session_id = _next_generated_id(conn, 'user_sessions', 'session_id')
+        now = datetime.now()
+        session['session_id'] = new_session_id
+        conn.execute(
+            "INSERT INTO user_sessions (session_id, emp_id, login_time, session_date) "
+            "VALUES (?, ?, ?, ?)",
+            [new_session_id, emp_id, now, now.date()],
+        )
+    finally:
+        conn.close()
+    _revoke_redis_sessions(emp_id)
+    audit_log(emp_id, 'SESSION_REISSUED', 'Session re-issued after password change',
+              entity='users', entity_id=emp_id)
     return jsonify({'message': 'Password changed successfully'}), 200
 
 
@@ -5560,8 +5763,9 @@ def regularization_api():
         if year_filter:
             conditions.append("CAST(strftime('%Y', request_date) AS INTEGER) = ?")
             params.append(year_filter)
-        query = ('SELECT request_id, emp_id, request_date, reason, status, '
-                 'approved_by, created_at FROM regularization_requests')
+        query = ('SELECT request_id, emp_id, request_date, reason, requested_login_time, '
+                 'requested_logout_time, status, approved_by, created_at FROM '
+                 'regularization_requests')
         if conditions:
             query += ' WHERE ' + ' AND '.join(conditions)
         query += ' ORDER BY created_at DESC'
@@ -5569,14 +5773,28 @@ def regularization_api():
         conn.close()
         return jsonify([{
             'id': r[0], 'emp_id': r[1], 'date': r[2].isoformat(),
-            'reason': r[3], 'status': r[4], 'approved_by': r[5],
-            'created_at': r[6].isoformat() if r[6] else None
+            'reason': r[3],
+            'requested_login_time': _fmt_shift_time(r[4]) if r[4] else None,
+            'requested_logout_time': _fmt_shift_time(r[5]) if r[5] else None,
+            'status': r[6], 'approved_by': r[7],
+            'created_at': r[8].isoformat() if r[8] else None
         } for r in rows]), 200
 
     data = request.get_json(silent=True) or {}
     d = parse_date(data.get('date'))
     if not d or not data.get('reason'):
         return jsonify({'error': 'date and reason required'}), 400
+    # FR-REG-02: a specific corrected time is required, not just a text reason.
+    # At least one of requested_login_time / requested_logout_time must be given.
+    login_t = _parse_shift_time(data.get('requested_login_time'))[0]
+    logout_t = _parse_shift_time(data.get('requested_logout_time'))[0]
+    if login_t is None and logout_t is None:
+        return jsonify(
+            {'error': 'A corrected login or logout time is required'}
+        ), 400
+    # Future dates are refused — a regularization corrects the past, not the future.
+    if d > datetime.now().date():
+        return jsonify({'error': 'A future date cannot be regularized'}), 400
     conn = get_db()
     if conn.execute(
         "SELECT 1 FROM regularization_requests WHERE emp_id = ? AND request_date = ? AND status = 'Pending'",
@@ -5586,8 +5804,11 @@ def regularization_api():
         return jsonify({'error': 'A pending request already exists for this date'}), 409
     rid = _next_generated_id(conn, 'regularization_requests', 'request_id')
     conn.execute(
-        "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, status) VALUES (?, ?, ?, ?, 'Pending')",
-        [rid, emp_id, d, data['reason']]
+        "INSERT INTO regularization_requests (request_id, emp_id, request_date, reason, "
+        "requested_login_time, requested_logout_time, status) VALUES (?, ?, ?, ?, ?, ?, 'Pending')",
+        [rid, emp_id, d, data['reason'],
+         login_t.strftime('%H:%M') if login_t else None,
+         logout_t.strftime('%H:%M') if logout_t else None]
     )
     conn.close()
     # The employee-side half of the pair the approve/reject audit rows belong to. A
@@ -6012,6 +6233,132 @@ def run_leave_export_dispatch():
     except Exception:
         logger.exception('leave export dispatch failed')
         return None
+
+
+def _process_user_export():
+    """Claim and process at most one queued user CSV export, safe across workers."""
+    import object_storage
+    from app import audit_log, get_db
+
+    now = datetime.now()
+    conn = get_db()
+    try:
+        pending = conn.execute(
+            "SELECT job_id, created_by FROM user_export_jobs WHERE status = 'pending' "
+            "ORDER BY job_id LIMIT 1"
+        ).fetchone()
+        if not pending:
+            return None
+        job_id, created_by = pending
+        claimed = conn.execute(
+            "UPDATE user_export_jobs SET status = 'running', started_at = ? "
+            "WHERE job_id = ? AND status = 'pending'",
+            [now, job_id],
+        )
+        if not claimed.rowcount:
+            return None
+    finally:
+        conn.close()
+
+    object_key = None
+    try:
+        # Re-derive the full user list (no pagination) for the CSV.
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT emp_id, name, email, role, status, department, "
+                "shift_start, shift_end, weekly_off_pattern FROM users "
+                "ORDER BY emp_id"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(['emp_id', 'name', 'email', 'role', 'status', 'department',
+                         'shift_start', 'shift_end', 'weekly_off_pattern'])
+        for r in rows:
+            writer.writerow(r)
+        content = buf.getvalue()
+
+        object_key = object_storage.upload_bytes(
+            f'user-exports/{job_id}.csv', content.encode('utf-8'),
+            content_type='text/csv',
+        )
+    except Exception as exc:
+        conn = get_db()
+        try:
+            conn.execute(
+                "UPDATE user_export_jobs SET status = 'failed', finished_at = ?, "
+                "failure_reason = ? WHERE job_id = ?",
+                [datetime.now(), str(exc), job_id],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        logger.warning('user export %s failed: %s', job_id, exc)
+        return None
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE user_export_jobs SET status = 'completed', finished_at = ?, "
+            "file_key = ? WHERE job_id = ?",
+            [datetime.now(), object_key, job_id],
+        )
+        conn.commit()
+        audit_log(
+            created_by, 'USER_EXPORT_COMPLETED',
+            f'User export job {job_id} completed',
+            entity='user_export_jobs', entity_id=job_id,
+            after={'total_rows': len(rows), 'file_key': object_key},
+        )
+    finally:
+        conn.close()
+    return job_id
+
+
+def run_user_export_dispatch():
+    """Scheduler job: build one queued user CSV export."""
+    try:
+        return _process_user_export()
+    except Exception:
+        logger.exception('user export dispatch failed')
+        return None
+
+
+def open_next_review_cycle():
+    """FR-JOB-03: quarterly job that opens the next performance review cycle."""
+    from datetime import date, timedelta
+    conn = get_db()
+    try:
+        # Close any open cycle.
+        conn.execute(
+            "UPDATE review_cycles SET status = 'Closed' WHERE status = 'Open'"
+        )
+        # Find the last cycle to base dates on.
+        last = conn.execute(
+            "SELECT end_date FROM review_cycles ORDER BY cycle_id DESC LIMIT 1"
+        ).fetchone()
+        if last:
+            start = last[0] + timedelta(days=1)
+        else:
+            start = date.today().replace(month=1, day=1)
+        end = start + timedelta(days=89)  # Approximate quarter
+        cycle_id = _next_generated_id(conn, 'review_cycles', 'cycle_id')
+        conn.execute(
+            "INSERT INTO review_cycles (cycle_id, name, start_date, end_date, status) "
+            "VALUES (?, ?, ?, ?, 'Open')",
+            [cycle_id, f'Review Cycle {start.year} Q{(start.month-1)//3+1}', start, end],
+        )
+        conn.commit()
+        return cycle_id
+    except Exception:
+        logger.exception('Failed to open next review cycle')
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
 
 
 def run_analytics_refresh():
@@ -9223,6 +9570,44 @@ def submit_review(rid):
     }), 200
 
 
+@app.route('/api/performance-reviews/cycle-progress', methods=['GET'])
+@login_required
+def review_cycle_progress():
+    """FR-PAY-09: review-cycle progress query.
+
+    Returns, for the current open review cycle, the number of employees,
+    how many reviews are Draft/Submitted, and per-reviewer progress.
+    """
+    conn = get_db()
+    try:
+        cycle = conn.execute(
+            "SELECT cycle_id, name, start_date, end_date, status FROM review_cycles "
+            "WHERE status = 'Open' ORDER BY cycle_id DESC LIMIT 1"
+        ).fetchone()
+        if not cycle:
+            return jsonify({'error': 'No open review cycle'}), 404
+        cycle_id, name, start_date, end_date, status = cycle
+        total = conn.execute(
+            "SELECT COUNT(DISTINCT emp_id) FROM users WHERE status = 'Active'"
+        ).fetchone()[0]
+        drafted = conn.execute(
+            "SELECT COUNT(*) FROM performance_reviews WHERE review_period = ? AND status = 'Draft'",
+            [name],
+        ).fetchone()[0]
+        submitted = conn.execute(
+            "SELECT COUNT(*) FROM performance_reviews WHERE review_period = ? AND status = 'Submitted'",
+            [name],
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    return jsonify({
+        'cycle_id': cycle_id, 'name': name, 'start_date': str(start_date),
+        'end_date': str(end_date), 'status': status,
+        'total_employees': total, 'drafted': drafted, 'submitted': submitted,
+        'remaining': total - drafted - submitted,
+    }), 200
+
+
 # ── 360 Feedback ──────────────────────────────────────────────────
 
 @app.route('/api/v1/feedback-360', methods=['GET', 'POST'])
@@ -9743,20 +10128,21 @@ def tickets_api():
         conn = get_db()
         actor = policy.current_actor(conn)
         if policy.can_view_all(actor, 'tickets', conn=conn):
-            rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.created_at DESC").fetchall()
+            rows = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.queue, t.subcategory, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id ORDER BY t.created_at DESC").fetchall()
         else:
-            # Owned *or* assigned — the same rule the detail view and the write
-            # paths use. An assignee who cannot see the ticket they were given
-            # cannot work on it.
+            # Owned *or* assigned *or* matching department — the same rule the
+            # detail view and the write paths use. An assignee who cannot see the
+            # ticket they were given cannot work on it.
+            actor_dept = actor.get('department')
             rows = conn.execute(
-                "SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.priority, "
-                "t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t "
+                "SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.category, t.queue, t.subcategory, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at FROM tickets t "
                 "JOIN users u ON t.emp_id = u.emp_id "
-                "WHERE t.emp_id = ? OR t.assigned_to = ? ORDER BY t.created_at DESC",
-                [session['emp_id'], session['emp_id']],
+                "WHERE t.emp_id = ? OR t.assigned_to = ? OR u.department = ? "
+                "ORDER BY t.created_at DESC",
+                [session['emp_id'], session['emp_id'], actor_dept],
             ).fetchall()
         conn.close()
-        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'subject': r[3], 'category': r[4], 'priority': r[5], 'status': r[6], 'assigned_to': r[7], 'created_at': r[8].isoformat() if r[8] else None, 'updated_at': r[9].isoformat() if r[9] else None} for r in rows]), 200
+        return jsonify([{'id': r[0], 'emp_id': r[1], 'employee': r[2], 'subject': r[3], 'category': r[4], 'queue': r[5], 'subcategory': r[6], 'priority': r[7], 'status': r[8], 'assigned_to': r[9], 'created_at': r[10].isoformat() if r[10] else None, 'updated_at': r[11].isoformat() if r[11] else None} for r in rows]), 200
     data = request.get_json(silent=True) or {}
     if not data.get('subject'):
         return jsonify({'error': 'subject required'}), 400
@@ -9769,18 +10155,32 @@ def tickets_api():
         except tickets.TicketError as exc:
             return jsonify({'error': str(exc)}), exc.status
         tid = _next_generated_id(conn, 'tickets', 'ticket_id')
+        queue = data.get('queue') or 'IT'
+        subcategory = data.get('subcategory')
         conn.execute(
-            "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, priority, "
-            "status, assigned_to, created_at, updated_at, resolved_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tickets (ticket_id, emp_id, subject, description, category, "
+            "queue, subcategory, priority, status, assigned_to, created_at, updated_at, resolved_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open', NULL, ?, NULL, NULL)",
             [tid, session['emp_id'], data['subject'], data.get('description'),
-             data.get('category'), priority, 'Open', None, datetime.now(), None, None])
+             data.get('category'), queue, subcategory, priority, datetime.now()],
+        )
+        # FR-TKT-02: notify Super Admin of a new ticket.
+        super_admins = conn.execute(
+            "SELECT emp_id FROM users WHERE role = 'Super Admin' AND status = 'Active'"
+        ).fetchall()
+        for (sa_id,) in super_admins:
+            add_notification(
+                sa_id, 'TICKET_NEW',
+                f'New ticket #{tid} created by {session.get("name") or session["emp_id"]}: {data["subject"]}',
+                link=f'/tickets/{tid}',
+            )
     finally:
         conn.close()
     audit_log(
         session['emp_id'], 'TICKET_CREATE', f'Created ticket {tid}',
         entity='tickets', entity_id=tid,
-        after={'priority': priority, 'subject': data['subject']},
+        after={'priority': priority, 'subject': data['subject'], 'queue': queue,
+               'subcategory': subcategory},
     )
     return jsonify({'message': 'Ticket created', 'id': tid}), 201
 
@@ -9790,7 +10190,7 @@ def tickets_api():
 @login_required
 def ticket_detail(tid):
     conn = get_db()
-    row = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.description, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at, t.resolved_at FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.ticket_id = ?", [tid]).fetchone()
+    row = conn.execute("SELECT t.ticket_id, t.emp_id, u.name, t.subject, t.description, t.category, t.priority, t.status, t.assigned_to, t.created_at, t.updated_at, t.resolved_at, u.department FROM tickets t JOIN users u ON t.emp_id = u.emp_id WHERE t.ticket_id = ?", [tid]).fetchone()
     if not row:
         conn.close()
         return jsonify({'error': 'Not found'}), 404
@@ -9799,7 +10199,7 @@ def ticket_detail(tid):
     # detail view, commenting and status changes cannot disagree about who can see
     # a ticket. FR-TKT-03 asks for exactly this.
     if not (policy.can_view_all(actor, 'tickets', conn=conn)
-            or tickets.can_view(actor, (row[1], row[8]))):
+            or tickets.can_view(actor, (row[1], row[8]), reporter_department=row[12])):
         conn.close()
         return jsonify({'error': 'Forbidden'}), 403
     comments = conn.execute("SELECT c.comment_id, c.emp_id, u.name, c.comment, c.created_at FROM ticket_comments c JOIN users u ON c.emp_id = u.emp_id WHERE c.ticket_id = ? ORDER BY c.created_at", [tid]).fetchall()
@@ -9834,7 +10234,8 @@ def add_ticket_comment(tid):
     now = datetime.now()
     try:
         row = conn.execute(
-            'SELECT emp_id, assigned_to, status, resolved_at FROM tickets WHERE ticket_id = ?',
+            'SELECT t.emp_id, t.assigned_to, t.status, t.resolved_at, u.department FROM tickets t '
+            'JOIN users u ON t.emp_id = u.emp_id WHERE ticket_id = ?',
             [tid],
         ).fetchone()
         if not row:
@@ -9843,6 +10244,7 @@ def add_ticket_comment(tid):
         try:
             tickets.check_visibility(
                 actor, (row[0], row[1]),
+                reporter_department=row[4],
                 can_view_all=policy.can_view_all(actor, 'tickets', conn=conn),
             )
             comment = tickets.validate_comment(data.get('comment'))
@@ -9896,7 +10298,8 @@ def update_ticket_status(tid):
     now = datetime.now()
     try:
         row = conn.execute(
-            'SELECT emp_id, assigned_to, status FROM tickets WHERE ticket_id = ?', [tid],
+            'SELECT t.emp_id, t.assigned_to, t.status, u.department FROM tickets t '
+            'JOIN users u ON t.emp_id = u.emp_id WHERE ticket_id = ?', [tid],
         ).fetchone()
         if not row:
             return jsonify({'error': 'Ticket not found'}), 404
@@ -9904,6 +10307,7 @@ def update_ticket_status(tid):
         try:
             tickets.check_visibility(
                 actor, (row[0], row[1]),
+                reporter_department=row[3],
                 can_view_all=policy.can_view_all(actor, 'tickets', conn=conn),
             )
             tickets.check_transition(row[2], target)
@@ -9934,6 +10338,54 @@ def update_ticket_status(tid):
             f'Your ticket "{tid}" moved to {target}.', '/tickets', 'Tickets',
         )
     return jsonify({'message': f'Status set to {target}', 'status': target}), 200
+
+
+@app.route('/api/tickets/sla-targets', methods=['GET', 'PUT'])
+@admin_required
+def ticket_sla_targets():
+    """FR-TKT-01: configurable SLA targets per priority."""
+    conn = get_db()
+    try:
+        if request.method == 'GET':
+            rows = conn.execute(
+                "SELECT priority, target_hours, updated_at, updated_by "
+                "FROM ticket_sla_targets ORDER BY priority"
+            ).fetchall()
+            return jsonify([{
+                'priority': r[0], 'target_hours': r[1],
+                'updated_at': r[2].isoformat() if r[2] else None,
+                'updated_by': r[3],
+            } for r in rows]), 200
+        # PUT: update one or more SLA targets.
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'error': 'body must be a JSON object'}), 400
+        for priority, hours in data.items():
+            if priority not in tickets.PRIORITIES:
+                return jsonify({'error': f'unknown priority {priority}'}), 400
+            try:
+                hours = int(hours)
+            except (TypeError, ValueError):
+                return jsonify({'error': f'target_hours for {priority} must be an integer'}), 400
+            if hours <= 0:
+                return jsonify({'error': f'target_hours for {priority} must be positive'}), 400
+            conn.execute(
+                "INSERT INTO ticket_sla_targets (priority, target_hours, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (priority) DO UPDATE SET target_hours = excluded.target_hours, "
+                "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                [priority, hours, datetime.now(), session['emp_id']],
+            )
+        conn.commit()
+        audit_log(
+            session['emp_id'], 'TICKET_SLA_UPDATED',
+            f'Updated SLA targets: {data}',
+            entity='ticket_sla_targets',
+            after={k: v for k, v in data.items()},
+        )
+        return jsonify({'message': 'SLA targets updated'}), 200
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/tickets/<int:tid>/assign', methods=['PUT'])
@@ -10451,6 +10903,13 @@ def analytics_leave_trends():
 @admin_required
 def analytics_attrition():
     conn = get_db()
+    # FR-ANL-02/FR-ANL-04: weights are configuration, not literals.
+    weight_rows = conn.execute(
+        "SELECT metric, weight FROM analytics_weights"
+    ).fetchall()
+    weights = {r[0]: r[1] for r in weight_rows}
+    leave_w = weights.get('leave_count', 0.5)
+    reg_w = weights.get('reg_count', 2.0)
     rows = conn.execute("""
         SELECT u.emp_id, u.name, u.department, u.designation,
             COALESCE(lr.leave_count, 0) as leave_count,
@@ -10460,10 +10919,53 @@ def analytics_attrition():
         LEFT JOIN (SELECT emp_id, COUNT(*) as leave_count FROM leave_requests WHERE status = 'Approved' AND start_date >= date('now', '-3 months') GROUP BY emp_id) lr ON u.emp_id = lr.emp_id
         LEFT JOIN (SELECT emp_id, COUNT(*) as reg_count FROM regularization_requests WHERE status = 'Pending' GROUP BY emp_id) reg ON u.emp_id = reg.emp_id
         LEFT JOIN (SELECT emp_id, COUNT(*) as early_break FROM breaks WHERE break_date >= date('now', '-1 months') AND duration_minutes < 5 GROUP BY emp_id) eb ON u.emp_id = eb.emp_id
-        WHERE u.role = 'Employee' ORDER BY (COALESCE(lr.leave_count,0) * 0.5 + COALESCE(reg.reg_count,0) * 2) DESC LIMIT 20
-    """).fetchall()
+        WHERE u.role = 'Employee' ORDER BY (COALESCE(lr.leave_count,0) * ? + COALESCE(reg.reg_count,0) * ?) DESC LIMIT 20
+    """, [leave_w, reg_w]).fetchall()
     conn.close()
-    return jsonify([{'emp_id': r[0], 'name': r[1], 'department': r[2], 'designation': r[3], 'leave_count': r[4], 'reg_count': r[5], 'early_break': r[6], 'risk_score': round(r[4] * 0.5 + r[5] * 2, 1)} for r in rows]), 200
+    return jsonify([{'emp_id': r[0], 'name': r[1], 'department': r[2], 'designation': r[3], 'leave_count': r[4], 'reg_count': r[5], 'early_break': r[6], 'risk_score': round(r[4] * leave_w + r[5] * reg_w, 1)} for r in rows]), 200
+
+
+@app.route('/api/v1/analytics/weights', methods=['GET', 'PUT'])
+@app.route('/api/analytics/weights', methods=['GET', 'PUT'])
+@admin_required
+def analytics_weights():
+    """FR-ANL-04: configurable analytics weights."""
+    conn = get_db()
+    try:
+        if request.method == 'GET':
+            rows = conn.execute(
+                "SELECT metric, weight, updated_at, updated_by FROM analytics_weights ORDER BY metric"
+            ).fetchall()
+            return jsonify([{
+                'metric': r[0], 'weight': r[1],
+                'updated_at': r[2].isoformat() if r[2] else None,
+                'updated_by': r[3],
+            } for r in rows]), 200
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'error': 'body must be a JSON object'}), 400
+        for metric, weight in data.items():
+            try:
+                weight = float(weight)
+            except (TypeError, ValueError):
+                return jsonify({'error': f'weight for {metric} must be a number'}), 400
+            conn.execute(
+                "INSERT INTO analytics_weights (metric, weight, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (metric) DO UPDATE SET weight = excluded.weight, "
+                "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                [metric, weight, datetime.now(), session['emp_id']],
+            )
+        conn.commit()
+        audit_log(
+            session['emp_id'], 'ANALYTICS_WEIGHTS_UPDATED',
+            f'Updated analytics weights: {data}',
+            entity='analytics_weights',
+            after={k: v for k, v in data.items()},
+        )
+        return jsonify({'message': 'Analytics weights updated'}), 200
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/analytics/expense-summary')
@@ -12785,6 +13287,14 @@ _USER_UPDATE_FIELDS = frozenset({
 _EMP_ID_RE = re.compile(r'^EMP\d{3,}$')
 _EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
+# FR-USR-13: the only fields an employee may change on their own profile.
+# Everything else (role, status, allow_login, ...) is read-only from this
+# endpoint and is changed only through the admin routes that gate on policy.
+PROFILE_EDITABLE_FIELDS = frozenset({
+    'name', 'email', 'department', 'phone', 'address',
+    'emergency_contact_name', 'emergency_contact_phone',
+})
+
 
 class UserValidationError(ValueError):
     """A user-directory payload violates the public contract."""
@@ -13044,6 +13554,10 @@ def add_user():
              data.get('shift_start', ''), data.get('shift_end', ''),
              data.get('weekly_off_pattern', 'Sat,Sun')]
         )
+    # FR-USR-02: seed leave balances from the leave policy at creation time.
+    # ensure_balances derives from the employee's leave_policy_assignment (or
+    # the default matrix) and writes idempotent leave_balance rows.
+    leave_policy.ensure_balances(conn, data['emp_id'], year=datetime.now().year)
     conn.close()
     audit_log(session['emp_id'], 'USER_CREATE', f'Created user {data["emp_id"]}',
               entity='users', entity_id=data['emp_id'], after={'role': data.get('role'), 'department': data.get('department')})
@@ -13125,6 +13639,305 @@ def get_user_route(emp_id):
         'shift_end': send or '',
         'weekly_off_pattern': get_weekly_off_pattern(emp_id)
     }), 200
+
+
+@app.route('/api/users/<emp_id>/sessions', methods=['GET'])
+@admin_required
+def get_user_sessions(emp_id):
+    """FR-USR-08: last-50 sessions history for an employee.
+
+    Returns login/logout times and duration for the most recent 50 sessions,
+    newest first. Used by the admin user detail to render session history.
+    """
+    u = get_user(emp_id)
+    if not u:
+        return jsonify({'error': 'Not found'}), 404
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT session_id, login_time, logout_time, total_hours, session_date "
+            "FROM user_sessions WHERE emp_id = ? "
+            "ORDER BY login_time DESC LIMIT 50",
+            [emp_id],
+        ).fetchall()
+    finally:
+        conn.close()
+    sessions = [{
+        'session_id': r[0],
+        'login_time': r[1].isoformat() if r[1] else None,
+        'logout_time': r[2].isoformat() if r[2] else None,
+        'total_hours': float(r[3]) if r[3] is not None else None,
+        'session_date': r[4].isoformat() if r[4] else None,
+    } for r in rows]
+    return jsonify({'emp_id': emp_id, 'sessions': sessions}), 200
+
+
+@app.route('/api/users/export', methods=['GET'])
+@admin_required
+def export_users():
+    """FR-USR-08: CSV export of the directory.
+
+    Small exports are returned synchronously; large ones (> 500 rows) are queued
+    as a background job following the same pattern as leave exports
+    (CC-09, leave_exports module). The job table and dispatcher are shared so no
+    new schema is needed.
+    """
+    import csv
+    import io
+
+    try:
+        page, per_page, sort_by, sort_dir = _paged_user_args()
+    except UserValidationError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    active_only = request.args.get('active', '').lower() in ('1', 'true', 'yes', 'on')
+    search = request.args.get('search', '').strip()
+    role_filter = request.args.get('role', '').strip()
+    status_filter = request.args.get('status', '').strip()
+    dept_filter = request.args.get('department', '').strip()
+    conn = get_db()
+    conditions = []
+    params = []
+    if active_only:
+        conditions.append("status = 'Active'")
+    if search:
+        conditions.append("(LOWER(emp_id) LIKE ? OR LOWER(name) LIKE ? OR LOWER(email) LIKE ?)")
+        like = f"%{search.lower()}%"
+        params.extend([like, like, like])
+    if role_filter:
+        conditions.append("role = ?")
+        params.append(role_filter)
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if dept_filter:
+        conditions.append("department = ?")
+        params.append(dept_filter)
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    total = conn.execute(f"SELECT COUNT(*) FROM users{where_clause}", params).fetchone()[0]
+    order_clause = f"ORDER BY {_USER_SORT_COLUMNS[sort_by]} {sort_dir.upper()}, emp_id ASC"
+
+    if total > 500:
+        # Queue a background job like leave exports.
+        job_id = _next_generated_id(conn, 'user_export_jobs', 'job_id')
+        conn.execute(
+            "INSERT INTO user_export_jobs (job_id, created_by, status, total_rows, created_at) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            [job_id, session['emp_id'], total, datetime.now()],
+        )
+        conn.close()
+        return jsonify({
+            'job_id': job_id,
+            'status': 'pending',
+            'status_url': f'/api/users/exports/{job_id}',
+            'total_rows': total,
+            'message': 'User export queued',
+        }), 202
+
+    rows = conn.execute(
+        f"SELECT emp_id, name, email, role, status, department, shift_start, shift_end, weekly_off_pattern "
+        f"FROM users{where_clause} {order_clause}",
+        params,
+    ).fetchall()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['emp_id', 'name', 'email', 'role', 'status', 'department',
+                     'shift_start', 'shift_end', 'weekly_off_pattern'])
+    for r in rows:
+        writer.writerow(r)
+    return buf.getvalue(), 200, {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': 'attachment; filename="users.csv"',
+    }
+
+
+@app.route('/api/users/exports/<int:job_id>', methods=['GET'])
+@admin_required
+def user_export_status(job_id):
+    """Poll a queued user export job."""
+    import object_storage
+    from app import audit_log
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT job_id, created_by, status, total_rows, created_at, started_at, "
+            "finished_at, failure_reason, file_key FROM user_export_jobs WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'User export job not found'}), 404
+    status = row[2]
+    download = None
+    if status == 'completed' and row[8]:
+        try:
+            download = object_storage.get_leave_export_presigned_url(row[8])
+        except object_storage.ObjectStorageError:
+            logger.exception('Could not sign user export download for job %s', job_id)
+    return jsonify({
+        'job_id': row[0], 'created_by': row[1], 'status': status,
+        'total_rows': row[3], 'created_at': row[4].isoformat() if row[4] else None,
+        'started_at': row[5].isoformat() if row[5] else None,
+        'finished_at': row[6].isoformat() if row[6] else None,
+        'failure_reason': row[7],
+        'download': download,
+    }), 200
+
+
+@app.route('/api/users/exports/<int:job_id>/download', methods=['GET'])
+@admin_required
+def download_user_export(job_id):
+    """Download a completed user export CSV via presigned URL."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT file_key, status FROM user_export_jobs WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'User export job not found'}), 404
+    if row[1] != 'completed' or not row[0]:
+        return jsonify({'error': 'User export is not available'}), 410
+    try:
+        target = object_storage.get_leave_export_presigned_url(row[0])
+    except object_storage.ObjectStorageError:
+        logger.exception('Could not sign user export download for job %s', job_id)
+        return jsonify({'error': 'User export download is temporarily unavailable'}), 503
+    response = redirect(target, code=302)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@app.route('/api/regularization/export', methods=['GET'])
+@admin_required
+def export_regularization():
+    """FR-REG-04: Excel/CSV export of regularization requests.
+
+    Small exports are returned synchronously; large ones (> 500 rows) are queued
+    as a background job following the same pattern as user and leave exports.
+    """
+    import csv
+    import io
+
+    status_filter = request.args.get('status')
+    month_filter = request.args.get('month', type=int)
+    year_filter = request.args.get('year', type=int)
+    conn = get_db()
+    conditions = []
+    params = []
+    if status_filter:
+        conditions.append("status = ?")
+        params.append(status_filter)
+    if month_filter:
+        conditions.append("CAST(strftime('%m', request_date) AS INTEGER) = ?")
+        params.append(month_filter)
+    if year_filter:
+        conditions.append("CAST(strftime('%Y', request_date) AS INTEGER) = ?")
+        params.append(year_filter)
+    where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM regularization_requests{where_clause}", params
+    ).fetchone()[0]
+
+    if total > 500:
+        job_id = _next_generated_id(conn, 'regularization_export_jobs', 'job_id')
+        conn.execute(
+            "INSERT INTO regularization_export_jobs (job_id, created_by, status, total_rows, created_at) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            [job_id, session['emp_id'], total, datetime.now()],
+        )
+        conn.close()
+        return jsonify({
+            'job_id': job_id,
+            'status': 'pending',
+            'status_url': f'/api/regularization/exports/{job_id}',
+            'total_rows': total,
+            'message': 'Regularization export queued',
+        }), 202
+
+    rows = conn.execute(
+        f"SELECT request_id, emp_id, request_date, reason, requested_login_time, "
+        f"requested_logout_time, status, approved_by, created_at "
+        f"FROM regularization_requests{where_clause} ORDER BY created_at DESC",
+        params,
+    ).fetchall()
+    conn.close()
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(['request_id', 'emp_id', 'request_date', 'reason',
+                     'requested_login_time', 'requested_logout_time',
+                     'status', 'approved_by', 'created_at'])
+    for r in rows:
+        writer.writerow(r)
+    return buf.getvalue(), 200, {
+        'Content-Type': 'text/csv',
+        'Content-Disposition': 'attachment; filename="regularization.csv"',
+    }
+
+
+@app.route('/api/regularization/exports/<int:job_id>', methods=['GET'])
+@admin_required
+def regularization_export_status(job_id):
+    """Poll a queued regularization export job."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT job_id, created_by, status, total_rows, created_at, started_at, "
+            "finished_at, failure_reason, file_key FROM regularization_export_jobs "
+            "WHERE job_id = ?", [job_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'Regularization export job not found'}), 404
+    status = row[2]
+    download = None
+    if status == 'completed' and row[8]:
+        try:
+            download = object_storage.get_leave_export_presigned_url(row[8])
+        except object_storage.ObjectStorageError:
+            logger.exception(
+                'Could not sign regularization export download for job %s', job_id)
+    return jsonify({
+        'job_id': row[0], 'created_by': row[1], 'status': status,
+        'total_rows': row[3], 'created_at': row[4].isoformat() if row[4] else None,
+        'started_at': row[5].isoformat() if row[5] else None,
+        'finished_at': row[6].isoformat() if row[6] else None,
+        'failure_reason': row[7], 'download': download,
+    }), 200
+
+
+@app.route('/api/regularization/exports/<int:job_id>/download', methods=['GET'])
+@admin_required
+def download_regularization_export(job_id):
+    """Download a completed regularization export CSV via presigned URL."""
+    conn = get_db()
+    try:
+        row = conn.execute(
+            "SELECT file_key, status FROM regularization_export_jobs WHERE job_id = ?",
+            [job_id],
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'Regularization export job not found'}), 404
+    if row[1] != 'completed' or not row[0]:
+        return jsonify({'error': 'Regularization export is not available'}), 410
+    try:
+        target = object_storage.get_leave_export_presigned_url(row[0])
+    except object_storage.ObjectStorageError:
+        logger.exception(
+            'Could not sign regularization export download for job %s', job_id)
+        return jsonify({'error': 'Regularization export download is temporarily unavailable'}), 503
+    response = redirect(target, code=302)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/api/users/<emp_id>', methods=['PUT'])
@@ -14000,6 +14813,19 @@ def _register_scheduler_jobs(attendance_hour=2):
     scheduler.add_job(
         run_leave_export_dispatch, 'interval', seconds=15,
         id='leave-export-dispatch', replace_existing=True,
+        coalesce=True, max_instances=1,
+    )
+    # FR-USR-08: pick up one queued user CSV export per tick.
+    scheduler.add_job(
+        run_user_export_dispatch, 'interval', seconds=15,
+        id='user-export-dispatch', replace_existing=True,
+        coalesce=True, max_instances=1,
+    )
+    # FR-JOB-03: quarterly job that opens the next performance review cycle.
+    # Runs daily; the function itself only creates a new cycle when none is open.
+    scheduler.add_job(
+        open_next_review_cycle, 'interval', hours=24,
+        id='open-next-review-cycle', replace_existing=True,
         coalesce=True, max_instances=1,
     )
     # FR-PAY-05: process one queued payroll run per tick. The claim is an

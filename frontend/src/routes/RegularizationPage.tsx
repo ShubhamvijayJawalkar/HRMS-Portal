@@ -28,7 +28,7 @@ export function RegularizationPage() {
   const requests = usePanel<Regularization[]>('/api/regularization');
   const { run, pending } = useMutation();
 
-  const [form, setForm] = useState({ date: todayIso(), reason: '' });
+  const [form, setForm] = useState({ date: todayIso(), reason: '', requested_login_time: '', requested_logout_time: '' });
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -50,13 +50,22 @@ export function RegularizationPage() {
         setErrors({ reason: 'A reason is required — it is what the approver reads.' });
         return;
       }
+      if (!form.requested_login_time.trim() && !form.requested_logout_time.trim()) {
+        setErrors({ _: 'A corrected login or logout time is required.' });
+        return;
+      }
 
       const result = await run(async () => {
         try {
           // `date`, not `attendance_date`. Verified against the live endpoint.
           const created = await api.post<{ id: number; message?: string }>(
             '/api/regularization',
-            { date: form.date, reason: form.reason.trim() },
+            {
+              date: form.date,
+              reason: form.reason.trim(),
+              requested_login_time: form.requested_login_time.trim(),
+              requested_logout_time: form.requested_logout_time.trim(),
+            },
           );
           return { ok: true as const, message: created.message };
         } catch (err) {
@@ -72,7 +81,7 @@ export function RegularizationPage() {
 
       if (!result) return;
       if (result.ok) {
-        setForm({ date: todayIso(), reason: '' });
+        setForm({ date: todayIso(), reason: '', requested_login_time: '', requested_logout_time: '' });
         setNotice(result.message ?? 'Regularization request submitted.');
         requests.reload();
       } else {
@@ -129,6 +138,27 @@ export function RegularizationPage() {
                 />
                 {errors.reason ? <p className="field__error">{errors.reason}</p> : null}
               </div>
+              <div className="field">
+                <label htmlFor="r-login-time">Corrected login time</label>
+                <input
+                  id="r-login-time"
+                  type="time"
+                  value={form.requested_login_time}
+                  aria-invalid={Boolean(errors._) || undefined}
+                  onChange={(e) => setForm((f) => ({ ...f, requested_login_time: e.target.value }))}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="r-logout-time">Corrected logout time</label>
+                <input
+                  id="r-logout-time"
+                  type="time"
+                  value={form.requested_logout_time}
+                  aria-invalid={Boolean(errors._) || undefined}
+                  onChange={(e) => setForm((f) => ({ ...f, requested_logout_time: e.target.value }))}
+                />
+              </div>
+              {errors._ ? <p className="field__error">{errors._}</p> : null}
             </div>
             <button type="submit" className="btn" disabled={pending}>
               {pending ? 'Submitting…' : 'Submit request'}

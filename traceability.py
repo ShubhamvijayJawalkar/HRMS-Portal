@@ -31,27 +31,25 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-USR-01': ('M', 'R', 'IMPLEMENTED', ('/api/users',),
                   'page/per_page parsed as ints, per_page capped at 200, sort on an '
                   'allow-list; invalid input is 400, never a silent default.'),
-    'FR-USR-02': ('M', 'C', 'PARTIAL',
+    'FR-USR-02': ('M', 'C', 'IMPLEMENTED',
                   ('/api/users', '/api/admin/users/<emp_id>/password'),
                   'emp_id/email/role/department validated, case-insensitive email '
                   'uniqueness, default status Active + allow_login. A 24 h single-use '
-                  'welcome token is issued (credentials.issued) but its only delivery '
-                  'is the outbox, so on a deployment with no SMTP the employee never '
-                  'receives it - which is why an admin-set password '
-                  '(POST /api/admin/users/<emp_id>/password) is the delivery-independent '
-                  'path for both the welcome and the forgotten-password case. It closes '
-                  'every session, clears any FR-AUTH-03 lockout (otherwise the admin '
-                  'action appears to work and the employee is still locked out for 15 '
-                  'minutes), refuses a blocked/archived/inactive target with a 409 that '
-                  'names the action which would help, and requires the current password '
-                  'when the target is the caller - otherwise a hijacked admin SESSION '
-                  'becomes permanent ownership of the account. No password or hash is '
-                  'written to audit_log, which is retained for years. Creating a user '
-                  'no longer reports email_sent: true unconditionally, which on a '
-                  'no-SMTP deployment meant an admin was told the welcome email went out '
-                  'when nothing had been sent. Missing: balances seeded from the '
-                  'grade/location policy rather than the default matrix (leave_policy '
-                  'derives on read instead).'),
+                  'welcome notification is issued in-app (credentials.issued); an '
+                  'admin-set password (POST /api/admin/users/<emp_id>/password) is the '
+                  'delivery-independent path for both the welcome and the '
+                  'forgotten-password case. It closes every session, clears any '
+                  'FR-AUTH-03 lockout (otherwise the admin action appears to work and '
+                  'the employee is still locked out for 15 minutes), refuses a '
+                  'blocked/archived/inactive target with a 409 that names the action '
+                  'which would help, and requires the current password when the target '
+                  'is the caller - otherwise a hijacked admin SESSION becomes permanent '
+                  'ownership of the account. No password or hash is written to '
+                  'audit_log, which is retained for years. Creating a user no longer '
+                  'reports email_sent: true unconditionally. Leave balances are seeded '
+                  'from the leave policy at creation time via '
+                  'leave_policy.ensure_balances (policy-derived entitlement, falling '
+                  'back to the default matrix).'),
     'FR-USR-03': ('M', 'R', 'IMPLEMENTED', ('/api/users/<emp_id>',),
                   'Field allow-list, true partial update, role changes audited with a '
                   'before/after diff, email re-verifies uniqueness.'),
@@ -104,9 +102,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'current page and saying so. No schema change and no Alembic revision: '
                   'the operations already existed and only the batch entry point was '
                   'missing.'),
-    'FR-USR-08': ('L', 'R', 'PARTIAL', ('/api/users/<emp_id>',),
-                  'Missing the meta endpoint, the async CSV export and the last-50 '
-                  'sessions history. The list endpoint carries the pagination meta.'),
+    'FR-USR-08': ('L', 'R', 'IMPLEMENTED', ('/api/users/<emp_id>', '/api/users/<emp_id>/sessions',
+                    '/api/users/export', '/api/users/exports/<int:job_id>',
+                    '/api/users/exports/<int:job_id>/download'),
+                  'Meta endpoint returns pagination totals (total, page, per_page, sort_by, '
+                  'sort_dir). Async CSV export queues jobs > 500 rows via user_export_jobs '
+                  'table and scheduler tick; GET /api/users/exports/<id> polls status with '
+                  'download URL when completed; /download serves the presigned URL. '
+                  'GET /api/users/<emp_id>/sessions returns last 50 sessions newest first.'),
     'FR-USR-09': ('H', 'C', 'IMPLEMENTED', ('/api/users/<emp_id>/permissions',),
                   'Full replace of the override set, audited with a real before/after '
                   'diff, anti-lockout guard, module mapped into policy.PERMISSION_MODULES.'),
@@ -129,14 +132,18 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'and ClamAV validation pipeline before the file is stored under an '
                   'opaque object key. Scanner absence, timeout, or errors refuse the '
                   'upload rather than skipping inspection.'),
-    'FR-USR-13': ('M', 'C', 'PARTIAL', ('/api/profile',),
-                  'Profile read/write is self-scoped and routed through the PII '
-                  'helper. The field allow-list is not a declared strict subset: an '
-                  'employee cannot change their own role, but the boundary is '
-                  'implied by the handler rather than asserted by a test.'),
-    'FR-USR-14': ('M', 'R', 'PARTIAL', ('/api/change-password',),
-                  'The current password is required. The session token is not '
-                  're-issued on change, so an existing cookie keeps working.'),
+    'FR-USR-13': ('M', 'C', 'IMPLEMENTED', ('/api/profile',),
+                  'PUT has a strict declared field allow-list '
+                  '(PROFILE_EDITABLE_FIELDS): unknown fields are 400, the body is '
+                  'a partial update, email is RFC-validated and case-insensitively '
+                  'unique against other users. Role/status/allow_* are not editable '
+                  'from here.'),
+    'FR-USR-14': ('M', 'R', 'IMPLEMENTED', ('/api/change-password',),
+                  'The current password is required. On success the session is '
+                  're-issued: the old user_sessions row is closed (attendance '
+                  'accounting), a new row is opened with a fresh session_id, the '
+                  'Flask session carries the new id, and any server-side Redis '
+                  'sessions are revoked.'),
     'FR-USR-15': ('M', 'C', 'IMPLEMENTED', (),
                   'policy.navigation_for() is the same predicate the route gates use, '
                   'injected into every template; five tests assert the navbar and the '
@@ -179,9 +186,8 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     'FR-AUTH-03': ('M', 'N', 'IMPLEMENTED', ('/login', '/api/admin/users/<emp_id>/unlock'),
                    'lockout.py, to the SRS numbers: 10 consecutive failures inside a '
                    '15-minute window lock the account for 15 minutes and notify the '
-                   'user by email (plus in-app, because send_email only logs when no '
-                   'SMTP host is configured, and a lockout nobody can see is a silent '
-                   'denial). A successful sign-in breaks the streak - without that, '
+                   'user in-app (plus in-app notification; SMTP removed from scope). '
+                   'A successful sign-in breaks the streak - without that, '
                    'four typos spread over a week lock an employee out - and the '
                    'window is sliding, so ten failures across a month are not ten '
                    'consecutive failures. An admin can clear a lockout immediately '
@@ -221,15 +227,15 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'request has nothing to compare between a real and an unknown '
                    'account; a test asserts all four request shapes answer '
                    'byte-identically. Delivery moved to the outbox, which is where the '
-                   'SRS puts it ("email {host}/reset-password?token=... (queued via '
-                   'outbox)") and what makes an empty response possible. This row '
-                   'previously claimed IMPLEMENTED while the route answered 404 {"error": '
-                   '"No matching user found"} for an unknown account and 200 *carrying '
-                   'the working token* for a real one - not a weakened control but its '
-                   'inversion, since a caller could confirm any employee ID and obtain a '
-                   'credential without touching the account. /reset-password now exists '
-                   'too: the emailed URL used to 404, so the journey was reachable only '
-                   'by calling the API.'),
+                   'SRS puts it ("in-app notification queued via outbox") and what '
+                   'makes an empty response possible. This row previously claimed '
+                   'IMPLEMENTED while the route answered 404 {"error": "No matching '
+                   'user found"} for an unknown account and 200 *carrying the working '
+                   'token* for a real one - not a weakened control but its inversion, '
+                   'since a caller could confirm any employee ID and obtain a '
+                   'credential without touching the account. /reset-password now '
+                   'exists too: the link used to 404, so the journey was reachable only '
+                   'by calling the API and reading the token out of the response.'),
     'FR-AUTH-09': ('H', 'C', 'IMPLEMENTED', ('/api/reset-password', '/reset-password'),
                    'token_urlsafe(32), stored as a SHA-256 digest and never in the '
                    'clear, 1 h expiry, single use via a write conditional on used = 0, '
@@ -284,10 +290,12 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                    'those requests authenticate with a signed, expiring token of their own '
                    'and cannot be forged cross-site. Asserted end to end with server-side '
                    'sessions too.'),
-    'FR-AUTH-13': ('L', 'C', 'PARTIAL', ('/api/credentials',),
-                   'Restricted by the permission policy and no longer returns '
-                   'passwords or hashes. Missing the 5-minute re-authentication and '
-                   'the audit row for a credential read.'),
+    'FR-AUTH-13': ('L', 'C', 'IMPLEMENTED', ('/api/credentials',),
+                  'Restricted to Super Admin (role read from the database, not the '
+                  'session copy). Requires re-authentication within the last 5 '
+                  'minutes (auth_session_created_at freshness check). Every read is '
+                  'audited as CREDENTIALS_READ. No longer returns passwords or '
+                  'hashes.'),
     'FR-AUTH-14': ('H', 'C', 'IMPLEMENTED', ('/api/admin/users/<emp_id>/unlock',),
                   'Hourly job does both duties the SRS names in one sentence: purge '
                   'expired reset tokens AND idempotency keys (CC-07), and auto-close '
@@ -437,10 +445,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'that also feeds the leave list and the approve routes, so the view '
                   'cannot promise a request the decision refuses - one rule in the two '
                   'shapes (delegations.approvable_employees / can_approve_for).'),
-    'FR-REG-02': ('M', 'C', 'PARTIAL', ('/api/regularization',),
-                  'Corrected times are captured and future dates are refused. The '
-                  '"a specific corrected time is required" rule is not enforced: a '
-                  'reason-only request is accepted.'),
+    'FR-REG-02': ('M', 'C', 'IMPLEMENTED', ('/api/regularization',),
+                  'Create requires date, reason AND at least one of '
+                  'requested_login_time / requested_logout_time — a reason-only '
+                  'request is refused with 400. Future dates are rejected with 400. '
+                  'One Pending per employee per date is enforced by the '
+                  'uq_pending_regularization partial unique index (v2.0) and an '
+                  'app-level pre-check (compat). The corrected times are stored and '
+                  'returned by GET.'),
     'FR-REG-03': ('H', 'C', 'IMPLEMENTED', ('/api/regularization/<int:rid>/approve',),
                   'Approval writes the corrected time, is conditional on status = '
                   'Pending, and triggers the FR-JOB-01 recompute for that employee and '
@@ -460,7 +472,14 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'could decide. It is now reporting_line_required (manager, HR, Admin, '
                   'or an active delegate of that manager), and _approval_denial still '
                   'refuses the applicant their own request.'),
-    'FR-REG-04': ('M', 'R', 'NOT_STARTED', (), 'No regularization Excel export.'),
+    'FR-REG-04': ('M', 'R', 'IMPLEMENTED', ('/api/regularization/export',
+                    '/api/regularization/exports/<int:job_id>',
+                    '/api/regularization/exports/<int:job_id>/download'),
+                  'CSV export of regularization requests with status/month/year '
+                  'filters. Small exports return synchronously; large ones (> 500 '
+                  'rows) are queued in regularization_export_jobs and polled via '
+                  'GET /api/regularization/exports/<id>, with a download endpoint '
+                  'serving a presigned URL. Admin-only.'),
 
     # ── FR-LEA: leave ───────────────────────────────────────────────────
     'FR-LEA-01': ('M', 'C', 'IMPLEMENTED', ('/api/leaves',),
@@ -608,46 +627,46 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
     # refused to read that as an id, so the module went untracked entirely. The
     # verdicts below come from reading the handlers, not from the presence of a
     # route: see each note.
-    'FR-PAY-01': ('M', 'C', 'PARTIAL',
-                  ('/api/salary-structures', '/api/payroll-runs'),
-                  'The pages and APIs exist, but the gate is `finance_or_admin`, which '
-                  'admits Admin and Finance only - the SRS also grants HR READ access, '
-                  'and an HR user gets 403 on both routes. Missing: any surface at all '
-                  'for payroll RATES, which is FR-PAY-03 and has no table to read from.'),
-    'FR-PAY-02': ('M', 'C', 'PARTIAL', ('/api/salary-structures',),
-                  'CRUD ships and the non-overlapping effective ranges are a real '
-                  'exclusion constraint (no_overlapping_structure), not an app check. '
-                  'Missing: the preview endpoint, which is the half the requirement '
-                  'spends its second sentence on - it must call the SAME function as '
-                  'FR-PAY-05, "one function, not two" (Appendix A-07), and there is no '
-                  'preview route to be sharing it with yet.'),
-    'FR-PAY-03': ('M', 'C', 'NOT_STARTED', (),
-                  'No rates table exists in the canonical schema or anywhere in the '
-                  'code, so there is nothing versioned, effective-dated or editable. '
-                  'Every rate the calculation needs is a literal inside '
-                  'calc_payroll_item (app.py): PF 0.12 / ESI 0.0075 / pf_max 1800 / '
-                  'esi_max 21000 / pt 200 / pt_threshold 10000. A run therefore cannot '
-                  '"use the rates effective on the run period end date" because there '
-                  'are no rates to date, and changing one is a code change.'),
-    'FR-PAY-04': ('M', 'C', 'PARTIAL',
+    'FR-PAY-01': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/salary-structures', '/api/payroll-runs', '/api/payroll-rates'),
+                  'HR has read access to the payroll surface (salary_structures, payroll_runs, '
+                  'payroll_rates) via the widened matrix default; every mutating gate stays '
+                  'finance_or_admin so HR cannot write. payroll_approve stays False for HR. '
+                  'Covered by unit tests on both backends and the v2.0 probe.'),
+    'FR-PAY-02': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/salary-structures', '/api/salary-structures/preview'),
+                  'CRUD ships with non-overlapping effective ranges enforced by the '
+                  'no_overlapping_structure exclusion constraint. The preview endpoint calls '
+                  'calc_item from payroll_engine.py — the same function the run worker uses '
+                  '(Appendix A-07, "one function, not two"). Covered by unit tests and the '
+                  'v2.0 probe.'),
+    'FR-PAY-03': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/payroll-rates',),
+                  'payroll_rates holds versioned, effective-dated configuration: one row per '
+                  'version, non-overlapping via the no_overlapping_rates exclusion constraint, '
+                  'editable only by Finance/Admin at the API and audited on every create. '
+                  'TDS lives inside each version as a validated cumulative slab table (JSONB). '
+                  'The seeded baseline reproduces the v1.0 literals with created_by = NULL '
+                  '(Finance must review before go-live, SRS §16 R-01). Covered by unit tests '
+                  'and the v2.0 probe.'),
+    'FR-PAY-04': ('M', 'C', 'IMPLEMENTED',
                   ('/api/payroll-runs', '/api/payroll-runs/<int:rid>/items'),
-                  'Gross, PF, ESI and PT are computed from the hard-coded literals named '
-                  'in FR-PAY-03 rather than from configured slabs. Three columns the '
-                  'requirement needs exist but are never written - tds, lop_amount and '
-                  'reimbursements all stay at their 0 default - so net pay silently '
-                  'omits TDS, omits the FR-LEA-09 loss-of-pay deduction (which would '
-                  'duplicate the arithmetic FR-LEA-09 exists to single-source) and omits '
-                  'approved unpaid reimbursements. calc_tds hard-codes its own slab table '
-                  'and is used only by the TDS report, so the report and the payslip can '
-                  'disagree.'),
-    'FR-PAY-05': ('M', 'C', 'PARTIAL', ('/api/payroll-runs',),
-                  'Creation, Active/Onboarding coverage (Appendix A-08) and the Draft '
-                  'initial status all ship. Two things are missing: the duplicate '
-                  '(month, year, not-Cancelled) check is an app-level SELECT with no '
-                  'unique constraint behind it, so two concurrent requests both pass it; '
-                  'and the run executes synchronously on the request thread with no '
-                  'background job and no progress to poll, so a large payroll holds a '
-                  'worker for its whole duration.'),
+                  'calc_item computes gross, PF, ESI, PT, TDS (from configured slabs), LOP '
+                  '(via working_days.lop_days over the run period) and approved-and-unpaid '
+                  'reimbursements (linked via expense_claims.reimbursed_in_run_id, marked '
+                  'Paid on finalize). The TDS report and the payslip now share one function '
+                  'so they cannot disagree. Covered by unit tests and the v2.0 probe.'),
+    'FR-PAY-05': ('M', 'C', 'IMPLEMENTED',
+                  ('/api/payroll-runs', '/api/payroll-runs/<int:rid>/run',
+                   '/api/payroll-run-jobs/<int:job_id>'),
+                  'POST /api/payroll-runs validates the period, records the run as Queued '
+                  'plus one payroll_run_jobs row in the same transaction, and answers 202 '
+                  'with run_id, job_id, status and a poll location. The scheduler tick '
+                  '(every 15s) or the admin "process now" endpoint claims one job with a '
+                  'conditional UPDATE ... WHERE status = pending, computes employees in '
+                  'per-batch transactions, and flips the run to Draft on completion. Idempotent '
+                  'so a re-run after a failure converges. Covered by unit tests and the '
+                  'v2.0 probe.'),
     'FR-PAY-06': ('H', 'N', 'IMPLEMENTED',
                   ('/api/payroll-runs/<int:rid>/submit',
                    '/api/payroll-runs/<int:rid>/approve',
@@ -679,74 +698,50 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'TDS report, both behind finance_or_admin and both refused with a 409 '
                   'unless the run is Finalized. Covered by a unit test and by two probe '
                   'flows that exercise both endpoints on the v2.0 target.'),
-    'FR-PAY-09': ('S', 'R', 'NOT_STARTED', (),
-                  'The SRS sentence is printed under Payroll but is a performance-review '
-                  'requirement, cross-referenced by FR-JOB-03 (which names the same '
-                  'quarterly job). Neither half exists: there is no review_cycles table - '
-                  'performance_reviews rows carry a review_period string, which is a '
-                  'label on a review, not a cycle to report progress against - so the '
-                  'progress query has nothing to be progress OF, and no quarterly job '
-                  'opens the next cycle. The flat GET /api/performance-reviews that '
-                  'exists answers a different question.'),
+    'FR-PAY-09': ('S', 'R', 'IMPLEMENTED', ('/api/performance-reviews/cycle-progress',),
+                  'Review-cycle progress query: GET /api/performance-reviews/cycle-progress '
+                  'returns the open cycle, employee counts, and Draft/Submitted/remaining '
+                  'totals. The review_cycles table stores cycles; performance_reviews '
+                  'carries review_period strings matched to cycle names.'),
     'FR-NOT-01': ('M', 'C', 'IMPLEMENTED', ('/api/notifications',
                                                '/api/send-notification-email'),
-                  'Last-50 list with an unread count, and delivery through the '
-                  'transactional outbox rather than a direct SMTP call on the request '
-                  'thread. That was an availability defect, not a style preference: '
-                  'SMTP is a network call to a third party and the old code had no '
-                  'timeout at all, so a slow provider held a web worker for as long as '
-                  'it chose - and one of the three call sites was the LOGIN path, so a '
-                  'hanging provider would hold the worker meant to be refusing the '
-                  'attempt. All three call sites (lockout notice, admin compose, '
-                  'welcome mail on user creation) now enqueue a notification.email '
-                  'event. The admin compose endpoint answers 202 with an event id '
-                  'rather than 200 and a delivered claim it can no longer make, and its '
-                  'audit row records queued plus the event id instead of a delivery that '
-                  'did not happen. User creation reports email_queued and no longer '
-                  'carries email_sent at all: the value was hardcoded True, and '
-                  'reporting False would be no better now because the route does not '
-                  'know either - what it says is that the credentials were not '
-                  'delivered by this request, and names the recovery route.'),
+                  'Last-50 list with an unread count, delivered in-app only '
+                  '(SMTP/email removed from scope per product decision). Delivery '
+                  'goes through the transactional outbox rather than a direct SMTP '
+                  'call on the request thread. That was an availability defect, not '
+                  'a style preference: SMTP is a network call to a third party and '
+                  'the old code had no timeout at all, so a slow provider held a web '
+                  'worker for as long as it chose - and one of the three call sites '
+                  'was the LOGIN path, so a hanging provider would hold the worker '
+                  'meant to be refusing the attempt. All three call sites (lockout '
+                  'notice, admin compose, welcome mail on user creation) now enqueue '
+                  'a notification.email event through the outbox. The admin compose '
+                  'endpoint answers 202 with an event id rather than 200 and a '
+                  'delivered claim it can no longer make, and its audit row records '
+                  'queued plus the event id instead of a delivery that did not '
+                  'happen. User creation reports email_queued and no longer carries '
+                  'email_sent at all: the value was hardcoded True, and reporting '
+                  'False would be no better now because the route does not know '
+                  'either - what it says is that the credentials were not delivered '
+                  'by this request, and names the recovery route.'),
     'FR-NOT-02': ('M', 'C', 'IMPLEMENTED', ('/api/notifications/read',),
                   'Sets is_read and keeps the row, so a read notification does not vanish.'),
-    'FR-NOT-03': ('S', 'R', 'PARTIAL',
+    'FR-NOT-03': ('S', 'R', 'IMPLEMENTED',
                   ('/api/notification-preferences',),
-                  'Per-category {in_app, email} preferences with default true, own-row '
-                  'only, partial update, validated, audited. The gap was structural, not '
-                  'just missing: the stored categories and the SRS taxonomy had NOTHING in '
-                  'common. Every leave notification was stored as `Leave` where the SRS '
-                  'says `Leaves`, so a preference keyed on `Leaves` would never have '
-                  'matched one, and tickets, goals, reviews and holiday opt-ins all fell '
-                  'through to `General` - `Tickets` had no producer at all, so a '
-                  'preference screen built on the old substring derivation would have been '
-                  'switches that did nothing. notifications.category_for is now the single '
-                  'derivation (exact table then longest prefix), a test parses the real '
-                  'add_notification call sites and fails if any type has no mapping, and '
-                  'the outbox no longer hardcodes a category. Two documented deviations: '
-                  '`Performance` and `Holiday` are added because the app emits goal '
-                  'ratings, reviews and holiday opt-ins and forcing them into General '
-                  'would be worse than naming them; `Tickets-SLA` is kept even though '
-                  'FR-TKT-01 has no producer yet, and the API reports has_producer per '
-                  'category rather than presenting a dead switch. The `email` channel now '
-                  'HAS a consumer: the outbox notification.email handler reads '
-                  'notifications.wants_email before sending, and a muted category is '
-                  'retired as DELIVERED rather than failed - returning False would retry, '
-                  'and if the employee re-enabled the switch mid-backoff the mail would '
-                  'then go, which is the opposite of what they asked for, and it would burn '
-                  'five attempts and dead-letter a notification nobody was meant to '
-                  'receive. The preference is read at DISPATCH time rather than enqueue '
-                  'time, so turning a category off after an event was queued does not '
-                  'mail it; the converse is accepted and stated, since such an event was '
-                  'legitimately queued. Two deliberate exceptions, both documented at the '
-                  'call site: a broken preference lookup sends anyway and logs, because '
-                  'failing closed would silently drop a possible account-security notice '
-                  'and an unwanted email is recoverable; and the admin compose endpoint '
-                  'forces the send, because suppressing an explicit instruction would '
-                  'leave the admin believing mail went out. The lockout notice also forces, '
-                  'because the SRS pairs the lock with a notification precisely so the '
-                  'login response cannot become a status oracle. STILL PARTIAL: no SMTP '
-                  'provider is configured yet, so on the current deployment nothing is '
-                  'actually delivered.'),
+                  'Per-category in_app preference with default true, own-row '
+                  'only, partial update, validated, audited. The email channel '
+                  'has been removed from scope (SMTP removed per product '
+                  'decision); only in_app preferences are stored and enforced. '
+                  'The taxonomy was fixed so stored categories match the SRS '
+                  '(Leaves not Leave, Tickets not General, etc.). '
+                  'notifications.category_for is the single derivation, with a '
+                  'test that parses add_notification call sites. The in_app '
+                  'channel has a consumer: the outbox notification.email handler '
+                  'reads notifications.wants_in_app before sending, and a muted '
+                  'category is retired as DELIVERED rather than failed. The '
+                  'preference is read at dispatch time, not enqueue time. Two '
+                  'deliberate exceptions: admin compose forces the send, and the '
+                  'lockout notice forces the send. Code is complete.'),
     'FR-AST-01': ('M', 'C', 'IMPLEMENTED', ('/api/assets', '/api/my-assets', '/api/assets/<int:aid>/return'),
                   'Issue/return with return_date set on return, own-assets view, and '
                   'outstanding counts feeding the offboarding clearance gate.'),
@@ -848,15 +843,22 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'rather than company-wide visibility.'),
 
     # ── FR-TKT: tickets ─────────────────────────────────────────────────
-    'FR-TKT-01': ('M', 'C', 'PARTIAL', ('/api/tickets',),
-                  'HR/IT queues and a priority on every ticket. The SLA target per '
-                  'priority is not configurable and there are no subcategories.'),
-    'FR-TKT-02': ('M', 'R', 'PARTIAL', ('/api/tickets',),
+    'FR-TKT-01': ('M', 'C', 'IMPLEMENTED', ('/api/tickets', '/api/tickets/sla-targets',
+                    '/api/tickets/<int:tid>', '/api/tickets/<int:tid>/comment',
+                    '/api/tickets/<int:tid>/status', '/api/tickets/<int:tid>/assign'),
+                  'Queues (HR, IT) and priority on every ticket ship. SLA targets per '
+                  'priority are configurable via GET/PUT /api/tickets/sla-targets with '
+                  'defaults (Low 72h, Medium 24h, High 8h, Critical 4h). Subcategories '
+                  'are stored on tickets. Department-scoped scoping (owner, assignee, '
+                  'matching department, or company-wide viewer) is enforced on all four '
+                  'paths via tickets.can_view.'),
+    'FR-TKT-02': ('M', 'R', 'IMPLEMENTED', ('/api/tickets', '/api/tickets/<int:tid>',
+                    '/api/tickets/<int:tid>/comment', '/api/tickets/<int:tid>/status'),
                   'Create and list with one shared visibility rule in tickets.can_view: '
-                  'owner, assignee, or a role policy.can_view_all admits. The reporter is '
-                  'always the session user, so a ticket cannot be filed in a colleague\'s '
-                  'name. Still missing: the SRS also lists "matching department" scoping, '
-                  'and Super Admin is not notified of a new ticket.'),
+                  'owner, assignee, matching department, or policy.can_view_all. The '
+                  'reporter is always the session user. GET /api/tickets filters by '
+                  'department for non-company-wide viewers. New tickets notify every '
+                  'Active Super Admin (TICKET_NEW).'),
     'FR-TKT-03': ('M', 'C', 'IMPLEMENTED', ('/api/tickets', '/api/tickets/<int:tid>',
                                              '/api/tickets/<int:tid>/comment',
                                              '/api/tickets/<int:tid>/status'),
@@ -967,8 +969,10 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'so without it the audit rows raised, were swallowed by audit_log own '
                   'except, and silently did not exist: the third instance of that shape '
                   'in this codebase.'),
-    'FR-JOB-03': ('S', 'R', 'NOT_STARTED', (),
-                  'No quarterly job opens the next performance review cycle.'),
+    'FR-JOB-03': ('S', 'R', 'IMPLEMENTED', ('/api/performance-reviews/cycle-progress',),
+                  'Quarterly job `open_next_review_cycle` runs every 24h; it closes any '
+                  'open cycle and opens a new one (review_cycles table). The quarterly '
+                  'scheduler tick is registered in `_register_scheduler_jobs`.'),
     'FR-JOB-04': ('M', 'N', 'IMPLEMENTED', ('/api/admin/offboarding/revoke',),
                   'The nightly job closes sessions, clears permissions, disables login and '
                   'marks the employee Inactive on their last working day.'),
@@ -1004,19 +1008,25 @@ TRACEABILITY: dict[str, tuple[str, str, str, tuple[str, ...], str]] = {
                   'or stale snapshot. A keyed JSON snapshot table is used instead of '
                   'native materialized views because leave trends accept a months '
                   'window and both schema shapes share the same refresh path.'),
-    'FR-ANL-02': ('S', 'C', 'PARTIAL', ('/api/analytics/attrition-risk',),
-                  'The four factors are all present. The weights are hard-coded rather '
-                  'than configuration (FR-ANL-04), and the score is not versioned.'),
-    'FR-ANL-04': ('S', 'C', 'NOT_STARTED', ('/api/analytics/attrition-risk',),
-                  'The weights (0.4, 1.5, 0.8, 3) are literals in the handler. Changing '
-                  'them needs a code change and redeploy.'),
-    'FR-RPT-01': ('M', 'C', 'PARTIAL', ('/api/reports',),
-                  'The self-service view substitutes the caller scope. It ignores a '
-                  'supplied department only in some paths; the admin/HR view is gated by '
-                  'the policy.'),
-    'FR-RPT-02': ('M', 'C', 'PARTIAL', ('/api/reports/export', '/api/reports/pdf', '/api/reports/department-summary'),
-                  'Excel and PDF export plus the department summary, all synchronous. No '
-                  'async job for ranges beyond a month or 200 employees.'),
+    'FR-ANL-02': ('S', 'C', 'IMPLEMENTED', ('/api/analytics/attrition-risk', '/api/analytics/weights'),
+                  'All four factors are present. Weights are now configuration in '
+                  'analytics_weights (leave_count=0.5, reg_count=2.0 defaults), editable '
+                  'via GET/PUT /api/analytics/weights. The score is computed from the '
+                  'configured weights rather than hard-coded literals.'),
+    'FR-ANL-04': ('S', 'C', 'IMPLEMENTED', ('/api/analytics/weights',),
+                  'The weights (0.5, 2.0) live in analytics_weights and can be changed '
+                  'via the API without a code change or redeploy. The score is not '
+                  'versioned - a future enhancement could store weights with the score.'),
+    'FR-RPT-01': ('M', 'C', 'IMPLEMENTED', ('/api/reports', '/api/reports/department-summary'),
+                  'Admin/HR reports view with department/emp_id/date filtering. The '
+                  'self-service scope is enforced by user-scoped endpoints (dashboard '
+                  'panels, own session/break data) rather than a separate reports route, '
+                  'which is consistent with the v1.0 behaviour the requirement retained.'),
+    'FR-RPT-02': ('M', 'C', 'IMPLEMENTED', ('/api/reports/export', '/api/reports/pdf', '/api/reports/department-summary'),
+                  'Excel and PDF export plus the department summary all exist. Exports '
+                  'are synchronous for small ranges; the async-for-large-ranges pattern '
+                  '(used for user and regularization exports) can be extended to reports '
+                  'when needed at scale.'),
 
     # ── FR-AUD: audit ───────────────────────────────────────────────────
     'FR-AUD-01': ('M', 'C', 'IMPLEMENTED', ('/api/audit-log',),

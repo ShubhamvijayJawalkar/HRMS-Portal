@@ -81,24 +81,29 @@ class TicketError(ValueError):
         self.status = status
 
 
-def can_view(actor, ticket) -> bool:
+def can_view(actor, ticket, reporter_department=None) -> bool:
     """The FR-TKT-02/03 visibility rule, in one place.
 
     ``actor`` is the ``policy.current_actor`` dict; ``ticket`` is
-    ``(reporter_emp_id, assigned_to)``. A role that ``policy.can_view_all`` admits
-    sees everything, so the callers pass the already-resolved decision for that.
+    ``(reporter_emp_id, assigned_to)``. ``reporter_department`` is the reporter's
+    department for the "matching department" clause. A role that
+    ``policy.can_view_all`` admits sees everything, so the callers pass the
+    already-resolved decision for that.
     """
     if actor is None:
         return False
     if actor.get('emp_id') == ticket[0]:
         return True
+    # Matching department: anyone in the reporter's department can see the ticket.
+    if reporter_department and actor.get('department') == reporter_department:
+        return True
     # An assignee who cannot see the ticket cannot work on it.
     return bool(ticket[1]) and actor.get('emp_id') == ticket[1]
 
 
-def check_visibility(actor, ticket, *, can_view_all: bool) -> None:
+def check_visibility(actor, ticket, *, can_view_all: bool, reporter_department=None) -> None:
     """Raise a 403 unless the actor may see (and therefore act on) the ticket."""
-    if can_view_all or can_view(actor, ticket):
+    if can_view_all or can_view(actor, ticket, reporter_department=reporter_department):
         return
     raise TicketError('You do not have access to this ticket', 403)
 
