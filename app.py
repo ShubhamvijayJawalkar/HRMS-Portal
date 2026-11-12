@@ -718,8 +718,8 @@ def init_db():
             pass
     if _is_public_target_schema():
         conn.execute(
-            "UPDATE break_types SET requires_approval = TRUE "
-            "WHERE LOWER(break_type) = 'lunch' AND requires_approval = FALSE"
+            "UPDATE break_types SET requires_approval = 1 "
+            "WHERE LOWER(break_type) = 'lunch' AND requires_approval = 0"
         )
     else:
         conn.execute(
